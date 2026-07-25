@@ -35,12 +35,12 @@
 /* ------------------------- Common PID settings --------------------------- */
 
 /* Control loop sample time in seconds (20 ms = 50 Hz) */
-#define CONTROL_SAMPLE_TIME_S       0.020f
+#define CONTROL_SAMPLE_TIME_S       0.010f
 
 /* Derivative low-pass filter time constant in seconds.
  * Rule of thumb: keep it a few times larger than the sample time.
  * Must be > 0 or the derivative term is unfiltered. */
-#define CONTROL_DERIV_TAU_S         0.060f
+#define CONTROL_DERIV_TAU_S         0.020f
 
 /* Maximum motor speed command the controllers may produce (0..255). */
 #define CONTROL_MAX_SPEED           200.0f
@@ -54,21 +54,21 @@
 /* ====================== STRAIGHTLINE: DISTANCE PID ======================= */
 /* Drives average travelled distance (cm) to the target distance.            */
 
-#define STRAIGHT_DIST_KP            12.0f
+#define STRAIGHT_DIST_KP            20.0f
 #define STRAIGHT_DIST_KI            0.0f
-#define STRAIGHT_DIST_KD            1.5f
+#define STRAIGHT_DIST_KD            0.0f
 
 /* Integrator clamp, in motor speed units */
-#define STRAIGHT_DIST_INT_LIMIT     60.0f
+#define STRAIGHT_DIST_INT_LIMIT     50.0f
 
 
 /* ====================== STRAIGHTLINE: HEADING PID ======================== */
 /* Holds (left_count - right_count) at zero so the robot tracks straight.    */
 /* Measurement is in RAW ENCODER TICKS, so these gains are small.            */
 
-#define STRAIGHT_HEADING_KP         0.05f
-#define STRAIGHT_HEADING_KI         0.0f
-#define STRAIGHT_HEADING_KD         0.005f
+#define STRAIGHT_HEADING_KP         0.5f
+#define STRAIGHT_HEADING_KI         0.025f
+#define STRAIGHT_HEADING_KD         0.00f
 
 /* Steering authority clamp, in motor speed units */
 #define STRAIGHT_HEADING_LIMIT      80.0f

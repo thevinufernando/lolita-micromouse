@@ -55,10 +55,10 @@
 #define TEST_SQUARE             7   /* Straight + turn combined.             */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST             TEST_STRAIGHT_FORWARD
+#define ACTIVE_TEST             TEST_STRAIGHT_FWD_BACK
 
 /* ---- Test parameters ---- */
-#define TEST_DISTANCE_CM        20.0f   /* Straightline test distance        */
+#define TEST_DISTANCE_CM        100.0f   /* Straightline test distance        */
 #define TEST_ANGLE_DEG          90.0f   /* Turn test angle                   */
 #define TEST_SQUARE_SIDE_CM     18.0f   /* Square test side length           */
 #define TEST_OPEN_LOOP_SPEED    120     /* Open loop test speed (0-255)      */
