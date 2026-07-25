@@ -21,7 +21,7 @@ void MotorDriver_Disable(void) {
 }
 
 // Helper function to map speed (0-255) to PWM value
-static inline uint16_t mapSpeedToPWM(uint8_t speed);
+static uint16_t mapSpeedToPWM(uint8_t speed);
 
 // ================= HELPER FUNCTIONS Declarations for Forward and Backward runs =================
 static void LeftMotor_Forward(uint16_t pwm);
@@ -117,11 +117,66 @@ void MotorRightTurn_runSpeed(uint8_t speed) {
     }
 }
 
+//Clamp a signed speed request to [-MOTOR_SPEED_MAX, +MOTOR_SPEED_MAX]
+static uint8_t clampSignedSpeed(float speed, int8_t *out_sign) {
+
+    //Resolve direction before taking the magnitude
+    *out_sign = (speed < 0.0f) ? -1 : 1;
+
+    float magnitude = (speed < 0.0f) ? -speed : speed;
+
+    if (magnitude > (float)MOTOR_SPEED_MAX) magnitude = (float)MOTOR_SPEED_MAX;
+
+    return (uint8_t)magnitude;
+}
+
+//Drive each motor with a signed speed (-255..255); sign selects direction per wheel
+void Motor_runSignedSpeed(float leftspeed, float rightspeed) {
+
+    int8_t left_sign;
+    int8_t right_sign;
+
+    uint8_t left_magnitude = clampSignedSpeed(leftspeed, &left_sign);
+    uint8_t right_magnitude = clampSignedSpeed(rightspeed, &right_sign);
+
+    uint16_t leftpwm = mapSpeedToPWM(left_magnitude);
+    uint16_t rightpwm = mapSpeedToPWM(right_magnitude);
+
+    //Left wheel
+    if (left_magnitude == 0) {
+        LeftMotor_Stop();
+    }
+    else if (left_sign > 0) {
+        LeftMotor_Forward(leftpwm);
+    }
+    else {
+        LeftMotor_Backward(leftpwm);
+    }
+
+    //Right wheel
+    if (right_magnitude == 0) {
+        RightMotor_Stop();
+    }
+    else if (right_sign > 0) {
+        RightMotor_Forward(rightpwm);
+    }
+    else {
+        RightMotor_Backward(rightpwm);
+    }
+}
+
+//Brake both motors
+void Motor_Brake(void) {
+
+    LeftMotor_Stop();
+    RightMotor_Stop();
+}
+
 // Helper function to map speed (0-255) to PWM value
-static inline uint16_t mapSpeedToPWM(uint8_t speed) {
+static uint16_t mapSpeedToPWM(uint8_t speed) {
 
     // Scale 0–255 to 0–MOTOR_PWM_MAX
-    return (uint16_t)((speed * MOTOR_PWM_MAX) / MOTOR_SPEED_MAX);
+    return (uint16_t)(((uint32_t)speed * MOTOR_PWM_MAX) / MOTOR_SPEED_MAX);
 }
 
 // ================= HELPER FUNCTIONS for Forward and Backward runs =================

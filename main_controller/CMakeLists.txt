@@ -45,11 +45,25 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+
+    # Motor driver
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Motors/DRV8833.c
+
+    # Encoder odometry
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Encoders/encoders.c
+
+    # Low level control
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/PID.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/straightline_controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/turn_controller.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Motors
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Encoders
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Control/LowLevel
 )
 
 # Add project symbols (macros)
@@ -65,4 +79,5 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+    m   # math library, for fabsf() in the controllers
 )

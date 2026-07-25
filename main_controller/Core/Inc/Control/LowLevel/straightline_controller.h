@@ -4,17 +4,19 @@
 #include "encoders.h"
 #include "DRV8833.h"
 #include "PID.h"
+#include "control_config.h"
 #include <math.h>
 #include "main.h"
 
-#define DISTANCE_TOLERANCE_CM 0.7f
+#define DISTANCE_TOLERANCE_CM STRAIGHT_TOLERANCE_CM
 
 typedef enum {
 
     //Running modes
     STRAIGHTLINE_IDLE = 0,
     STRAIGHTLINE_RUNNING,
-    STRAIGHTLINE_COMPLETED
+    STRAIGHTLINE_COMPLETED,
+    STRAIGHTLINE_TIMEOUT
 
 } StraightlineState_t;
 
@@ -39,8 +41,12 @@ extern float basespeed;
 extern float steering;
 
 //Function Prototypes
-void StraightlineController_Init(Controller_t controller);
-void runForwardDistance(float distance_cm);
-void runBackwardDistance(float distance_cm);
+
+//Initialise using the gains from control_config.h
+void StraightlineController_Init(void);
+
+//Blocking moves. Return 1 on success, 0 if the safety timeout fired.
+uint8_t runForwardDistance(float distance_cm);
+uint8_t runBackwardDistance(float distance_cm);
 
 #endif /* STRAIGHTLINE_CONTROLLER_H */

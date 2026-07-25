@@ -14,7 +14,9 @@
 #define WHEEL_GEAR_RATIO 1.25f
 #define WHEEL_DIAMETER_MM 32.0f
 
+#ifndef PI
 #define PI 3.14159265358979323846f
+#endif
 
 // Encoder data structure
 typedef struct {

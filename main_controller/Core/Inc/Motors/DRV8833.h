@@ -19,4 +19,9 @@ void MotorBackward_runSpeed(uint8_t leftspeed, uint8_t rightspeed);
 void MotorLeftTurn_runSpeed(uint8_t speed);
 void MotorRightTurn_runSpeed(uint8_t speed);
 
+//Signed-speed interface used by the closed-loop controllers.
+//Sign selects direction per wheel, so a PID output may cross zero safely.
+void Motor_runSignedSpeed(float leftspeed, float rightspeed);
+void Motor_Brake(void);
+
 #endif /* DRV8833_H_ */

@@ -23,7 +23,22 @@
             "liveWatch": {
                 "enabled": true,
                 "expressions": [
-                    
+                    "tm_final_avg_cm",
+                    "tm_final_error_cm",
+                    "tm_drift_cnt",
+                    "tm_final_left_cm",
+                    "tm_final_right_cm",
+                    "tm_final_left_cnt",
+                    "tm_final_right_cnt",
+                    "tm_move_count",
+                    "tm_cycle_count",
+                    "tm_timeout_count",
+                    "tm_last_ok",
+                    "basespeed",
+                    "steering",
+                    "turn_target_distance",
+                    "turn_current_distance",
+                    "turn_basespeed"
                 ]
             }
         }
