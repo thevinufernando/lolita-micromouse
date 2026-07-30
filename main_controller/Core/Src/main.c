@@ -24,9 +24,12 @@
 #include "encoders.h"
 #include "DRV8833.h"
 #include "PID.h"
+#include "EKF.h"
 #include "control_config.h"
 #include "straightline_controller.h"
 #include "turn_controller.h"
+#include "ICM42688.h"
+#include "dwt_timer.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,15 +56,18 @@
 #define TEST_TURN_RIGHT_90      5   /* Repeated 90 deg right pivots.         */
 #define TEST_TURN_360           6   /* Full rotation. Best turn accuracy check. */
 #define TEST_SQUARE             7   /* Straight + turn combined.             */
+#define TEST_IMU_RAW            8   /* No motion. Raw IMU + gyro sign check. */
+#define TEST_YAW_ESTIMATE       9   /* No motion. Rotate by hand, watch EKF. */
+#define TEST_GYRO_BIAS          10  /* No motion. Bias + drift measurement.  */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST             TEST_STRAIGHT_FWD_BACK
+#define ACTIVE_TEST             TEST_TURN_LEFT_90
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM        100.0f   /* Straightline test distance        */
 #define TEST_ANGLE_DEG          90.0f   /* Turn test angle                   */
 #define TEST_SQUARE_SIDE_CM     18.0f   /* Square test side length           */
-#define TEST_OPEN_LOOP_SPEED    120     /* Open loop test speed (0-255)      */
+#define TEST_OPEN_LOOP_SPEED    120    /* Open loop test speed (0-255)      */
 
 /* Pause between individual moves, in ms. Lets the chassis settle so each
  * move starts from rest and the encoder reading is unambiguous. */
@@ -69,6 +75,12 @@
 
 /* Pause between full test cycles, in ms. Long enough to reposition the robot. */
 #define TEST_CYCLE_PAUSE_MS     3000U
+
+/* How long TEST_YAW_ESTIMATE observes the filter per cycle, in ms. */
+#define TEST_YAW_OBSERVE_MS     10000U
+
+/* How long TEST_GYRO_BIAS lets yaw drift before reporting, in ms. */
+#define TEST_BIAS_DRIFT_MS      10000U
 
 /* USER CODE END PD */
 
@@ -78,6 +90,8 @@
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+SPI_HandleTypeDef hspi1;
+
 TIM_HandleTypeDef htim1;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
@@ -105,6 +119,23 @@ volatile uint32_t tm_move_count     = 0;      /* completed moves             */
 volatile uint32_t tm_timeout_count  = 0;      /* moves that hit the timeout  */
 volatile uint8_t  tm_last_ok        = 1;      /* 1 = success, 0 = timeout    */
 
+/* ---- IMU / EKF telemetry ---- */
+volatile uint8_t  tm_imu_ok         = 0;      /* 1 = IMU up, 0 = enc only    */
+volatile float    tm_gyro_z_dps     = 0.0f;   /* raw gyro Z, deg/s           */
+volatile float    tm_accel_x_g      = 0.0f;
+volatile float    tm_accel_y_g      = 0.0f;
+volatile float    tm_accel_z_g      = 0.0f;
+volatile float    tm_imu_temp_c     = 0.0f;
+
+volatile float    tm_yaw_deg        = 0.0f;   /* fused yaw after the move    */
+volatile float    tm_yaw_error_deg  = 0.0f;   /* target - fused, deg         */
+volatile float    tm_enc_yaw_deg    = 0.0f;   /* encoder-only yaw, deg       */
+volatile float    tm_fusion_gap_deg = 0.0f;   /* fused - encoder, deg        */
+volatile float    tm_gyro_bias_dps  = 0.0f;   /* EKF bias estimate, deg/s    */
+volatile float    tm_yaw_sigma_deg  = 0.0f;   /* EKF yaw 1-sigma, deg        */
+volatile float    tm_bias_drift_deg = 0.0f;   /* yaw drift while stationary  */
+volatile uint32_t tm_ekf_rejects    = 0;      /* gated-out encoder updates   */
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -113,6 +144,7 @@ static void MX_GPIO_Init(void);
 static void MX_TIM1_Init(void);
 static void MX_TIM2_Init(void);
 static void MX_TIM3_Init(void);
+static void MX_SPI1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -153,6 +185,18 @@ static void Telemetry_Capture(float target_cm, uint8_t ok)
   tm_move_count++;
 
   if (!ok) tm_timeout_count++;
+}
+
+/* Capture the yaw estimator state after a turn. `target_deg` is the signed
+ * commanded angle, so the error is directly readable. */
+static void Telemetry_CaptureYaw(float target_deg)
+{
+  tm_yaw_deg        = TurnController_GetYawDeg();
+  tm_yaw_error_deg  = target_deg - tm_yaw_deg;
+  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
+  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
+  tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
+  tm_ekf_rejects    = turn_reject_count;
 }
 
 /* Pause between moves, holding the motors braked. */
@@ -273,6 +317,7 @@ TEST_FN void Test_TurnLeft(void)
 
   uint8_t ok = turnLeftAngle(TEST_ANGLE_DEG);
   Telemetry_Capture(0.0f, ok);
+  Telemetry_CaptureYaw(+TEST_ANGLE_DEG);
 }
 
 TEST_FN void Test_TurnRight(void)
@@ -281,6 +326,7 @@ TEST_FN void Test_TurnRight(void)
 
   uint8_t ok = turnRightAngle(TEST_ANGLE_DEG);
   Telemetry_Capture(0.0f, ok);
+  Telemetry_CaptureYaw(-TEST_ANGLE_DEG);
 }
 
 /* ---------------------------------------------------------------------------
@@ -296,6 +342,7 @@ TEST_FN void Test_Turn360(void)
 
     uint8_t ok = turnLeftAngle(90.0f);
     Telemetry_Capture(0.0f, ok);
+    Telemetry_CaptureYaw(+90.0f);
 
     Test_Pause(TEST_MOVE_PAUSE_MS);
   }
@@ -320,9 +367,107 @@ TEST_FN void Test_Square(void)
 
     ok = turnRightAngle(90.0f);
     Telemetry_Capture(0.0f, ok);
+    Telemetry_CaptureYaw(-90.0f);
 
     Test_Pause(TEST_MOVE_PAUSE_MS);
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * TEST 8: Raw IMU readout. Motors stay off.
+ *
+ * RUN THIS FIRST after wiring the IMU. Two things to confirm:
+ *
+ *  1. tm_imu_ok must be 1. If it is 0 the WHO_AM_I check failed: check the
+ *     SPI wiring, the IMU_NCS pin, and that CS idles HIGH.
+ *
+ *  2. GYRO SIGN. Rotate the robot ANTICLOCKWISE (to its left) by hand and
+ *     watch tm_gyro_z_dps. It must read POSITIVE. If it reads negative, set
+ *     IMU_GYRO_Z_SIGN to -1.0f in control_config.h and rebuild. Every turn
+ *     depends on this being right, so do not skip it.
+ *
+ * With the robot level and still, tm_accel_z_g should read about 1.0 and
+ * tm_gyro_z_dps should sit near zero (a bias of a few tenths is normal).
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_ImuRaw(void)
+{
+  Motor_Brake();
+
+  ICM42688_t imu;
+
+  if (ICM42688_ReadData(&imu) == IMU_OK)
+  {
+    /* Report the raw sensor value, NOT sign-corrected, so the sign check
+     * above is meaningful. */
+    tm_gyro_z_dps = imu.gz;
+    tm_accel_x_g  = imu.ax;
+    tm_accel_y_g  = imu.ay;
+    tm_accel_z_g  = imu.az;
+    tm_imu_temp_c = imu.temperature;
+  }
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(50);
+}
+
+/* ---------------------------------------------------------------------------
+ * TEST 9: Yaw estimator check. Motors stay off.
+ *
+ * Runs the full fusion loop for TEST_YAW_OBSERVE_MS while you rotate the
+ * robot by hand, then holds the result so you can read it.
+ *
+ * Watch:
+ *   tm_yaw_deg        fused yaw. Rotate the robot exactly 90 deg
+ *                     anticlockwise by hand; this should read about +90.
+ *   tm_enc_yaw_deg    encoder-only yaw over the same motion.
+ *   tm_fusion_gap_deg how far the fusion moved away from raw odometry.
+ *                     Large values mean the wheels slipped and the gyro
+ *                     corrected for it, which is the whole point.
+ *   tm_ekf_rejects    encoder updates rejected as slip.
+ *
+ * Return the robot to its starting heading and tm_yaw_deg should come back
+ * to roughly zero.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_YawEstimate(void)
+{
+  LED_Blink(1, 150, 150);
+
+  TurnController_ObserveYaw(TEST_YAW_OBSERVE_MS);
+
+  tm_yaw_deg        = TurnController_GetYawDeg();
+  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
+  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
+  tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
+  tm_ekf_rejects    = turn_reject_count;
+}
+
+/* ---------------------------------------------------------------------------
+ * TEST 10: Gyro bias and drift. Motors stay off, ROBOT MUST NOT MOVE.
+ *
+ * Recalibrates the bias, then lets the estimator run untouched for
+ * TEST_BIAS_DRIFT_MS and reports how far yaw wandered.
+ *
+ * tm_bias_drift_deg is the headline number: total yaw drift over the window
+ * while perfectly stationary. Under ~1 deg per 10 s is healthy. If it is
+ * much worse, the bias calibration was taken while the robot was moving, or
+ * EKF_Q_BIAS needs raising so the filter tracks bias more aggressively.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_GyroBias(void)
+{
+  Motor_Brake();
+
+  LED_Blink(2, 150, 150);
+
+  /* Recalibrate from rest, then measure what leaks through. */
+  TurnController_CalibrateGyroBias();
+  TurnController_ResetYaw();
+
+  TurnController_ObserveYaw(TEST_BIAS_DRIFT_MS);
+
+  tm_bias_drift_deg = TurnController_GetYawDeg();
+  tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
+  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
+  tm_ekf_rejects    = turn_reject_count;
 }
 
 /* USER CODE END 0 */
@@ -359,6 +504,7 @@ int main(void)
   MX_TIM1_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
+  MX_SPI1_Init();
   /* USER CODE BEGIN 2 */
 
   /* Start the quadrature encoder interfaces. CubeMX configures the timers but
@@ -375,15 +521,40 @@ int main(void)
   /* Make sure nothing is driven until a test asks for it. */
   Motor_Brake();
 
+  /* Microsecond timebase for the EKF prediction step. Must come before any
+   * controller init, since TurnController_Init() times its gyro calibration
+   * with it. */
+  DWT_Timer_Init();
+
+  /* CubeMX drives IMU_NCS LOW in MX_GPIO_Init(), but SPI chip select must
+   * IDLE HIGH or the first transaction is framed wrong. Deassert it before
+   * talking to the IMU. */
+  HAL_GPIO_WritePin(IMU_NCS_GPIO_Port, IMU_NCS_Pin, GPIO_PIN_SET);
+  HAL_Delay(50);
+
   /* Bring up both controllers. Each pulls its gains from control_config.h.
    * Both call Encoders_Init() and MotorDriver_Enable() internally, which is
-   * idempotent, so initialising both here is safe. */
+   * idempotent, so initialising both here is safe.
+   *
+   * TurnController_Init() also brings up the IMU and runs the stationary gyro
+   * bias calibration, so THE ROBOT MUST BE STILL AND LEVEL AT POWER-ON. */
   StraightlineController_Init();
-  TurnController_Init();
+  tm_imu_ok = TurnController_Init();
 
-  /* Startup indication: 3 slow blinks, then a settling delay so the robot is
-   * not already moving when you take your hand off it. */
-  LED_Blink(3, 300, 300);
+  /* Startup indication.
+   *   3 slow blinks  = IMU up, fusion active
+   *   6 fast blinks  = IMU not found, running encoder-only */
+  if (tm_imu_ok) {
+    LED_Blink(3, 300, 300);
+  }
+  else {
+    LED_Blink(6, 80, 80);
+  }
+
+  tm_gyro_bias_dps = TurnController_GetGyroBiasDps();
+
+  /* Settling delay so the robot is not already moving when you take your
+   * hand off it. */
   HAL_Delay(2000);
 
   /* USER CODE END 2 */
@@ -420,6 +591,16 @@ int main(void)
 
 #elif (ACTIVE_TEST == TEST_SQUARE)
     Test_Square();
+
+#elif (ACTIVE_TEST == TEST_IMU_RAW)
+    Test_ImuRaw();
+    continue;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_YAW_ESTIMATE)
+    Test_YawEstimate();
+
+#elif (ACTIVE_TEST == TEST_GYRO_BIAS)
+    Test_GyroBias();
 
 #else
   #error "ACTIVE_TEST is not set to a valid test id"
@@ -477,6 +658,44 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_SPI1_Init(void)
+{
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
+  hspi1.Instance = SPI1;
+  hspi1.Init.Mode = SPI_MODE_MASTER;
+  hspi1.Init.Direction = SPI_DIRECTION_2LINES;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
+  hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
+  hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
+  hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
+  hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+  hspi1.Init.CRCPolynomial = 10;
+  if (HAL_SPI_Init(&hspi1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
 }
 
 /**
@@ -661,6 +880,9 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(IMU_NCS_GPIO_Port, IMU_NCS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(DRV_STBY_GPIO_Port, DRV_STBY_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin : MCU_LED_Pin */
@@ -669,6 +891,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(MCU_LED_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : IMU_NCS_Pin */
+  GPIO_InitStruct.Pin = IMU_NCS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(IMU_NCS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : DRV_STBY_Pin */
   GPIO_InitStruct.Pin = DRV_STBY_Pin;

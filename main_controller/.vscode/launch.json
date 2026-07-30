@@ -36,8 +36,21 @@
                     "tm_last_ok",
                     "basespeed",
                     "steering",
-                    "turn_target_distance",
-                    "turn_current_distance",
+                    "tm_imu_ok",
+                    "tm_gyro_z_dps",
+                    "tm_accel_z_g",
+                    "tm_yaw_deg",
+                    "tm_yaw_error_deg",
+                    "tm_enc_yaw_deg",
+                    "tm_fusion_gap_deg",
+                    "tm_gyro_bias_dps",
+                    "tm_bias_drift_deg",
+                    "tm_ekf_rejects",
+                    "turn_target_yaw_deg",
+                    "turn_fused_yaw_deg",
+                    "turn_encoder_yaw_deg",
+                    "turn_yaw_error_deg",
+                    "turn_gyro_rate_dps",
                     "turn_basespeed"
                 ]
             }

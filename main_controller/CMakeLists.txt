@@ -54,8 +54,15 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     # Low level control
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/PID.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/EKF.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/straightline_controller.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/turn_controller.c
+
+    # Sensors
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/ICM-42688-P/ICM42688.c
+
+    # Utilities
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c
 )
 
 # Add include paths
@@ -64,6 +71,8 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Motors
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Encoders
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Control/LowLevel
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/ICM-42688-P
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Utils
 )
 
 # Add project symbols (macros)
