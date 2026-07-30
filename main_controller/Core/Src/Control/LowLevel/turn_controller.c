@@ -1,7 +1,13 @@
 #include "turn_controller.h"
 
+#define DEG_TO_RAD_F (PI / 180.0f)
+#define RAD_TO_DEG_F (180.0f / PI)
+
 //Turning PID structure variable
 static PIDController turn_pid;
+
+//Yaw estimator
+static EKF_t yaw_ekf;
 
 //Initialise turn state variable
 static TurnState_t state;
@@ -11,19 +17,149 @@ static uint32_t turn_start_time;
 static float pid_sample_time_s;
 static uint16_t settle_counter;
 
-//Debugging
-float turn_target_distance;
-float turn_current_distance;
+//DWT cycle stamp of the last EKF prediction
+static uint32_t last_predict_cycles;
+
+//Set once at init; drives the encoder-only fallback
+static uint8_t imu_ok = 0U;
+
+//Debugging / live-watch
+float turn_target_yaw_deg;
+float turn_fused_yaw_deg;
+float turn_encoder_yaw_deg;
+float turn_yaw_error_deg;
+float turn_gyro_rate_dps;
+float turn_gyro_bias_dps;
 float turn_basespeed;
+uint32_t turn_predict_count;
+uint32_t turn_update_count;
+uint32_t turn_reject_count;
 
-//Initialise the controller using the gains from control_config.h
-void TurnController_Init(void) {
 
+/* ------------------------------------------------------------------------
+ * Yaw from wheel odometry.
+ *
+ * For a pivot, the wheels counter-rotate: the right wheel sweeps +d and the
+ * left -d, so the differential travel is (right - left) and the rotation is
+ * that divided by the wheel base. Units cancel, giving radians.
+ * Positive = anticlockwise = left turn, matching the gyro sign convention.
+ * ---------------------------------------------------------------------- */
+static float encoderYawRad(void)
+{
+    return (Encoder_getRightDistance() - Encoder_getLeftDistance()) / ROBOT_WHEEL_BASE_CM;
+}
+
+
+/* Read the gyro and run one EKF prediction step, using the true elapsed time
+ * measured from the DWT cycle counter rather than an assumed period. */
+static void predictStep(void)
+{
+    if (!imu_ok) return;
+
+    /* Only consume a new sample once per gyro output period. Polling faster
+     * would integrate the same reading twice and inflate the rotation. */
+    if (DWT_ElapsedUs(last_predict_cycles) < IMU_PREDICT_PERIOD_US) {
+        return;
+    }
+
+    float dt = (float)DWT_ElapsedUs(last_predict_cycles) * 1.0e-6f;
+    last_predict_cycles = DWT_GetCycles();
+
+    float gz_dps = 0.0f;
+
+    if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
+        return;
+    }
+
+    /* Apply the mounting sign, then convert to rad/s for the filter. */
+    float gz_rads = gz_dps * IMU_GYRO_Z_SIGN * DEG_TO_RAD_F;
+
+    EKF_Predict(&yaw_ekf, gz_rads, dt);
+
+    turn_gyro_rate_dps = yaw_ekf.last_rate * RAD_TO_DEG_F;
+}
+
+
+/* Read the encoders and apply the EKF correction step. */
+static void correctStep(void)
+{
+    Encoders_Update();
+
+    float yaw_enc = encoderYawRad();
+
+    turn_encoder_yaw_deg = yaw_enc * RAD_TO_DEG_F;
+
+    EKF_UpdateEncoderYaw(&yaw_ekf, yaw_enc);
+}
+
+
+/* Copy filter diagnostics out for the live-watch panel. */
+static void publishTelemetry(void)
+{
+    turn_fused_yaw_deg  = EKF_GetYawDeg(&yaw_ekf);
+    turn_gyro_bias_dps  = EKF_GetGyroBiasDps(&yaw_ekf);
+    turn_predict_count  = yaw_ekf.predict_count;
+    turn_update_count   = yaw_ekf.update_count;
+    turn_reject_count   = yaw_ekf.reject_count;
+}
+
+
+uint8_t TurnController_CalibrateGyroBias(void)
+{
+    if (!imu_ok) return 0U;
+
+    /* Let the chassis stop vibrating before sampling. */
+    HAL_Delay(IMU_GYRO_BIAS_SETTLE_MS);
+
+    float sum = 0.0f;
+    float max_abs = 0.0f;
+
+    for (uint32_t i = 0U; i < IMU_GYRO_BIAS_SAMPLES; i++)
+    {
+        float gz_dps = 0.0f;
+
+        if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
+            return 0U;
+        }
+
+        sum += gz_dps;
+
+        float abs_dps = fabsf(gz_dps);
+        if (abs_dps > max_abs) max_abs = abs_dps;
+
+        /* Pace the sampling to the gyro output rate so we average distinct
+         * samples rather than re-reading one value many times. */
+        DWT_DelayUs(IMU_PREDICT_PERIOD_US);
+    }
+
+    /* If anything moved during calibration the average is meaningless. */
+    if (max_abs > IMU_GYRO_BIAS_MAX_DPS) {
+        return 0U;
+    }
+
+    float mean_dps = sum / (float)IMU_GYRO_BIAS_SAMPLES;
+
+    /* Store in the same sign convention the prediction step uses. */
+    float bias_rads = mean_dps * IMU_GYRO_Z_SIGN * DEG_TO_RAD_F;
+
+    /* A 1000-sample average is a confident estimate, so seed a small variance
+     * and let the filter refine it from there. */
+    EKF_SetGyroBias(&yaw_ekf, bias_rads, 1.0e-6f);
+
+    turn_gyro_bias_dps = EKF_GetGyroBiasDps(&yaw_ekf);
+
+    return 1U;
+}
+
+
+uint8_t TurnController_Init(void)
+{
     //Initialise dependencies
     Encoders_Init();
     MotorDriver_Enable();
+    DWT_Timer_Init();
 
-    //Turn PID: differential wheel arc (cm) -> turn speed
+    //Turn PID: fused yaw error (degrees) -> turn speed
     turn_pid.Kp        = TURN_KP;
     turn_pid.Ki        = TURN_KI;
     turn_pid.Kd        = TURN_KD;
@@ -38,21 +174,70 @@ void TurnController_Init(void) {
 
     PIDController_Init(&turn_pid);
 
+    //Yaw estimator
+    EKF_Config_t ekf_cfg;
+    EKF_GetDefaultConfig(&ekf_cfg);
+    EKF_Init(&yaw_ekf, &ekf_cfg);
+
+    //Bring up the IMU. Failure is not fatal: fall back to encoder-only.
+    imu_ok = (ICM42688_Init() == IMU_OK) ? 1U : 0U;
+
+    if (imu_ok) {
+        TurnController_CalibrateGyroBias();
+    }
+
+    last_predict_cycles = DWT_GetCycles();
+
+    publishTelemetry();
+
     state = TURN_IDLE;
+
+    return imu_ok;
 }
 
-//Helper function to reset PID values
-static void resetPID(void) {
 
+uint8_t TurnController_IsImuOk(void)
+{
+    return imu_ok;
+}
+
+
+float TurnController_GetYawDeg(void)
+{
+    return EKF_GetYawDeg(&yaw_ekf);
+}
+
+
+float TurnController_GetGyroBiasDps(void)
+{
+    return EKF_GetGyroBiasDps(&yaw_ekf);
+}
+
+
+void TurnController_ResetYaw(void)
+{
+    Encoders_Reset();
+    EKF_Reset(&yaw_ekf, 0.0f);
+
+    last_predict_cycles = DWT_GetCycles();
+
+    publishTelemetry();
+}
+
+
+//Helper function to reset PID values
+static void resetPID(void)
+{
     PIDController_Init(&turn_pid);
 
     pid_last_time = 0;
     settle_counter = 0;
 }
 
-//Apply the stiction floor without changing the sign of the request
-static float applyMinSpeed(float speed) {
 
+//Apply the stiction floor without changing the sign of the request
+static float applyMinSpeed(float speed)
+{
     if (CONTROL_MIN_MOVE_SPEED <= 0.0f) return speed;
 
     if (speed > 0.0f && speed < CONTROL_MIN_MOVE_SPEED) {
@@ -65,14 +250,18 @@ static float applyMinSpeed(float speed) {
     return speed;
 }
 
-//Helper function to update PID controller
-//direction: +1 for a left (anticlockwise) turn, -1 for a right (clockwise) turn
-static void updatePID(float target_angle, float direction) {
 
+/* One iteration of the control loop.
+ * `target_yaw_deg` is signed: positive for a left turn, negative for right. */
+static void updateControl(float target_yaw_deg)
+{
     //Check if controller is running
     if (state != TURN_RUNNING) {
         return;
     }
+
+    /* --- fast path: EKF prediction from the gyro, ~1 kHz --- */
+    predictStep();
 
     uint32_t current_time = HAL_GetTick();
 
@@ -84,67 +273,68 @@ static void updatePID(float target_angle, float direction) {
         return;
     }
 
-    if (current_time - pid_last_time >= (uint32_t)(pid_sample_time_s * 1000.0f)) {
-
-        //Update the last time
-        pid_last_time = current_time;
-
-        // Update encoder readings
-        Encoders_Update();
-
-        //Calculate the target arc each wheel must sweep, signed by direction.
-        //A left turn drives the right wheel forward and the left wheel back.
-        float target_distance = PI * ROBOT_WHEEL_BASE_CM * (target_angle / 360.0f) * direction;
-
-        //Calcuate the current differential arc
-        float current_distance = (Encoder_getRightDistance() - Encoder_getLeftDistance()) / 2.0f;
-
-        //Debugging
-        turn_target_distance = target_distance;
-        turn_current_distance = current_distance;
-
-        //Check whether the target is reached, and stay there a few cycles so
-        //we do not declare success while coasting through it
-        if (fabsf(current_distance - target_distance) < TURN_TOLERANCE_CM) {
-
-            settle_counter++;
-
-            if (settle_counter >= CONTROL_SETTLE_CYCLES) {
-
-                //Set state to completed
-                state = TURN_COMPLETED;
-
-                //Stop motors completely
-                Motor_Brake();
-
-                return;
-            }
-        }
-        else {
-            settle_counter = 0;
-        }
-
-        //Turn PID calculations. The output is already signed by the error, so
-        //a left turn yields a positive command and a right turn a negative one.
-        float basespeed = PIDController_Update(&turn_pid, target_distance, current_distance);
-
-        //Overcome gearbox stiction near the target
-        basespeed = applyMinSpeed(basespeed);
-
-        turn_basespeed = basespeed;
-
-        //Pivot in place: wheels counter-rotate. Positive basespeed spins the
-        //robot anticlockwise (right wheel forward, left wheel backward).
-        Motor_runSignedSpeed(-basespeed, basespeed);
+    /* --- slow path: encoder correction, PID and actuation --- */
+    if (current_time - pid_last_time < (uint32_t)(pid_sample_time_s * 1000.0f)) {
+        return;
     }
+
+    pid_last_time = current_time;
+
+    correctStep();
+    publishTelemetry();
+
+    float fused_yaw_deg = EKF_GetYawDeg(&yaw_ekf);
+    float error_deg = target_yaw_deg - fused_yaw_deg;
+
+    turn_target_yaw_deg = target_yaw_deg;
+    turn_yaw_error_deg  = error_deg;
+
+    /* Completion needs BOTH proximity and low rotational speed, so the
+     * controller cannot declare success while coasting through the target.
+     * Without an IMU there is no rate signal, so fall back to position only. */
+    uint8_t within_tolerance = (fabsf(error_deg) < TURN_TOLERANCE_DEG);
+    uint8_t settled = imu_ok ? (fabsf(turn_gyro_rate_dps) < TURN_SETTLE_RATE_DPS) : 1U;
+
+    if (within_tolerance && settled) {
+
+        settle_counter++;
+
+        if (settle_counter >= CONTROL_SETTLE_CYCLES) {
+
+            state = TURN_COMPLETED;
+            Motor_Brake();
+            return;
+        }
+    }
+    else {
+        settle_counter = 0;
+    }
+
+    //Turn PID on fused yaw. Output is signed by the error: positive drives
+    //the robot anticlockwise, negative clockwise.
+    float basespeed = PIDController_Update(&turn_pid, target_yaw_deg, fused_yaw_deg);
+
+    //Overcome gearbox stiction near the target
+    basespeed = applyMinSpeed(basespeed);
+
+    turn_basespeed = basespeed;
+
+    //Pivot in place: wheels counter-rotate. Positive basespeed spins the
+    //robot anticlockwise (right wheel forward, left wheel backward).
+    Motor_runSignedSpeed(-basespeed, basespeed);
 }
 
-//Helper to reset the state
-static void resetTurnState(void) {
 
-    //Reset encoders and PID controllers
+//Helper to reset the state
+static void resetTurnState(void)
+{
+    //Reset encoders and PID controllers. The EKF's yaw is zeroed but the
+    //learned gyro bias is deliberately carried over from previous moves.
     Encoders_Reset();
+    EKF_Reset(&yaw_ekf, 0.0f);
     resetPID();
+
+    last_predict_cycles = DWT_GetCycles();
 
     turn_start_time = HAL_GetTick();
 
@@ -152,9 +342,10 @@ static void resetTurnState(void) {
     state = TURN_RUNNING;
 }
 
-//Shared blocking runner. Returns 1 on success, 0 on timeout.
-static uint8_t runTurn(float angle_deg, float direction) {
 
+//Shared blocking runner. Returns 1 on success, 0 on timeout.
+static uint8_t runTurn(float angle_deg, float direction)
+{
     //Check whether the controller is in idle state
     if (state != TURN_IDLE) {
 
@@ -162,6 +353,8 @@ static uint8_t runTurn(float angle_deg, float direction) {
     }
 
     resetTurnState();
+
+    float target_yaw_deg = angle_deg * direction;
 
     //Run untill the angle is reached
     while (1) {
@@ -179,16 +372,46 @@ static uint8_t runTurn(float angle_deg, float direction) {
             return 0;
         }
 
-        updatePID(angle_deg, direction);
+        updateControl(target_yaw_deg);
     }
 }
 
-uint8_t turnLeftAngle(float angle_deg) {
 
+uint8_t turnLeftAngle(float angle_deg)
+{
     return runTurn(angle_deg, 1.0f);
 }
 
-uint8_t turnRightAngle(float angle_deg) {
 
+uint8_t turnRightAngle(float angle_deg)
+{
     return runTurn(angle_deg, -1.0f);
+}
+
+
+void TurnController_ObserveYaw(uint32_t duration_ms)
+{
+    Motor_Brake();
+
+    TurnController_ResetYaw();
+
+    uint32_t start = HAL_GetTick();
+    uint32_t last_correct = start;
+
+    while ((HAL_GetTick() - start) < duration_ms)
+    {
+        predictStep();
+
+        uint32_t now = HAL_GetTick();
+
+        if (now - last_correct >= (uint32_t)(pid_sample_time_s * 1000.0f))
+        {
+            last_correct = now;
+
+            correctStep();
+            publishTelemetry();
+
+            turn_yaw_error_deg = turn_fused_yaw_deg - turn_encoder_yaw_deg;
+        }
+    }
 }

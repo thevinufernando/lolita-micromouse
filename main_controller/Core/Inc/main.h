@@ -65,6 +65,14 @@ void Error_Handler(void);
 #define LM_ENC_CHA_GPIO_Port GPIOA
 #define LM_ENC_CHB_Pin GPIO_PIN_1
 #define LM_ENC_CHB_GPIO_Port GPIOA
+#define IMU_NCS_Pin GPIO_PIN_4
+#define IMU_NCS_GPIO_Port GPIOA
+#define IMU_SCK_Pin GPIO_PIN_5
+#define IMU_SCK_GPIO_Port GPIOA
+#define IMU_MISO_Pin GPIO_PIN_6
+#define IMU_MISO_GPIO_Port GPIOA
+#define IMU_MOSI_Pin GPIO_PIN_7
+#define IMU_MOSI_GPIO_Port GPIOA
 #define DRV_STBY_Pin GPIO_PIN_14
 #define DRV_STBY_GPIO_Port GPIOB
 #define RM_PWM_INA_Pin GPIO_PIN_6
