@@ -1,9 +1,16 @@
 # Lolita Micromouse
 
-<p align="center">
-  <img src="docs/images/mm_3d_model.png" alt="Lolita micromouse 3D model" width="45%"/>
-  <img src="docs/images/mm_final.jpeg" alt="Lolita micromouse assembled robot" width="45%"/>
-</p>
+<table align="center">
+  <tr>
+    <td align="center" valign="middle">
+      <img src="docs/images/mm_3d_model.png" alt="Lolita micromouse 3D model" width="300"/>
+    </td>
+    <td width="24"></td>
+    <td align="center" valign="middle">
+      <img src="docs/images/mm_final.jpeg" alt="Lolita micromouse assembled robot" width="300"/>
+    </td>
+  </tr>
+</table>
 
 ## About
 
