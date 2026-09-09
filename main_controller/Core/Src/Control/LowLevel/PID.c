@@ -46,9 +46,30 @@ float PIDController_Update(PIDController *pid, float setpoint, float measurement
 
 	/*
 	* Derivative (band-limited differentiator)
+	*
+	* Tustin discretisation of  Kd*s / (1 + tau*s)  acting on -y:
+	*
+	*     D[k] = ( -2*Kd*(y[k] - y[k-1]) + (2*tau - T)*D[k-1] ) / (2*tau + T)
+	*
+	* The leading minus applies ONLY to the measurement difference (derivative
+	* on measurement, so d(error)/dt = -d(y)/dt for a constant setpoint). It
+	* must NOT be distributed over the recursive term as well.
+	*
+	* It used to be, which negated the filter pole and broke the term two ways:
+	*   - DC gain became Kd/(2*tau) instead of Kd/T, i.e. HALF the requested Kd
+	*     whenever tau == T.
+	*   - The pole sat on the negative real axis, so the response alternated
+	*     sign every sample. Gain then ROSE from DC to Nyquist instead of
+	*     falling, amplifying the sample-to-sample encoder noise this filter
+	*     exists to suppress. The error scaled with tau, so raising tau to
+	*     filter harder made it worse rather than better.
+	*
+	* Ramp check (Kd = 1, tau = T = 0.01, measurement rising 1 unit/sample):
+	* the true derivative term is -100, which this form settles to. The old
+	* form settled to -50.
 	*/
-		
-    pid->differentiator = -(2.0f * pid->Kd * (measurement - pid->prevMeasurement)	/* Note: derivative on measurement, therefore minus sign in front of equation! */
+
+    pid->differentiator = (-2.0f * pid->Kd * (measurement - pid->prevMeasurement)
                         + (2.0f * pid->tau - pid->T) * pid->differentiator)
                         / (2.0f * pid->tau + pid->T);
 
