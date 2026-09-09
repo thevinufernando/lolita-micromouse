@@ -50,6 +50,13 @@ volatile uint32_t turn_imu_fail_count;
 /* Outcome of the startup gyro bias calibration. See TurnBiasCalStatus_t. */
 volatile TurnBiasCalStatus_t turn_bias_cal_status = TURN_BIAS_NOT_RUN;
 
+/* How many sweeps the calibration needed (1 = clean first try) and the worst
+ * single sample seen on the last sweep. If peak sits just above
+ * IMU_GYRO_BIAS_MAX_DPS the threshold is too tight; if it is far above, the
+ * robot really was moving. */
+volatile uint32_t turn_bias_cal_attempts;
+volatile float    turn_bias_cal_peak_dps;
+
 
 /* ------------------------------------------------------------------------
  * Yaw from wheel odometry.
@@ -132,52 +139,69 @@ uint8_t TurnController_CalibrateGyroBias(void)
         return 0U;
     }
 
-    /* Let the chassis stop vibrating before sampling. */
-    HAL_Delay(IMU_GYRO_BIAS_SETTLE_MS);
-
-    float sum = 0.0f;
-    float max_abs = 0.0f;
-
-    for (uint32_t i = 0U; i < IMU_GYRO_BIAS_SAMPLES; i++)
+    /* Retry a motion-rejected sweep rather than giving up on the first one.
+     * A single leftover wobble (from setting the robot down, or from the
+     * reset button being pressed on the chassis itself) is enough to trip the
+     * worst-sample test, and silently falling back to an unestimated bias is
+     * worse than spending a few more seconds at boot. */
+    for (uint32_t attempt = 0U; attempt < IMU_GYRO_BIAS_MAX_ATTEMPTS; attempt++)
     {
-        float gz_dps = 0.0f;
+        turn_bias_cal_attempts = attempt + 1U;
 
-        if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
-            turn_imu_fail_count++;
-            turn_bias_cal_status = TURN_BIAS_IMU_ERROR;
-            return 0U;
+        /* Let the chassis stop vibrating before sampling. */
+        HAL_Delay(IMU_GYRO_BIAS_SETTLE_MS);
+
+        float sum = 0.0f;
+        float max_abs = 0.0f;
+
+        for (uint32_t i = 0U; i < IMU_GYRO_BIAS_SAMPLES; i++)
+        {
+            float gz_dps = 0.0f;
+
+            if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
+                /* A dead bus will not fix itself, so do not burn the
+                 * remaining attempts on it. */
+                turn_imu_fail_count++;
+                turn_bias_cal_status = TURN_BIAS_IMU_ERROR;
+                return 0U;
+            }
+
+            sum += gz_dps;
+
+            float abs_dps = fabsf(gz_dps);
+            if (abs_dps > max_abs) max_abs = abs_dps;
+
+            /* Pace the sampling to the gyro output rate so we average distinct
+             * samples rather than re-reading one value many times. */
+            DWT_DelayUs(IMU_PREDICT_PERIOD_US);
         }
 
-        sum += gz_dps;
+        /* If anything moved during calibration the average is meaningless. */
+        if (max_abs > IMU_GYRO_BIAS_MAX_DPS) {
+            turn_bias_cal_peak_dps = max_abs;   /* what tripped it, for tuning */
+            continue;                           /* settle longer and try again */
+        }
 
-        float abs_dps = fabsf(gz_dps);
-        if (abs_dps > max_abs) max_abs = abs_dps;
+        float mean_dps = sum / (float)IMU_GYRO_BIAS_SAMPLES;
 
-        /* Pace the sampling to the gyro output rate so we average distinct
-         * samples rather than re-reading one value many times. */
-        DWT_DelayUs(IMU_PREDICT_PERIOD_US);
+        /* Store in the same sign convention the prediction step uses. */
+        float bias_rads = mean_dps * IMU_GYRO_Z_SIGN * DEG_TO_RAD_F;
+
+        /* A 1000-sample average is a confident estimate, so seed a small
+         * variance and let the filter refine it from there. */
+        EKF_SetGyroBias(&yaw_ekf, bias_rads, 1.0e-6f);
+
+        turn_gyro_bias_dps     = EKF_GetGyroBiasDps(&yaw_ekf);
+        turn_bias_cal_peak_dps = max_abs;
+        turn_bias_cal_status   = TURN_BIAS_OK;
+
+        return 1U;
     }
 
-    /* If anything moved during calibration the average is meaningless. */
-    if (max_abs > IMU_GYRO_BIAS_MAX_DPS) {
-        turn_bias_cal_status = TURN_BIAS_MOVING;
-        return 0U;
-    }
+    /* Every attempt saw motion. */
+    turn_bias_cal_status = TURN_BIAS_MOVING;
 
-    float mean_dps = sum / (float)IMU_GYRO_BIAS_SAMPLES;
-
-    /* Store in the same sign convention the prediction step uses. */
-    float bias_rads = mean_dps * IMU_GYRO_Z_SIGN * DEG_TO_RAD_F;
-
-    /* A 1000-sample average is a confident estimate, so seed a small variance
-     * and let the filter refine it from there. */
-    EKF_SetGyroBias(&yaw_ekf, bias_rads, 1.0e-6f);
-
-    turn_gyro_bias_dps = EKF_GetGyroBiasDps(&yaw_ekf);
-
-    turn_bias_cal_status = TURN_BIAS_OK;
-
-    return 1U;
+    return 0U;
 }
 
 

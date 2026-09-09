@@ -92,6 +92,12 @@ extern volatile uint32_t turn_imu_fail_count;
 
 extern volatile TurnBiasCalStatus_t turn_bias_cal_status;
 
+/* Sweeps the calibration needed (1 = clean first try), and the worst single
+ * gyro sample on the last sweep -- i.e. what the IMU_GYRO_BIAS_MAX_DPS test
+ * was actually judging. */
+extern volatile uint32_t turn_bias_cal_attempts;
+extern volatile float    turn_bias_cal_peak_dps;
+
 //Function prototypes
 
 /* Initialise the controller: encoders, motor driver, IMU and EKF.

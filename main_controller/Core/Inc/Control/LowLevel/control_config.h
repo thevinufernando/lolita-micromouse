@@ -171,7 +171,21 @@
 /* Stationary gyro bias calibration, performed at startup.
  * The robot MUST be completely still while this runs. */
 #define IMU_GYRO_BIAS_SAMPLES       1000U
-#define IMU_GYRO_BIAS_SETTLE_MS     300U
+
+/* Settle time before sampling starts, in ms.
+ * Raised 300 -> 1000: pressing the reset button physically jolts the robot,
+ * and on compliant tyres the chassis was still rocking when sampling began.
+ * The acceptance test is the worst single sample out of IMU_GYRO_BIAS_SAMPLES,
+ * so one leftover wobble anywhere in the sweep rejected the whole thing --
+ * observed rejected in 2 of 3 consecutive test runs. */
+#define IMU_GYRO_BIAS_SETTLE_MS     1000U
+
+/* How many times to retry a calibration that was rejected for motion before
+ * giving up. Each attempt costs SETTLE_MS + SAMPLES ms, so the worst case
+ * startup cost is ATTEMPTS * (SETTLE_MS + SAMPLES) ms.
+ * A rejected calibration is not harmless -- the EKF then runs with an
+ * unestimated gyro bias -- so it is worth a few seconds at boot to get it. */
+#define IMU_GYRO_BIAS_MAX_ATTEMPTS  3U
 
 /* Reject the calibration if the robot was clearly moving during it (deg/s).
  * Guards against calibrating while the robot is being carried. */
