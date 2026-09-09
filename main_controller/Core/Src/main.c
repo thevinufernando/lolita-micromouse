@@ -21,15 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "encoders.h"
 #include "DRV8833.h"
-#include "PID.h"
-#include "EKF.h"
-#include "control_config.h"
+#include "dwt_timer.h"
 #include "straightline_controller.h"
 #include "turn_controller.h"
-#include "ICM42688.h"
-#include "dwt_timer.h"
+#include "test_harness.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,47 +36,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* ==========================================================================
- *                          TEST SELECTION
- * ==========================================================================
- * Pick exactly one test by setting ACTIVE_TEST below, rebuild and flash.
- * PID gains for each test live in Core/Inc/Control/LowLevel/control_config.h
- * ==========================================================================
- */
-
-#define TEST_MOTORS_OPEN_LOOP   0   /* No PID. Checks wiring and polarity.   */
-#define TEST_ENCODERS_ONLY      1   /* No motion. Push the robot by hand.    */
-#define TEST_STRAIGHT_FORWARD   2   /* Repeated forward runs.                */
-#define TEST_STRAIGHT_FWD_BACK  3   /* Forward then back to the start.       */
-#define TEST_TURN_LEFT_90       4   /* Repeated 90 deg left pivots.          */
-#define TEST_TURN_RIGHT_90      5   /* Repeated 90 deg right pivots.         */
-#define TEST_TURN_360           6   /* Full rotation. Best turn accuracy check. */
-#define TEST_SQUARE             7   /* Straight + turn combined.             */
-#define TEST_IMU_RAW            8   /* No motion. Raw IMU + gyro sign check. */
-#define TEST_YAW_ESTIMATE       9   /* No motion. Rotate by hand, watch EKF. */
-#define TEST_GYRO_BIAS          10  /* No motion. Bias + drift measurement.  */
-
-/* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST             TEST_TURN_LEFT_90
-
-/* ---- Test parameters ---- */
-#define TEST_DISTANCE_CM        100.0f   /* Straightline test distance        */
-#define TEST_ANGLE_DEG          90.0f   /* Turn test angle                   */
-#define TEST_SQUARE_SIDE_CM     18.0f   /* Square test side length           */
-#define TEST_OPEN_LOOP_SPEED    120    /* Open loop test speed (0-255)      */
-
-/* Pause between individual moves, in ms. Lets the chassis settle so each
- * move starts from rest and the encoder reading is unambiguous. */
-#define TEST_MOVE_PAUSE_MS      800U
-
-/* Pause between full test cycles, in ms. Long enough to reposition the robot. */
-#define TEST_CYCLE_PAUSE_MS     3000U
-
-/* How long TEST_YAW_ESTIMATE observes the filter per cycle, in ms. */
-#define TEST_YAW_OBSERVE_MS     10000U
-
-/* How long TEST_GYRO_BIAS lets yaw drift before reporting, in ms. */
-#define TEST_BIAS_DRIFT_MS      10000U
+/* Test selection, test parameters, and all on-target test routines live in
+ * test_harness.h / test_harness.c, not here. main.c only brings up hardware
+ * and hands control to TestHarness_RunCycle(). */
 
 /* USER CODE END PD */
 
@@ -98,43 +56,10 @@ TIM_HandleTypeDef htim3;
 
 /* USER CODE BEGIN PV */
 
-/* ---------------------------------------------------------------------------
- * Telemetry for the debugger live-watch panel.
- * Add these names to the "liveWatch" expressions list in .vscode/launch.json
- * to observe them while the robot runs.
- * ------------------------------------------------------------------------ */
-
-/* Result of the most recent move */
-volatile float  tm_final_left_cm    = 0.0f;   /* left wheel travel, cm       */
-volatile float  tm_final_right_cm   = 0.0f;   /* right wheel travel, cm      */
-volatile float  tm_final_avg_cm     = 0.0f;   /* average travel, cm          */
-volatile float  tm_final_error_cm   = 0.0f;   /* target - achieved, cm       */
-volatile int32_t tm_final_left_cnt  = 0;      /* left encoder ticks          */
-volatile int32_t tm_final_right_cnt = 0;      /* right encoder ticks         */
-volatile int32_t tm_drift_cnt       = 0;      /* left - right ticks (skew)   */
-
-/* Progress counters */
-volatile uint32_t tm_cycle_count    = 0;      /* completed test cycles       */
-volatile uint32_t tm_move_count     = 0;      /* completed moves             */
-volatile uint32_t tm_timeout_count  = 0;      /* moves that hit the timeout  */
-volatile uint8_t  tm_last_ok        = 1;      /* 1 = success, 0 = timeout    */
-
-/* ---- IMU / EKF telemetry ---- */
-volatile uint8_t  tm_imu_ok         = 0;      /* 1 = IMU up, 0 = enc only    */
-volatile float    tm_gyro_z_dps     = 0.0f;   /* raw gyro Z, deg/s           */
-volatile float    tm_accel_x_g      = 0.0f;
-volatile float    tm_accel_y_g      = 0.0f;
-volatile float    tm_accel_z_g      = 0.0f;
-volatile float    tm_imu_temp_c     = 0.0f;
-
-volatile float    tm_yaw_deg        = 0.0f;   /* fused yaw after the move    */
-volatile float    tm_yaw_error_deg  = 0.0f;   /* target - fused, deg         */
-volatile float    tm_enc_yaw_deg    = 0.0f;   /* encoder-only yaw, deg       */
-volatile float    tm_fusion_gap_deg = 0.0f;   /* fused - encoder, deg        */
-volatile float    tm_gyro_bias_dps  = 0.0f;   /* EKF bias estimate, deg/s    */
-volatile float    tm_yaw_sigma_deg  = 0.0f;   /* EKF yaw 1-sigma, deg        */
-volatile float    tm_bias_drift_deg = 0.0f;   /* yaw drift while stationary  */
-volatile uint32_t tm_ekf_rejects    = 0;      /* gated-out encoder updates   */
+/* All tm_* live-watch telemetry globals are defined in test_harness.c and
+ * declared extern in test_harness.h. Add their names to the "liveWatch"
+ * expressions list in .vscode/launch.json to observe them while the robot
+ * runs. */
 
 /* USER CODE END PV */
 
@@ -152,323 +77,9 @@ static void MX_SPI1_Init(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
-/* Only the test selected by ACTIVE_TEST is called, so the others would each
- * raise -Wunused-function. Mark them so real warnings stay visible. */
-#define TEST_FN __attribute__((unused)) static
-
-/* Blink the on-board LED n times to signal progress without a serial port. */
-static void LED_Blink(uint8_t times, uint32_t on_ms, uint32_t off_ms)
-{
-  for (uint8_t i = 0; i < times; i++)
-  {
-    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_SET);
-    HAL_Delay(on_ms);
-    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_RESET);
-    HAL_Delay(off_ms);
-  }
-}
-
-/* Capture the encoder state after a move into the live-watch telemetry. */
-static void Telemetry_Capture(float target_cm, uint8_t ok)
-{
-  Encoders_Update();
-
-  tm_final_left_cm    = Encoder_getLeftDistance();
-  tm_final_right_cm   = Encoder_getRightDistance();
-  tm_final_avg_cm     = Encoder_getAverageDistance();
-  tm_final_error_cm   = target_cm - tm_final_avg_cm;
-  tm_final_left_cnt   = Encoder_getLeftCount();
-  tm_final_right_cnt  = Encoder_getRightCount();
-  tm_drift_cnt        = Encoder_getLeftCount() - Encoder_getRightCount();
-
-  tm_last_ok = ok;
-  tm_move_count++;
-
-  if (!ok) tm_timeout_count++;
-}
-
-/* Capture the yaw estimator state after a turn. `target_deg` is the signed
- * commanded angle, so the error is directly readable. */
-static void Telemetry_CaptureYaw(float target_deg)
-{
-  tm_yaw_deg        = TurnController_GetYawDeg();
-  tm_yaw_error_deg  = target_deg - tm_yaw_deg;
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
-  tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_ekf_rejects    = turn_reject_count;
-}
-
-/* Pause between moves, holding the motors braked. */
-static void Test_Pause(uint32_t ms)
-{
-  Motor_Brake();
-  HAL_Delay(ms);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 0: Open loop motor check. No PID involved.
- * Verifies motor wiring, direction polarity and that both wheels spin.
- * Watch tm_final_left_cnt / tm_final_right_cnt: both should grow POSITIVE
- * when driving forward. If one is negative, flip encoder_polarity for that
- * wheel in Core/Src/Encoders/encoders.c.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_MotorsOpenLoop(void)
-{
-  Encoders_Reset();
-
-  /* Forward */
-  LED_Blink(1, 100, 100);
-  MotorForward_runSpeed(TEST_OPEN_LOOP_SPEED, TEST_OPEN_LOOP_SPEED);
-  HAL_Delay(1000);
-  Motor_Brake();
-  Telemetry_Capture(0.0f, 1);
-  HAL_Delay(TEST_MOVE_PAUSE_MS);
-
-  /* Backward */
-  LED_Blink(2, 100, 100);
-  Encoders_Reset();
-  MotorBackward_runSpeed(TEST_OPEN_LOOP_SPEED, TEST_OPEN_LOOP_SPEED);
-  HAL_Delay(1000);
-  Motor_Brake();
-  Telemetry_Capture(0.0f, 1);
-  HAL_Delay(TEST_MOVE_PAUSE_MS);
-
-  /* Pivot left */
-  LED_Blink(3, 100, 100);
-  Encoders_Reset();
-  MotorLeftTurn_runSpeed(TEST_OPEN_LOOP_SPEED);
-  HAL_Delay(700);
-  Motor_Brake();
-  Telemetry_Capture(0.0f, 1);
-  HAL_Delay(TEST_MOVE_PAUSE_MS);
-
-  /* Pivot right */
-  LED_Blink(4, 100, 100);
-  Encoders_Reset();
-  MotorRightTurn_runSpeed(TEST_OPEN_LOOP_SPEED);
-  HAL_Delay(700);
-  Motor_Brake();
-  Telemetry_Capture(0.0f, 1);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 1: Encoder check. Motors stay off; push the robot by hand.
- * Both counts should increase when the wheels roll forward.
- * Also use this to verify WHEEL_DIAMETER_MM and the gear ratios: roll the
- * robot exactly 20 cm by hand and confirm tm_final_avg_cm reads ~20.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_EncodersOnly(void)
-{
-  Motor_Brake();
-  Encoders_Update();
-
-  tm_final_left_cm   = Encoder_getLeftDistance();
-  tm_final_right_cm  = Encoder_getRightDistance();
-  tm_final_avg_cm    = Encoder_getAverageDistance();
-  tm_final_left_cnt  = Encoder_getLeftCount();
-  tm_final_right_cnt = Encoder_getRightCount();
-  tm_drift_cnt       = Encoder_getLeftCount() - Encoder_getRightCount();
-
-  /* Heartbeat so it is obvious the firmware is alive */
-  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
-  HAL_Delay(100);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 2: Straightline forward.
- * Tune STRAIGHT_DIST_* for distance accuracy (watch tm_final_error_cm)
- * and STRAIGHT_HEADING_* for straightness (watch tm_drift_cnt, want ~0).
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_StraightForward(void)
-{
-  LED_Blink(1, 150, 150);
-
-  uint8_t ok = runForwardDistance(TEST_DISTANCE_CM);
-  Telemetry_Capture(TEST_DISTANCE_CM, ok);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 3: Forward then backward. The robot should return to its start point.
- * Any leftover offset points at asymmetric friction or distance calibration.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_StraightForwardBackward(void)
-{
-  LED_Blink(1, 150, 150);
-  uint8_t ok = runForwardDistance(TEST_DISTANCE_CM);
-  Telemetry_Capture(TEST_DISTANCE_CM, ok);
-
-  Test_Pause(TEST_MOVE_PAUSE_MS);
-
-  LED_Blink(2, 150, 150);
-  ok = runBackwardDistance(TEST_DISTANCE_CM);
-  Telemetry_Capture(-TEST_DISTANCE_CM, ok);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 4/5: Pivot turns. Tune TURN_* here.
- * Mark the floor and measure the real angle against TEST_ANGLE_DEG. If every
- * turn is off by the same ratio, correct ROBOT_WHEEL_BASE_CM rather than the
- * gains: a turn that overshoots means the configured wheel base is too small.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_TurnLeft(void)
-{
-  LED_Blink(1, 150, 150);
-
-  uint8_t ok = turnLeftAngle(TEST_ANGLE_DEG);
-  Telemetry_Capture(0.0f, ok);
-  Telemetry_CaptureYaw(+TEST_ANGLE_DEG);
-}
-
-TEST_FN void Test_TurnRight(void)
-{
-  LED_Blink(2, 150, 150);
-
-  uint8_t ok = turnRightAngle(TEST_ANGLE_DEG);
-  Telemetry_Capture(0.0f, ok);
-  Telemetry_CaptureYaw(-TEST_ANGLE_DEG);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 6: Four 90 deg turns in the same direction = one full rotation.
- * Errors accumulate, so this magnifies a small per-turn bias fourfold and is
- * the most sensitive check of turn calibration.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_Turn360(void)
-{
-  for (uint8_t i = 0; i < 4; i++)
-  {
-    LED_Blink(1, 100, 100);
-
-    uint8_t ok = turnLeftAngle(90.0f);
-    Telemetry_Capture(0.0f, ok);
-    Telemetry_CaptureYaw(+90.0f);
-
-    Test_Pause(TEST_MOVE_PAUSE_MS);
-  }
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 7: Drive a square. Combines both controllers; the robot should end up
- * back where it started, facing its original heading.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_Square(void)
-{
-  for (uint8_t i = 0; i < 4; i++)
-  {
-    LED_Blink(1, 100, 100);
-
-    uint8_t ok = runForwardDistance(TEST_SQUARE_SIDE_CM);
-    Telemetry_Capture(TEST_SQUARE_SIDE_CM, ok);
-
-    Test_Pause(TEST_MOVE_PAUSE_MS);
-
-    LED_Blink(2, 100, 100);
-
-    ok = turnRightAngle(90.0f);
-    Telemetry_Capture(0.0f, ok);
-    Telemetry_CaptureYaw(-90.0f);
-
-    Test_Pause(TEST_MOVE_PAUSE_MS);
-  }
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 8: Raw IMU readout. Motors stay off.
- *
- * RUN THIS FIRST after wiring the IMU. Two things to confirm:
- *
- *  1. tm_imu_ok must be 1. If it is 0 the WHO_AM_I check failed: check the
- *     SPI wiring, the IMU_NCS pin, and that CS idles HIGH.
- *
- *  2. GYRO SIGN. Rotate the robot ANTICLOCKWISE (to its left) by hand and
- *     watch tm_gyro_z_dps. It must read POSITIVE. If it reads negative, set
- *     IMU_GYRO_Z_SIGN to -1.0f in control_config.h and rebuild. Every turn
- *     depends on this being right, so do not skip it.
- *
- * With the robot level and still, tm_accel_z_g should read about 1.0 and
- * tm_gyro_z_dps should sit near zero (a bias of a few tenths is normal).
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_ImuRaw(void)
-{
-  Motor_Brake();
-
-  ICM42688_t imu;
-
-  if (ICM42688_ReadData(&imu) == IMU_OK)
-  {
-    /* Report the raw sensor value, NOT sign-corrected, so the sign check
-     * above is meaningful. */
-    tm_gyro_z_dps = imu.gz;
-    tm_accel_x_g  = imu.ax;
-    tm_accel_y_g  = imu.ay;
-    tm_accel_z_g  = imu.az;
-    tm_imu_temp_c = imu.temperature;
-  }
-
-  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
-  HAL_Delay(50);
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 9: Yaw estimator check. Motors stay off.
- *
- * Runs the full fusion loop for TEST_YAW_OBSERVE_MS while you rotate the
- * robot by hand, then holds the result so you can read it.
- *
- * Watch:
- *   tm_yaw_deg        fused yaw. Rotate the robot exactly 90 deg
- *                     anticlockwise by hand; this should read about +90.
- *   tm_enc_yaw_deg    encoder-only yaw over the same motion.
- *   tm_fusion_gap_deg how far the fusion moved away from raw odometry.
- *                     Large values mean the wheels slipped and the gyro
- *                     corrected for it, which is the whole point.
- *   tm_ekf_rejects    encoder updates rejected as slip.
- *
- * Return the robot to its starting heading and tm_yaw_deg should come back
- * to roughly zero.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_YawEstimate(void)
-{
-  LED_Blink(1, 150, 150);
-
-  TurnController_ObserveYaw(TEST_YAW_OBSERVE_MS);
-
-  tm_yaw_deg        = TurnController_GetYawDeg();
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
-  tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_ekf_rejects    = turn_reject_count;
-}
-
-/* ---------------------------------------------------------------------------
- * TEST 10: Gyro bias and drift. Motors stay off, ROBOT MUST NOT MOVE.
- *
- * Recalibrates the bias, then lets the estimator run untouched for
- * TEST_BIAS_DRIFT_MS and reports how far yaw wandered.
- *
- * tm_bias_drift_deg is the headline number: total yaw drift over the window
- * while perfectly stationary. Under ~1 deg per 10 s is healthy. If it is
- * much worse, the bias calibration was taken while the robot was moving, or
- * EKF_Q_BIAS needs raising so the filter tracks bias more aggressively.
- * ------------------------------------------------------------------------ */
-TEST_FN void Test_GyroBias(void)
-{
-  Motor_Brake();
-
-  LED_Blink(2, 150, 150);
-
-  /* Recalibrate from rest, then measure what leaks through. */
-  TurnController_CalibrateGyroBias();
-  TurnController_ResetYaw();
-
-  TurnController_ObserveYaw(TEST_BIAS_DRIFT_MS);
-
-  tm_bias_drift_deg = TurnController_GetYawDeg();
-  tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_ekf_rejects    = turn_reject_count;
-}
+/* All test routines (LED_Blink, Telemetry_Capture, Test_* etc.) moved to
+ * test_harness.c. main.c only calls TestHarness_RunCycle() from the loop
+ * below. */
 
 /* USER CODE END 0 */
 
@@ -567,50 +178,9 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-#if   (ACTIVE_TEST == TEST_MOTORS_OPEN_LOOP)
-    Test_MotorsOpenLoop();
-
-#elif (ACTIVE_TEST == TEST_ENCODERS_ONLY)
-    Test_EncodersOnly();
-    continue;   /* poll continuously, no cycle pause */
-
-#elif (ACTIVE_TEST == TEST_STRAIGHT_FORWARD)
-    Test_StraightForward();
-
-#elif (ACTIVE_TEST == TEST_STRAIGHT_FWD_BACK)
-    Test_StraightForwardBackward();
-
-#elif (ACTIVE_TEST == TEST_TURN_LEFT_90)
-    Test_TurnLeft();
-
-#elif (ACTIVE_TEST == TEST_TURN_RIGHT_90)
-    Test_TurnRight();
-
-#elif (ACTIVE_TEST == TEST_TURN_360)
-    Test_Turn360();
-
-#elif (ACTIVE_TEST == TEST_SQUARE)
-    Test_Square();
-
-#elif (ACTIVE_TEST == TEST_IMU_RAW)
-    Test_ImuRaw();
-    continue;   /* poll continuously, no cycle pause */
-
-#elif (ACTIVE_TEST == TEST_YAW_ESTIMATE)
-    Test_YawEstimate();
-
-#elif (ACTIVE_TEST == TEST_GYRO_BIAS)
-    Test_GyroBias();
-
-#else
-  #error "ACTIVE_TEST is not set to a valid test id"
-#endif
-
-    tm_cycle_count++;
-
-    /* Idle between cycles with the motors braked, so you can reposition the
-     * robot and read the telemetry before the next run starts. */
-    Test_Pause(TEST_CYCLE_PAUSE_MS);
+    /* Runs whichever test ACTIVE_TEST selects (test_harness.h), including
+     * its cycle pause. See test_harness.c for the dispatch and routines. */
+    TestHarness_RunCycle();
   }
   /* USER CODE END 3 */
 }

@@ -95,9 +95,15 @@ Core/Inc, Core/Src
 ├─ Encoders/            encoders.c
 ├─ Motors/              DRV8833.c
 ├─ Sensors/ICM-42688-P/ ICM42688.c
+├─ Tests/               test_harness.c  ← ACTIVE_TEST + all on-target Test_* routines
 └─ Utils/               dwt_timer.c
-tests/                  host-side EKF verification
+tests/                  host-side EKF verification (separate from Core/Src/Tests/ above)
 ```
+
+`main.c` only brings up hardware and calls `TestHarness_RunCycle()` from its
+`while(1)` loop; the test selector and every `Test_*` routine live in
+`Core/Src/Tests/test_harness.c` / `Core/Inc/Tests/test_harness.h` instead, so
+that CubeMX-adjacent file doesn't keep absorbing application logic.
 
 CubeMX owns `main.c`'s generated regions. **All hand-written code in `main.c`
 must live inside `/* USER CODE BEGIN x */ … /* USER CODE END x */`** or it is
@@ -201,7 +207,8 @@ Three things in it are load-bearing and should not be "simplified" away:
 There are no magic numbers scattered in the controllers. Change values there,
 rebuild, flash.
 
-`main.c` has a `ACTIVE_TEST` switch selecting one of 11 test routines. Set it,
+`Core/Inc/Tests/test_harness.h` has an `ACTIVE_TEST` switch selecting one of
+11 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
 rebuild, flash, and read results in live-watch.
 
 | # | Test | Purpose |
@@ -279,6 +286,22 @@ Currently **out of scope** unless explicitly requested:
 ---
 
 ## Change log
+
+### 2026-09-09 — Test harness pulled out of main.c
+- `main.c`'s `USER CODE` blocks had absorbed the entire test harness (20
+  `tm_*` telemetry globals, `LED_Blink`, `Telemetry_Capture`/`_CaptureYaw`,
+  `Test_Pause`, all 11 `Test_*` routines, and the `ACTIVE_TEST` dispatch)
+  alongside CubeMX's peripheral bring-up. Moved all of it, unchanged, into a
+  new `Core/Inc/Tests/test_harness.h` / `Core/Src/Tests/test_harness.c`
+  module — mirrors how `straightline_controller`/`turn_controller` are
+  already split out. `main.c` now just includes `test_harness.h` and calls
+  `TestHarness_RunCycle()` from its `while(1)` loop.
+- `LED_Blink` is the one function `main()` itself still calls directly (for
+  the IMU-up/absent startup indicator), so it's `void` (not `static`) and
+  declared in `test_harness.h`.
+- Pure move, no behavior change. Requires `Core/Src/Tests/test_harness.c` and
+  `Core/Inc/Tests` to be registered in `CMakeLists.txt`
+  (`target_sources`/`target_include_directories`) — already done.
 
 ### 2026-07-31 — IMU integration for precise turns
 - Added `EKF.h`/`EKF.c`: 2-state (yaw, gyro bias) filter fusing gyro + encoder

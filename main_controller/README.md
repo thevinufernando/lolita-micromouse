@@ -58,10 +58,12 @@ globals.
   correction + PID + motor output).
 - All tuning constants live in a single file:
   `Core/Inc/Control/LowLevel/control_config.h`.
-- `main.c` selects one of several on-target test routines (`ACTIVE_TEST`) for
-  bring-up — motor/encoder checks, straight-line tuning, turn tuning, IMU
-  bring-up, etc. See [CLAUDE.md §6](CLAUDE.md#6-tuning-and-bring-up) for the
-  full list and recommended bring-up order.
+- `Core/Inc/Tests/test_harness.h` selects one of several on-target test
+  routines (`ACTIVE_TEST`), implemented in `Core/Src/Tests/test_harness.c` —
+  motor/encoder checks, straight-line tuning, turn tuning, IMU bring-up, etc.
+  `main.c` itself only brings up hardware and calls `TestHarness_RunCycle()`.
+  See [CLAUDE.md §6](CLAUDE.md#6-tuning-and-bring-up) for the full list and
+  recommended bring-up order.
 
 ## Folder layout
 
@@ -74,6 +76,7 @@ main_controller/
 │   │   ├── Encoders/           encoders.c
 │   │   ├── Motors/             DRV8833.c
 │   │   ├── Sensors/ICM-42688-P/ ICM42688.c
+│   │   ├── Tests/               test_harness.c  ← ACTIVE_TEST + all Test_* routines
 │   │   └── Utils/               dwt_timer.c
 ├── Drivers/                    CMSIS + STM32F4xx HAL
 ├── cmake/                      Toolchain files + CubeMX-generated CMakeLists

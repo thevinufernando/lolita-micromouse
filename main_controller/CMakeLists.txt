@@ -63,6 +63,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     # Utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c
+
+    # On-target test harness
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Tests/test_harness.c
 )
 
 # Add include paths
@@ -73,6 +76,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Control/LowLevel
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/ICM-42688-P
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Utils
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Tests
 )
 
 # Add project symbols (macros)
