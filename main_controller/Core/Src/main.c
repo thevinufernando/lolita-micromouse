@@ -153,10 +153,19 @@ int main(void)
   tm_imu_ok = TurnController_Init();
 
   /* Startup indication.
-   *   3 slow blinks  = IMU up, fusion active
-   *   6 fast blinks  = IMU not found, running encoder-only */
+   *   3 slow blinks           = IMU up, bias calibrated, fusion active
+   *   3 slow THEN 6 fast      = IMU up but bias calibration was REJECTED.
+   *                             Turns still run, but on an unestimated gyro
+   *                             bias. Read turn_bias_cal_status for the
+   *                             reason (moved during calibration vs. a
+   *                             failed gyro read).
+   *   6 fast blinks           = IMU not found, running encoder-only */
   if (tm_imu_ok) {
     LED_Blink(3, 300, 300);
+
+    if (!TurnController_IsBiasCalibrated()) {
+      LED_Blink(6, 80, 80);
+    }
   }
   else {
     LED_Blink(6, 80, 80);

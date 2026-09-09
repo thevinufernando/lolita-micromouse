@@ -23,17 +23,32 @@ static uint32_t last_predict_cycles;
 //Set once at init; drives the encoder-only fallback
 static uint8_t imu_ok = 0U;
 
-//Debugging / live-watch
-float turn_target_yaw_deg;
-float turn_fused_yaw_deg;
-float turn_encoder_yaw_deg;
-float turn_yaw_error_deg;
-float turn_gyro_rate_dps;
-float turn_gyro_bias_dps;
-float turn_basespeed;
-uint32_t turn_predict_count;
-uint32_t turn_update_count;
-uint32_t turn_reject_count;
+/* Debugging / live-watch.
+ *
+ * These exist only to be observed from outside the firmware (ST-Link live
+ * watch, or a raw SWD memory read), so they are volatile: without it the
+ * compiler is entitled to keep them in registers and elide the stores, which
+ * costs nothing at Debug -O0 but can hand back stale values in Release. */
+volatile float turn_target_yaw_deg;
+volatile float turn_fused_yaw_deg;
+volatile float turn_encoder_yaw_deg;
+volatile float turn_yaw_error_deg;   /* control error: target - fused, deg   */
+volatile float turn_fusion_gap_deg;  /* fused - encoder, deg (ObserveYaw)    */
+volatile float turn_gyro_rate_dps;
+volatile float turn_gyro_bias_dps;
+volatile float turn_basespeed;
+volatile uint32_t turn_predict_count;
+volatile uint32_t turn_update_count;
+volatile uint32_t turn_reject_count;
+
+/* Gyro reads that failed mid-flight. Each one silently costs the prediction
+ * step an integration interval, so a non-zero value here means fused yaw is
+ * under-integrating -- which looks exactly like encoder over-read from wheel
+ * slip. Check this before blaming slip for a fused/encoder disagreement. */
+volatile uint32_t turn_imu_fail_count;
+
+/* Outcome of the startup gyro bias calibration. See TurnBiasCalStatus_t. */
+volatile TurnBiasCalStatus_t turn_bias_cal_status = TURN_BIAS_NOT_RUN;
 
 
 /* ------------------------------------------------------------------------
@@ -68,6 +83,12 @@ static void predictStep(void)
     float gz_dps = 0.0f;
 
     if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
+        /* NOTE: last_predict_cycles was already advanced above, so this
+         * interval's rotation is dropped rather than carried into the next
+         * prediction. Counted here so the loss is at least visible; if this
+         * ever reads non-zero, fix the ordering (read the gyro before closing
+         * the interval) rather than just watching the counter grow. */
+        turn_imu_fail_count++;
         return;
     }
 
@@ -106,7 +127,10 @@ static void publishTelemetry(void)
 
 uint8_t TurnController_CalibrateGyroBias(void)
 {
-    if (!imu_ok) return 0U;
+    if (!imu_ok) {
+        turn_bias_cal_status = TURN_BIAS_IMU_ERROR;
+        return 0U;
+    }
 
     /* Let the chassis stop vibrating before sampling. */
     HAL_Delay(IMU_GYRO_BIAS_SETTLE_MS);
@@ -119,6 +143,8 @@ uint8_t TurnController_CalibrateGyroBias(void)
         float gz_dps = 0.0f;
 
         if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
+            turn_imu_fail_count++;
+            turn_bias_cal_status = TURN_BIAS_IMU_ERROR;
             return 0U;
         }
 
@@ -134,6 +160,7 @@ uint8_t TurnController_CalibrateGyroBias(void)
 
     /* If anything moved during calibration the average is meaningless. */
     if (max_abs > IMU_GYRO_BIAS_MAX_DPS) {
+        turn_bias_cal_status = TURN_BIAS_MOVING;
         return 0U;
     }
 
@@ -148,7 +175,15 @@ uint8_t TurnController_CalibrateGyroBias(void)
 
     turn_gyro_bias_dps = EKF_GetGyroBiasDps(&yaw_ekf);
 
+    turn_bias_cal_status = TURN_BIAS_OK;
+
     return 1U;
+}
+
+
+uint8_t TurnController_IsBiasCalibrated(void)
+{
+    return (turn_bias_cal_status == TURN_BIAS_OK) ? 1U : 0U;
 }
 
 
@@ -183,7 +218,12 @@ uint8_t TurnController_Init(void)
     imu_ok = (ICM42688_Init() == IMU_OK) ? 1U : 0U;
 
     if (imu_ok) {
-        TurnController_CalibrateGyroBias();
+        /* A rejected calibration is NOT fatal but is also not harmless: the
+         * EKF keeps running with gyro_bias = 0, which quietly degrades every
+         * subsequent turn. The outcome lands in turn_bias_cal_status so the
+         * caller (and live-watch) can tell the difference between "IMU up and
+         * calibrated" and "IMU up but flying blind on bias". */
+        (void)TurnController_CalibrateGyroBias();
     }
 
     last_predict_cycles = DWT_GetCycles();
@@ -312,7 +352,33 @@ static void updateControl(float target_yaw_deg)
 
     //Turn PID on fused yaw. Output is signed by the error: positive drives
     //the robot anticlockwise, negative clockwise.
+    //
+    //Always evaluated, even inside the deadband below, so the integrator and
+    //the derivative filter stay in step with the real error instead of seeing
+    //a discontinuity when driving resumes.
     float basespeed = PIDController_Update(&turn_pid, target_yaw_deg, fused_yaw_deg);
+
+    /* ---------------- terminal deadband ----------------
+     * Once inside the tolerance band, stop driving and brake instead.
+     *
+     * Without this, applyMinSpeed() floors the command to
+     * +/-CONTROL_MIN_MOVE_SPEED, so the controller kept kicking the robot at
+     * full stiction-breaking torque for the whole CONTROL_SETTLE_CYCLES
+     * window it was supposed to be settling in. That impulse is far coarser
+     * than the tolerance band, so it would routinely knock the robot straight
+     * back out of the band it had just reached -- a limit cycle, felt as
+     * vibration and seen in the logs as moves that sat just outside tolerance
+     * until CONTROL_MOVE_TIMEOUT_MS fired.
+     *
+     * Braking here also helps satisfy the TURN_SETTLE_RATE_DPS half of the
+     * completion test instead of fighting it. */
+    if (within_tolerance) {
+
+        turn_basespeed = 0.0f;
+        Motor_Brake();
+
+        return;
+    }
 
     //Overcome gearbox stiction near the target
     basespeed = applyMinSpeed(basespeed);
@@ -411,7 +477,11 @@ void TurnController_ObserveYaw(uint32_t duration_ms)
             correctStep();
             publishTelemetry();
 
-            turn_yaw_error_deg = turn_fused_yaw_deg - turn_encoder_yaw_deg;
+            /* Deliberately NOT turn_yaw_error_deg: that one means "target -
+             * fused" during a commanded turn. Overloading it here made the
+             * same live-watch variable mean two different things depending on
+             * which routine last wrote it. */
+            turn_fusion_gap_deg = turn_fused_yaw_deg - turn_encoder_yaw_deg;
         }
     }
 }

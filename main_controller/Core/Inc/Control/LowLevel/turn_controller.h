@@ -59,17 +59,38 @@ typedef enum {
 
 } TurnState_t;
 
-//Debugging / live-watch
-extern float turn_target_yaw_deg;
-extern float turn_fused_yaw_deg;
-extern float turn_encoder_yaw_deg;
-extern float turn_yaw_error_deg;
-extern float turn_gyro_rate_dps;
-extern float turn_gyro_bias_dps;
-extern float turn_basespeed;
-extern uint32_t turn_predict_count;
-extern uint32_t turn_update_count;
-extern uint32_t turn_reject_count;
+/* Outcome of the stationary gyro bias calibration.
+ * Anything other than TURN_BIAS_OK means the EKF is running with an
+ * unestimated (zero) gyro bias, which degrades turn accuracy silently. */
+typedef enum {
+
+    TURN_BIAS_NOT_RUN   = 0,  /* never attempted (e.g. no IMU detected)     */
+    TURN_BIAS_OK        = 1,  /* stationary average accepted and applied    */
+    TURN_BIAS_MOVING    = 2,  /* rejected: motion above IMU_GYRO_BIAS_MAX_DPS */
+    TURN_BIAS_IMU_ERROR = 3   /* aborted: a gyro read failed mid-sweep      */
+
+} TurnBiasCalStatus_t;
+
+/* Debugging / live-watch. Volatile because their only purpose is to be read
+ * from outside the firmware (live watch / raw SWD memory reads). */
+extern volatile float turn_target_yaw_deg;
+extern volatile float turn_fused_yaw_deg;
+extern volatile float turn_encoder_yaw_deg;
+extern volatile float turn_yaw_error_deg;   /* control error: target - fused */
+extern volatile float turn_fusion_gap_deg;  /* fused - encoder (ObserveYaw)  */
+extern volatile float turn_gyro_rate_dps;
+extern volatile float turn_gyro_bias_dps;
+extern volatile float turn_basespeed;
+extern volatile uint32_t turn_predict_count;
+extern volatile uint32_t turn_update_count;
+extern volatile uint32_t turn_reject_count;
+
+/* Failed gyro reads. Non-zero means fused yaw lost integration intervals and
+ * is under-reading rotation -- indistinguishable from encoder over-read due
+ * to wheel slip unless you check this counter. */
+extern volatile uint32_t turn_imu_fail_count;
+
+extern volatile TurnBiasCalStatus_t turn_bias_cal_status;
 
 //Function prototypes
 
@@ -85,6 +106,12 @@ uint8_t TurnController_CalibrateGyroBias(void);
 
 /* Was the IMU detected and is fusion active? */
 uint8_t TurnController_IsImuOk(void);
+
+/* Did the startup gyro bias calibration actually succeed? This is a SEPARATE
+ * question from TurnController_IsImuOk(): the IMU can be up and responding
+ * while the bias calibration was rejected, in which case turns still run but
+ * with an unestimated bias. See turn_bias_cal_status for the reason. */
+uint8_t TurnController_IsBiasCalibrated(void);
 
 /* Blocking turns. Return 1 on success, 0 if the safety timeout fired. */
 uint8_t turnLeftAngle(float angle_deg);
