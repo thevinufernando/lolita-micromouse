@@ -47,8 +47,19 @@
 
 /* Minimum speed magnitude that still overcomes gearbox stiction.
  * Commands below this (but non-zero) are boosted up to it, so the robot
- * does not stall just short of the target. Set to 0.0f to disable. */
-#define CONTROL_MIN_MOVE_SPEED      35.0f
+ * does not stall just short of the target. Set to 0.0f to disable.
+ *
+ * Raised from 35 -> 45: a 5-cycle TEST_TURN_LEFT_90 run at 35 completed 4/5
+ * turns (undershooting 0.77-0.93 deg each time) but stalled on the 5th --
+ * motor audibly running, wheel not turning, stuck until CONTROL_MOVE_TIMEOUT_MS
+ * fired at 2.04 deg short. That pattern (consistent small undershoot,
+ * occasional stall needing the same nudge) points to 35 sitting right at this
+ * motor's real low-PWM breakaway torque rather than a loose/slipping
+ * coupling. TURN_KI masks this some of the time by winding up until it
+ * breaks through, but isn't a guaranteed fix, hence raising the floor itself.
+ * Retest both turn and straight-line moves after changing this -- it is
+ * shared by both controllers. */
+#define CONTROL_MIN_MOVE_SPEED      45.0f
 
 
 /* ====================== STRAIGHTLINE: DISTANCE PID ======================= */
@@ -106,8 +117,35 @@
 /* will usually tolerate a higher Kp and a real Kd.                          */
 
 #define TURN_KP                     10.9f
-#define TURN_KI                     0.0f
-#define TURN_KD                     0.0f
+
+/* TURN_KI = 5.0 (raised from 0.0). Two floor runs at Kd=0.5 both undershot
+ * (0.93 deg, then 1.94 deg) instead of overshooting, and the second one
+ * TIMED OUT stuck there: basespeed pinned at CONTROL_MIN_MOVE_SPEED (35)
+ * with gyro rate ~0 dps for the rest of the 8s window -- 35 units just
+ * wasn't quite enough torque to break static friction from a dead stop for
+ * that particular residual, even though it was enough the previous run.
+ * This is exactly this file's own trigger for adding Ki ("consistently
+ * stops short"): a fixed command that isn't quite enough never gets bigger
+ * on its own, but an integrator winds up against a persistent, unchanging
+ * error until it does, then unwinds once the wheel actually moves.
+ * Sized so ~2 deg of sustained error saturates TURN_INT_LIMIT (20) in
+ * roughly 1-2 s, well inside CONTROL_MOVE_TIMEOUT_MS -- not yet tested on
+ * target, treat as a starting point. If it overshoots on the recovery kick,
+ * lower this before touching TURN_KD. */
+#define TURN_KI                     5.0f
+
+/* TURN_KD = 0.5 (raised from 0.0). Earlier runs at Kd=0 showed a clean
+ * pure-P response one time (overshoot to 94.3 deg, then got stuck there for
+ * the full CONTROL_MOVE_TIMEOUT_MS -- the correction command never
+ * recovered) and a floor run at Kd=0.5 landing cleanly at 89.07 deg
+ * (0.93 deg undershoot, well inside TURN_TOLERANCE_DEG, zero EKF slip
+ * rejects, no timeout). Consistent with this file's own tuning order:
+ * damping first to kill the overshoot-and-stick failure mode.
+ * Do NOT bump TURN_KP or add TURN_KI off this single clean sample -- the
+ * 0.93 deg undershoot is already within tolerance. Run several more floor
+ * trials at this Kd before deciding whether that undershoot is a real bias
+ * (-> small Ki) or just run-to-run noise (-> leave it alone). */
+#define TURN_KD                     0.5f
 
 /* Integrator clamp, in motor speed units */
 #define TURN_INT_LIMIT              20.0f

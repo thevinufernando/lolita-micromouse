@@ -21,6 +21,10 @@ volatile uint32_t tm_move_count     = 0;
 volatile uint32_t tm_timeout_count  = 0;
 volatile uint8_t  tm_last_ok        = 1;
 
+/* Flight recorder history buffer */
+volatile MoveRecord_t tm_history[TM_HISTORY_CAPACITY];
+volatile uint32_t     tm_history_count = 0;
+
 /* ---- IMU / EKF telemetry ---- */
 volatile uint8_t  tm_imu_ok         = 0;
 volatile float    tm_gyro_z_dps     = 0.0f;
@@ -55,6 +59,23 @@ void LED_Blink(uint8_t times, uint32_t on_ms, uint32_t off_ms)
   }
 }
 
+/* Record a completed move into the history buffer */
+static void History_Record(float target, float actual, float error, int32_t drift, int32_t l_cnt, int32_t r_cnt, uint8_t ok)
+{
+  if (tm_history_count < TM_HISTORY_CAPACITY)
+  {
+    tm_history[tm_history_count].timestamp_ms = HAL_GetTick();
+    tm_history[tm_history_count].target       = target;
+    tm_history[tm_history_count].actual       = actual;
+    tm_history[tm_history_count].error        = error;
+    tm_history[tm_history_count].drift_cnt    = drift;
+    tm_history[tm_history_count].left_cnt     = l_cnt;
+    tm_history[tm_history_count].right_cnt    = r_cnt;
+    tm_history[tm_history_count].ok           = ok;
+    tm_history_count++;
+  }
+}
+
 /* Capture the encoder state after a move into the live-watch telemetry. */
 static void Telemetry_Capture(float target_cm, uint8_t ok)
 {
@@ -72,18 +93,39 @@ static void Telemetry_Capture(float target_cm, uint8_t ok)
   tm_move_count++;
 
   if (!ok) tm_timeout_count++;
+
+  History_Record(target_cm, tm_final_avg_cm, tm_final_error_cm, tm_drift_cnt,
+                 tm_final_left_cnt, tm_final_right_cnt, ok);
 }
 
-/* Capture the yaw estimator state after a turn. `target_deg` is the signed
- * commanded angle, so the error is directly readable. */
-static void Telemetry_CaptureYaw(float target_deg)
+/* Capture the yaw estimator state and wheel travel after a turn. `target_deg` is
+ * the signed commanded angle, so the error is directly readable. */
+static void Telemetry_CaptureYaw(float target_deg, uint8_t ok)
 {
+  Encoders_Update();
+
+  tm_final_left_cm    = Encoder_getLeftDistance();
+  tm_final_right_cm   = Encoder_getRightDistance();
+  tm_final_avg_cm     = Encoder_getAverageDistance();
+  tm_final_error_cm   = 0.0f;
+  tm_final_left_cnt   = Encoder_getLeftCount();
+  tm_final_right_cnt  = Encoder_getRightCount();
+  tm_drift_cnt        = Encoder_getLeftCount() - Encoder_getRightCount();
+
+  tm_last_ok = ok;
+  tm_move_count++;
+
+  if (!ok) tm_timeout_count++;
+
   tm_yaw_deg        = TurnController_GetYawDeg();
   tm_yaw_error_deg  = target_deg - tm_yaw_deg;
   tm_enc_yaw_deg    = turn_encoder_yaw_deg;
   tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
   tm_ekf_rejects    = turn_reject_count;
+
+  History_Record(target_deg, tm_yaw_deg, tm_yaw_error_deg, tm_drift_cnt,
+                 tm_final_left_cnt, tm_final_right_cnt, ok);
 }
 
 /* Pause between moves, holding the motors braked. */
@@ -203,8 +245,7 @@ TEST_FN void Test_TurnLeft(void)
   LED_Blink(1, 150, 150);
 
   uint8_t ok = turnLeftAngle(TEST_ANGLE_DEG);
-  Telemetry_Capture(0.0f, ok);
-  Telemetry_CaptureYaw(+TEST_ANGLE_DEG);
+  Telemetry_CaptureYaw(+TEST_ANGLE_DEG, ok);
 }
 
 TEST_FN void Test_TurnRight(void)
@@ -212,8 +253,7 @@ TEST_FN void Test_TurnRight(void)
   LED_Blink(2, 150, 150);
 
   uint8_t ok = turnRightAngle(TEST_ANGLE_DEG);
-  Telemetry_Capture(0.0f, ok);
-  Telemetry_CaptureYaw(-TEST_ANGLE_DEG);
+  Telemetry_CaptureYaw(-TEST_ANGLE_DEG, ok);
 }
 
 /* ---------------------------------------------------------------------------
@@ -228,8 +268,7 @@ TEST_FN void Test_Turn360(void)
     LED_Blink(1, 100, 100);
 
     uint8_t ok = turnLeftAngle(90.0f);
-    Telemetry_Capture(0.0f, ok);
-    Telemetry_CaptureYaw(+90.0f);
+    Telemetry_CaptureYaw(+90.0f, ok);
 
     Test_Pause(TEST_MOVE_PAUSE_MS);
   }
@@ -253,8 +292,7 @@ TEST_FN void Test_Square(void)
     LED_Blink(2, 100, 100);
 
     ok = turnRightAngle(90.0f);
-    Telemetry_Capture(0.0f, ok);
-    Telemetry_CaptureYaw(-90.0f);
+    Telemetry_CaptureYaw(-90.0f, ok);
 
     Test_Pause(TEST_MOVE_PAUSE_MS);
   }
@@ -399,6 +437,20 @@ void TestHarness_RunCycle(void)
 #endif
 
   tm_cycle_count++;
+
+  /* If a cycle limit is set and reached, stop the robot indefinitely */
+  if (TEST_CYCLE_LIMIT > 0 && tm_cycle_count >= TEST_CYCLE_LIMIT)
+  {
+    Motor_Brake();
+    while (1)
+    {
+      /* Heartbeat blink (100ms on, 900ms off) indicates test is complete */
+      HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_SET);
+      HAL_Delay(100);
+      HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_RESET);
+      HAL_Delay(900);
+    }
+  }
 
   /* Idle between cycles with the motors braked, so you can reposition the
    * robot and read the telemetry before the next run starts. */

@@ -4,7 +4,47 @@
     // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        
+        {
+            "type": "stlinkgdbtarget",
+            "request": "attach",
+            "name": "STM32Cube: Attach to Running Target (Read Logs)",
+            "origin": "snippet",
+            "cwd": "${workspaceFolder}",
+            "imagesAndSymbols": [
+                {
+                    "imageFileName": "${command:st-stm32-ide-debug-launch.get-projects-binary-from-context1}"
+                }
+            ],
+            "liveWatch": {
+                "enabled": true,
+                "expressions": [
+                    "tm_history_count",
+                    "tm_history",
+                    "tm_final_avg_cm",
+                    "tm_final_error_cm",
+                    "tm_drift_cnt",
+                    "tm_final_left_cm",
+                    "tm_final_right_cm",
+                    "tm_final_left_cnt",
+                    "tm_final_right_cnt",
+                    "tm_move_count",
+                    "tm_cycle_count",
+                    "tm_timeout_count",
+                    "tm_last_ok",
+                    "tm_imu_ok",
+                    "tm_gyro_z_dps",
+                    "tm_yaw_deg",
+                    "tm_yaw_error_deg",
+                    "tm_enc_yaw_deg",
+                    "tm_fusion_gap_deg",
+                    "tm_gyro_bias_dps",
+                    "turn_target_yaw_deg",
+                    "turn_fused_yaw_deg",
+                    "turn_encoder_yaw_deg",
+                    "turn_yaw_error_deg"
+                ]
+            }
+        },
         {
             "type": "stlinkgdbtarget",
             "request": "launch",
@@ -23,6 +63,8 @@
             "liveWatch": {
                 "enabled": true,
                 "expressions": [
+                    "tm_history_count",
+                    "tm_history",
                     "tm_final_avg_cm",
                     "tm_final_error_cm",
                     "tm_drift_cnt",
