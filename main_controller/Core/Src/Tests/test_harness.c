@@ -59,8 +59,12 @@ void LED_Blink(uint8_t times, uint32_t on_ms, uint32_t off_ms)
   }
 }
 
-/* Record a completed move into the history buffer */
-static void History_Record(float target, float actual, float error, int32_t drift, int32_t l_cnt, int32_t r_cnt, uint8_t ok)
+/* Record a completed move into the history buffer.
+ * `rate` and `cmd` capture what the controller was doing as the move ended;
+ * see MoveRecord_t for why they matter on a failure. */
+static void History_Record(float target, float actual, float error,
+                           float rate, float cmd,
+                           int32_t drift, int32_t l_cnt, int32_t r_cnt, uint8_t ok)
 {
   if (tm_history_count < TM_HISTORY_CAPACITY)
   {
@@ -68,6 +72,8 @@ static void History_Record(float target, float actual, float error, int32_t drif
     tm_history[tm_history_count].target       = target;
     tm_history[tm_history_count].actual       = actual;
     tm_history[tm_history_count].error        = error;
+    tm_history[tm_history_count].rate_dps     = rate;
+    tm_history[tm_history_count].basespeed    = cmd;
     tm_history[tm_history_count].drift_cnt    = drift;
     tm_history[tm_history_count].left_cnt     = l_cnt;
     tm_history[tm_history_count].right_cnt    = r_cnt;
@@ -94,8 +100,10 @@ static void Telemetry_Capture(float target_cm, uint8_t ok)
 
   if (!ok) tm_timeout_count++;
 
-  History_Record(target_cm, tm_final_avg_cm, tm_final_error_cm, tm_drift_cnt,
-                 tm_final_left_cnt, tm_final_right_cnt, ok);
+  /* No rate signal in the straight-line path: it is encoder-only by design. */
+  History_Record(target_cm, tm_final_avg_cm, tm_final_error_cm,
+                 0.0f, basespeed,
+                 tm_drift_cnt, tm_final_left_cnt, tm_final_right_cnt, ok);
 }
 
 /* Capture the yaw estimator state and wheel travel after a turn. `target_deg` is
@@ -124,8 +132,11 @@ static void Telemetry_CaptureYaw(float target_deg, uint8_t ok)
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
   tm_ekf_rejects    = turn_reject_count;
 
-  History_Record(target_deg, tm_yaw_deg, tm_yaw_error_deg, tm_drift_cnt,
-                 tm_final_left_cnt, tm_final_right_cnt, ok);
+  /* Both survive a timeout untouched: the controller brakes and returns
+   * without writing either, so they hold the last commanded state. */
+  History_Record(target_deg, tm_yaw_deg, tm_yaw_error_deg,
+                 turn_gyro_rate_dps, turn_basespeed,
+                 tm_drift_cnt, tm_final_left_cnt, tm_final_right_cnt, ok);
 }
 
 /* Pause between moves, holding the motors braked. */

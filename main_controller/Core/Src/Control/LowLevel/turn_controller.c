@@ -17,6 +17,10 @@ static uint32_t turn_start_time;
 static float pid_sample_time_s;
 static uint16_t settle_counter;
 
+/* Consecutive cycles spent stationary while still short of the target.
+ * Gates the integrator's stall-recovery authority; see TURN_INT_LIMIT_MOVING. */
+static uint16_t stall_counter;
+
 //DWT cycle stamp of the last EKF prediction
 static uint32_t last_predict_cycles;
 
@@ -40,6 +44,14 @@ volatile float turn_basespeed;
 volatile uint32_t turn_predict_count;
 volatile uint32_t turn_update_count;
 volatile uint32_t turn_reject_count;
+
+/* Integrator state, exposed so a stalled or overshooting move can be told
+ * apart from the outside. turn_int_limit shows which of the two clamps is
+ * currently in force, and turn_stall_boosts counts cycles spent in the
+ * raised one -- 0 across a whole run means the stall path never armed. */
+volatile float    turn_integrator;
+volatile float    turn_int_limit;
+volatile uint32_t turn_stall_boosts;
 
 /* Gyro reads that failed mid-flight. Each one silently costs the prediction
  * step an integration interval, so a non-zero value here means fused yaw is
@@ -226,8 +238,10 @@ uint8_t TurnController_Init(void)
     turn_pid.T         = CONTROL_SAMPLE_TIME_S;
     turn_pid.limMin    = -CONTROL_MAX_SPEED;
     turn_pid.limMax    =  CONTROL_MAX_SPEED;
-    turn_pid.limMinInt = -TURN_INT_LIMIT;
-    turn_pid.limMaxInt =  TURN_INT_LIMIT;
+    /* Starting clamp only. updateControl() switches between
+     * TURN_INT_LIMIT_MOVING and TURN_INT_LIMIT every cycle. */
+    turn_pid.limMinInt = -TURN_INT_LIMIT_MOVING;
+    turn_pid.limMaxInt =  TURN_INT_LIMIT_MOVING;
 
     pid_sample_time_s = turn_pid.T;
 
@@ -296,6 +310,11 @@ static void resetPID(void)
 
     pid_last_time = 0;
     settle_counter = 0;
+    stall_counter = 0;
+
+    /* Every move starts assumed-moving, so a stall must be re-earned. */
+    turn_pid.limMaxInt =  TURN_INT_LIMIT_MOVING;
+    turn_pid.limMinInt = -TURN_INT_LIMIT_MOVING;
 }
 
 
@@ -374,6 +393,41 @@ static void updateControl(float target_yaw_deg)
         settle_counter = 0;
     }
 
+    /* ---------------- stall-gated integral authority ----------------
+     * The integrator is wanted for one job only: growing the command until
+     * a robot that has stopped short breaks static friction again. It is NOT
+     * wanted during the turn proper, where Kp already saturates the output
+     * and anything the integrator banks comes back as overshoot.
+     *
+     * So it gets a small clamp normally, and the large one only after the
+     * robot has been measurably stationary AND outside tolerance for
+     * TURN_STALL_CYCLES in a row. A healthy turn never satisfies that, so
+     * the big limit simply never arms.
+     *
+     * Lowering a clamp also SHRINKS an already-wound integrator, because
+     * PIDController_Update clamps after integrating. Recovery authority
+     * therefore evaporates the moment the wheel starts turning, which is the
+     * property that stops this from reintroducing the overshoot. */
+    if (!within_tolerance && imu_ok &&
+        fabsf(turn_gyro_rate_dps) < TURN_STALL_RATE_DPS) {
+
+        if (stall_counter < TURN_STALL_CYCLES) stall_counter++;
+    }
+    else {
+        stall_counter = 0;
+    }
+
+    float int_limit = TURN_INT_LIMIT_MOVING;
+
+    if (stall_counter >= TURN_STALL_CYCLES) {
+        int_limit = TURN_INT_LIMIT;
+        turn_stall_boosts++;
+    }
+
+    turn_pid.limMaxInt =  int_limit;
+    turn_pid.limMinInt = -int_limit;
+    turn_int_limit     =  int_limit;
+
     //Turn PID on fused yaw. Output is signed by the error: positive drives
     //the robot anticlockwise, negative clockwise.
     //
@@ -381,6 +435,8 @@ static void updateControl(float target_yaw_deg)
     //the derivative filter stay in step with the real error instead of seeing
     //a discontinuity when driving resumes.
     float basespeed = PIDController_Update(&turn_pid, target_yaw_deg, fused_yaw_deg);
+
+    turn_integrator = turn_pid.integrator;
 
     /* ---------------- terminal deadband ----------------
      * Once inside the tolerance band, stop driving and brake instead.

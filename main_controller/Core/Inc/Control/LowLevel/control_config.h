@@ -34,12 +34,29 @@
 
 /* ------------------------- Common PID settings --------------------------- */
 
-/* Control loop sample time in seconds (20 ms = 50 Hz) */
+/* Control loop sample time in seconds (10 ms = 100 Hz) */
 #define CONTROL_SAMPLE_TIME_S       0.010f
 
 /* Derivative low-pass filter time constant in seconds.
  * Rule of thumb: keep it a few times larger than the sample time.
- * Must be > 0 or the derivative term is unfiltered. */
+ * Must be > 0 or the derivative term is unfiltered.
+ *
+ * Held at 0.010 (= T), knowingly violating the rule above. 0.030 was tried
+ * and REVERTED: a 5-move TEST_TURN_LEFT_90 run went 3/5 -> 0/5, every move
+ * timing out 3.6-5.9 deg short. Only tau changed between those two runs.
+ *
+ * The theory it was testing turned out to be wrong. The robot was NOT in a
+ * stick-slip limit cycle driven by derivative spikes; it was stalling dead
+ * and unable to restart (turn_gyro_rate_dps ~0.15 with turn_basespeed at
+ * 65.4, i.e. commanded hard and not moving). Raising tau makes the
+ * derivative LAG, which kept braking torque applied for ~30 ms after motion
+ * had already ceased -- helping to seat the wheel in the stall rather than
+ * preventing it. See TURN_INT_LIMIT for the actual fix.
+ *
+ * Worth revisiting only if a derivative term is ever run at a Kd high enough
+ * that transient rejection matters more than phase lag. Note tau does NOT
+ * change steady-state damping (the term settles to -Kd * d(measurement)/dt
+ * regardless), so raising it only ever costs phase, never authority. */
 #define CONTROL_DERIV_TAU_S         0.010f
 
 /* Maximum motor speed command the controllers may produce (0..255). */
@@ -134,21 +151,103 @@
  * lower this before touching TURN_KD. */
 #define TURN_KI                     5.0f
 
-/* TURN_KD = 0.5 (raised from 0.0). Earlier runs at Kd=0 showed a clean
- * pure-P response one time (overshoot to 94.3 deg, then got stuck there for
- * the full CONTROL_MOVE_TIMEOUT_MS -- the correction command never
- * recovered) and a floor run at Kd=0.5 landing cleanly at 89.07 deg
- * (0.93 deg undershoot, well inside TURN_TOLERANCE_DEG, zero EKF slip
- * rejects, no timeout). Consistent with this file's own tuning order:
- * damping first to kill the overshoot-and-stick failure mode.
- * Do NOT bump TURN_KP or add TURN_KI off this single clean sample -- the
- * 0.93 deg undershoot is already within tolerance. Run several more floor
- * trials at this Kd before deciding whether that undershoot is a real bias
- * (-> small Ki) or just run-to-run noise (-> leave it alone). */
-#define TURN_KD                     0.5f
+/* TURN_KD = 0.25 (was 0.5). Damping was originally added to kill an
+ * overshoot-and-stick failure mode at Kd=0, and 0.5 did that.
+ *
+ * !! READ THIS BEFORE CHANGING IT !!
+ * Until the PID.c derivative sign fix, only HALF the configured Kd reached
+ * the output, so every result ever recorded at "0.5" was really 0.25 of
+ * damping. The best run on record -- 4/5, errors 0.91-1.43 deg -- was one of
+ * them. Once the fix landed and the full 0.5 took effect, the same test went
+ * 3/5 with two moves braking to a dead stop 4-5 deg short and timing out.
+ * 0.25 therefore is not a retreat: it is the value the robot was actually
+ * tuned at, now delivered by a filter that no longer amplifies noise.
+ *
+ * Raising this again means accepting that the robot decelerates to a full
+ * halt before reaching tolerance, which on a high-traction surface it cannot
+ * always restart from. Fix the stall authority (TURN_INT_LIMIT) first. */
+#define TURN_KD                     0.25f
 
-/* Integrator clamp, in motor speed units */
-#define TURN_INT_LIMIT              20.0f
+/* Integrator clamp, in motor speed units.
+ *
+ * Raised 20 -> 60. At 20 this clamp silently capped the controller's total
+ * authority far below CONTROL_MAX_SPEED and defeated the entire purpose Ki
+ * was added for. Caught red-handed in a 0/5 run: stalled 4.165 deg short,
+ * gyro rate 0.147 dps, and turn_basespeed pinned at 65.396 -- which is
+ * EXACTLY TURN_KP*4.165 + 20.0 = 45.40 + 20.0. The integrator was hard
+ * against this clamp with nothing left to give, so a robot that stopped
+ * short could never generate enough torque to break static friction again.
+ *
+ * 60 gives ~105 units at 4 deg of error instead of 65. If it still stalls
+ * there, breakaway on that surface exceeds what the controller can reach and
+ * the problem is mechanical, not tuning.
+ *
+ * This is now the STALL-ONLY limit; see TURN_INT_LIMIT_MOVING below. Plain
+ * clamping at 60 was tried first and did exactly the predicted damage: two
+ * 5-move runs went 4/5 each, and BOTH failures were overshoots to ~98 deg
+ * that then failed to recover inside CONTROL_MOVE_TIMEOUT_MS. The integrator
+ * only unwinds once the error changes sign, so it carried surplus command
+ * straight through the target. */
+#define TURN_INT_LIMIT              60.0f
+
+/* Integrator clamp while the robot is actually moving, in motor speed units.
+ *
+ * The integrator has two completely different jobs here, and they want
+ * opposite limits:
+ *
+ *   - Mid-move it should do almost nothing. Kp already saturates the output
+ *     for most of the turn, so anything the integrator accumulates is pure
+ *     overshoot waiting to happen.
+ *   - When the robot has stopped dead short of the target, it is the ONLY
+ *     term that can grow, and it needs enough authority to break static
+ *     friction (see the 65.4-unit stall documented above).
+ *
+ * So the limit is switched: this modest value normally, TURN_INT_LIMIT once
+ * the robot has been demonstrably stuck for TURN_STALL_CYCLES. Dropping the
+ * limit also bleeds down an already-wound integrator, because PIDController
+ * clamps on every update, so recovery authority disappears the moment the
+ * wheel starts turning again.
+ *
+ * !! CURRENTLY SET EQUAL TO TURN_INT_LIMIT, WHICH DISABLES THE SWITCHING !!
+ *
+ * The scheme above is sound and it worked exactly as designed. It just
+ * solved the wrong problem. Set to 20 it scored 2/5, and all three failures
+ * self-reported STALLED via the flight recorder: commanded at 75-90 speed
+ * units while rotating 0.03-0.15 dps, with the integrator pinned at the full
+ * boosted 60 in every case. turn_stall_boosts read 2580 cycles against 24 s
+ * of timeout, so the recovery path armed almost continuously and did not
+ * help.
+ *
+ * The lesson: 90 units cannot restart this robot from a dead stop, and
+ * proportional authority shrinks exactly as the error does, so the ceiling
+ * near the target is far below breakaway. Holding 60 throughout instead
+ * scored 8/10 -- NOT because it recovers from stalls better, but because the
+ * extra command through the approach means the robot never comes to rest
+ * short of the target. On this drivetrain, stopping is unrecoverable, so the
+ * winning strategy is to not stop.
+ *
+ * The detector and its telemetry are deliberately left in place: they cost
+ * nothing, turn_stall_boosts still reports when the robot got stuck, and a
+ * breakaway pulse (full scale for ~30 ms, then hand back to the PID) is the
+ * right consumer for it. Static friction is broken by amplitude, not by an
+ * integrator patiently ramping through a range where the wheel cannot move. */
+#define TURN_INT_LIMIT_MOVING       60.0f
+
+/* Stall detector: rotation below this rate (deg/s) while still outside
+ * TURN_TOLERANCE_DEG counts as "not moving".
+ *
+ * Deliberately below TURN_SETTLE_RATE_DPS so a normal deceleration into the
+ * tolerance band does not register. A genuine stall reads ~0.15 dps, so
+ * there is a wide margin either side. */
+#define TURN_STALL_RATE_DPS         5.0f
+
+/* How many consecutive cycles the stall condition must hold before the
+ * integrator is granted TURN_INT_LIMIT. At CONTROL_SAMPLE_TIME_S this is a
+ * dwell time, and it is the whole reason this scheme does not reintroduce
+ * the overshoot: a healthy 90 deg turn completes in ~800 ms and is never
+ * stationary-but-short for anything like this long, so the boost simply
+ * never arms. A real stall arms it in a fifth of a second. */
+#define TURN_STALL_CYCLES           20U
 
 
 /* ============================ IMU / EKF ================================== */

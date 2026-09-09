@@ -68,16 +68,36 @@
 /* ---- Flight Recorder History Buffer ---- */
 #define TM_HISTORY_CAPACITY 50U
 
+/* NOTE: changing the layout of this struct changes the stride the offline
+ * SWD telemetry reader walks the buffer with. Update both together. */
 typedef struct {
   uint32_t timestamp_ms; /* HAL_GetTick() when move completed */
   float target;          /* target distance (cm) or turn angle (deg) */
   float actual;          /* achieved distance (cm) or turn angle (deg) */
   float error;           /* target - actual */
+
+  /* State AT THE MOMENT THE MOVE ENDED. These exist to make a failed move
+   * self-diagnosing: on a timeout the controller brakes and returns without
+   * touching either value, so they preserve whatever it was doing when the
+   * clock ran out. Rate near zero with a large command means the robot was
+   * STALLED and could not break static friction. A large rate means it was
+   * HUNTING, swinging through the target too fast to satisfy the settle
+   * test. The two failures want opposite fixes, and without this the only
+   * way to tell them apart was to catch a failure as the last move of a run
+   * and read the live registers before they were overwritten. */
+  float rate_dps;        /* fused rotation rate, deg/s (turns only) */
+  float basespeed;       /* last commanded speed, motor units */
+
   int32_t drift_cnt;     /* left - right ticks (skew for straight runs) */
   int32_t left_cnt;      /* left encoder count */
   int32_t right_cnt;     /* right encoder count */
   uint8_t ok;            /* 1 = success, 0 = timeout */
 } MoveRecord_t;
+
+/* The offline reader walks tm_history by raw byte stride over SWD, so a
+ * layout change here silently turns every decoded field into garbage rather
+ * than failing. Fail the build instead. */
+_Static_assert(sizeof(MoveRecord_t) == 40, "MoveRecord_t stride changed: update the SWD telemetry reader");
 
 extern volatile MoveRecord_t tm_history[TM_HISTORY_CAPACITY];
 extern volatile uint32_t tm_history_count;

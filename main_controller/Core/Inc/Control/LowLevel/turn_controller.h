@@ -85,6 +85,14 @@ extern volatile uint32_t turn_predict_count;
 extern volatile uint32_t turn_update_count;
 extern volatile uint32_t turn_reject_count;
 
+/* Integral state. turn_int_limit says which clamp is in force right now
+ * (TURN_INT_LIMIT_MOVING or the raised TURN_INT_LIMIT), and turn_stall_boosts
+ * counts cycles spent in the raised one. If a run shows overshoot while
+ * turn_stall_boosts is 0, the integrator is not the cause. */
+extern volatile float    turn_integrator;
+extern volatile float    turn_int_limit;
+extern volatile uint32_t turn_stall_boosts;
+
 /* Failed gyro reads. Non-zero means fused yaw lost integration intervals and
  * is under-reading rotation -- indistinguishable from encoder over-read due
  * to wheel slip unless you check this counter. */
