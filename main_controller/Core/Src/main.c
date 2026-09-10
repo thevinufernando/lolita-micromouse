@@ -26,6 +26,7 @@
 #include "straightline_controller.h"
 #include "turn_controller.h"
 #include "test_harness.h"
+#include "tof_sensors.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -176,6 +177,22 @@ int main(void)
   }
 
   tm_gyro_bias_dps = TurnController_GetGyroBiasDps();
+
+  /* Bring up the TCA9548A mux and the three VL53L0X ranging sensors.
+   *
+   * This takes noticeably longer than the other peripherals: each sensor runs
+   * reference SPAD management and VHV/phase calibration, so budget ~50-100 ms
+   * per sensor.
+   *
+   * Like the IMU, a failure here is NOT fatal. Nothing in the motion
+   * controllers consumes range data yet, so a dead sensor must not stop the
+   * robot from driving. 2 fast blinks flags it; tm_tof_ready says which
+   * sensors actually came up. */
+  if (ToF_Init() != TOF_OK) {
+    LED_Blink(2, 80, 80);
+  }
+
+  TestHarness_CaptureToFReady();
 
   /* Settling delay so the robot is not already moving when you take your
    * hand off it. */

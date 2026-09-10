@@ -343,6 +343,66 @@
 #define EKF_INNOVATION_GATE         3.0f
 
 
+/* ==================== VL53L0X ToF ranging sensors ======================== */
+
+/* Which TCA9548A channel each sensor hangs off. The mux has 8 channels and
+ * the PCB breaks out five ToF footprints; only three are populated for wall
+ * detection. Verify against the Main PCB schematic before trusting a reading
+ * -- a swapped pair here produces perfectly valid distances attributed to the
+ * wrong direction, which is far harder to spot than a dead sensor. */
+#define TOF_CHANNEL_FRONT           0U
+#define TOF_CHANNEL_LEFT            3U
+#define TOF_CHANNEL_RIGHT           4U
+
+/* Factory default 7-bit address, shifted to the 8-bit form both the ST API
+ * and the HAL expect. Every sensor keeps this address; the mux is what makes
+ * them individually addressable. */
+#define TOF_I2C_ADDR_DEFAULT        0x52
+
+/* Measurement timing budget, microseconds. This is the master speed/accuracy
+ * knob: longer budget = less noise and more range, at a lower sample rate.
+ *
+ *   20000  (20 ms) - ST's fastest preset, noticeably noisier
+ *   33000  (33 ms) - ST's default, ~30 Hz
+ *   200000 (200 ms) - high accuracy preset
+ *
+ * 33 ms is the starting point here. For a moving micromouse the sample rate
+ * matters more than the last millimetre, so if wall following turns out to
+ * lag, drop this before touching anything else. */
+#define TOF_TIMING_BUDGET_US        33000U
+
+/* Inter-measurement period for CONTINUOUS mode, milliseconds. Must be >= the
+ * timing budget in ms, otherwise the sensor cannot keep up and simply runs
+ * back-to-back. The margin over the budget covers the sensor's own overhead. */
+#define TOF_INTER_MEASUREMENT_MS    40U
+
+/* VCSEL pulse periods, in PCLKs. These set the range/ambient-immunity
+ * trade-off and only accept specific values: pre-range 12/14/16/18,
+ * final-range 8/10/12/14. ST's default profile is 14/10.
+ *
+ * Longer periods extend range (the long-range profile uses 18/14) at the cost
+ * of ambient light immunity. Maze walls are close -- under 20 cm -- so the
+ * default is kept; there is no reason to reach for range the robot will never
+ * use and pay for it in noise. */
+#define TOF_VCSEL_PERIOD_PRE_RANGE  14U
+#define TOF_VCSEL_PERIOD_FINAL_RANGE 10U
+
+/* Signal rate limit, MCPS, as a float converted to the API's 16.16 fixed
+ * point at the call site. Readings weaker than this are rejected as noise.
+ * ST's default is 0.25; the long-range profile lowers it to 0.1.
+ * RAISE to reject more marginal readings, LOWER to see darker/further walls. */
+#define TOF_SIGNAL_RATE_LIMIT_MCPS  0.25f
+
+/* Sigma (standard deviation) limit, millimetres. Rejects readings the sensor
+ * itself considers imprecise. ST's default is 18 mm. */
+#define TOF_SIGMA_LIMIT_MM          18.0f
+
+/* How long to wait for a measurement to complete before giving up, ms.
+ * Must comfortably exceed the timing budget -- this is a stuck-sensor
+ * detector, not a pacing mechanism. */
+#define TOF_DATA_READY_TIMEOUT_MS   100U
+
+
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */

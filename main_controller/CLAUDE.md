@@ -25,7 +25,7 @@ scope until the motion primitives are trusted.
 | Motors | 2× N20 gear motor with quadrature encoder, differential drive |
 | Motor driver | DRV8833, IN/IN mode, 4 PWM channels |
 | IMU | ICM-42688-P accel + gyro over SPI1. **No magnetometer.** |
-| Range | VL53L0X ToF — **hardware present, not integrated in firmware yet** |
+| Range | 3× VL53L0X ToF (front/left/right) behind a TCA9548A I2C mux |
 | Power | 3S LiPo |
 
 Note HCLK is 48 MHz, not 96. `SystemCoreClock` reflects HCLK and the DWT cycle
@@ -39,6 +39,7 @@ counter runs at it. Do not assume 96 MHz when doing cycle math.
 | TIM2 | Left encoder, quadrature (TI12), PA0/PA1 |
 | TIM3 | Motor PWM ×4, period 4799, PC6–PC9 |
 | SPI1 | IMU, master, mode 0, prescaler /2 → **24 MHz** (PA5/6/7 + PA4 CS) |
+| I2C1 | TCA9548A mux → 3× VL53L0X, 100 kHz, PB6 SCL / PB7 SDA |
 | GPIO | PC3 `MCU_LED`, PB14 `DRV_STBY`, PA4 `IMU_NCS` |
 | SWD | PA13/PA14 + PB3 SWO |
 
@@ -95,6 +96,11 @@ Core/Inc, Core/Src
 ├─ Encoders/            encoders.c
 ├─ Motors/              DRV8833.c
 ├─ Sensors/ICM-42688-P/ ICM42688.c
+├─ Sensors/TCA9548A/    TCA9548A.c            ← I2C mux channel select
+├─ Sensors/VL53L0X_Driver/ tof_sensors.c      ← our ToF driver (this is the one to edit)
+├─ Sensors/VL53L0X/     stock ST API — DO NOT EDIT (see §9)
+│  ├─ Core/             vl53l0x_api*.c        ← ST, verbatim
+│  └─ Platform/         vl53l0x_platform.c    ← ST's file, REWRITTEN for STM32 HAL
 ├─ Tests/               test_harness.c  ← ACTIVE_TEST + all on-target Test_* routines
 └─ Utils/               dwt_timer.c
 tests/                  host-side EKF verification (separate from Core/Src/Tests/ above)
@@ -208,7 +214,7 @@ There are no magic numbers scattered in the controllers. Change values there,
 rebuild, flash.
 
 `Core/Inc/Tests/test_harness.h` has an `ACTIVE_TEST` switch selecting one of
-11 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
+13 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
 rebuild, flash, and read results in live-watch.
 
 | # | Test | Purpose |
@@ -223,6 +229,8 @@ rebuild, flash, and read results in live-watch.
 | 8 | `TEST_IMU_RAW` | **Run first after IMU wiring** — gyro sign check |
 | 9 | `TEST_YAW_ESTIMATE` | Rotate by hand, watch fusion |
 | 10 | `TEST_GYRO_BIAS` | Bias + stationary drift measurement |
+| 11 | `TEST_TOF_SINGLE` | **Run first after ToF wiring** — mux + single-shot ranging |
+| 12 | `TEST_TOF_CONTINUOUS` | Free-running ranging, same distances |
 
 ### Bring-up order for the IMU
 
@@ -277,7 +285,11 @@ failing, so a silent fallback is possible — check `tm_imu_ok`.
 
 Currently **out of scope** unless explicitly requested:
 
-- VL53L0X / wall detection — driver files not present yet
+- **Wall detection logic** — the ToF sensors now report distances (see
+  §9), but nothing turns those into "there is a wall here" decisions.
+  That judgement belongs with the maze logic, which does not exist yet.
+- ToF in either motion controller — straight-line and turns remain
+  encoder/IMU only; range data is not fed back into control
 - Any maze-solving algorithm (flood fill, DFS, …)
 - IMU in the straight-line controller
 - Magnetometer — **not present in hardware**, so absolute heading is
@@ -285,7 +297,172 @@ Currently **out of scope** unless explicitly requested:
 
 ---
 
+## 9. ToF ranging (VL53L0X + TCA9548A)
+
+Three VL53L0X sensors (front, left, right) provide distance readings for wall
+detection. **Distances only** — see §8 for what is deliberately absent.
+
+### The ST API is vendor code
+
+Everything under `Sensors/VL53L0X/` is ST's official API (STSW-IMG005 v1.0.4),
+included verbatim so a future ST release is a drop-in replacement. **Do not
+edit it**, and do not reformat it to match house style.
+
+The one exception is `Platform/vl53l0x_platform.c`. ST ships that file as a
+Win32 reference port that drives a Nucleo over a COM port via
+`ranging_sensor_comms.dll`; it cannot build for this target. It has been
+replaced wholesale with a direct STM32 HAL I2C implementation. If the API is
+ever updated, this is the only file that needs re-porting.
+
+Three other files from ST's `Platform/` folder are Win32-only and are
+**deliberately not in `CMakeLists.txt`**: `vl53l0x_i2c_platform.c`,
+`vl53l0x_i2c_win_serial_comms.c` and `vl53l0x_platform_log.c`. Adding them
+breaks the build. Their declarations are bypassed by the HAL port.
+
+Write application code against `tof_sensors.h`, never against the ST API
+directly — the wrapper is what guarantees the mux is on the right channel.
+
+### The mux
+
+All VL53L0X parts share factory address `0x29`, so each sits on its own
+TCA9548A channel and the MCU opens exactly one at a time. The alternative —
+reassigning addresses at boot — needs one XSHUT GPIO per sensor and must be
+redone on every power cycle, so it was not used.
+
+Consequences worth knowing:
+
+- **Every access is channel-scoped.** Each `ToF_*` entry point selects the
+  channel before touching a sensor. This is also why the ST API must not be
+  called directly: an API call on the wrong channel silently talks to a
+  different sensor at the same address and returns a perfectly plausible
+  number.
+- **A swapped channel mapping is nearly invisible.** `TOF_CHANNEL_*` in
+  `control_config.h` must match the Main PCB. Get it wrong and every reading
+  is valid but attributed to the wrong direction.
+- The mux driver caches the active channel, so re-selecting the same one
+  costs nothing. `TCA9548A_DisableAll()` parks the bus.
+
+### Units
+
+Distances are **millimetres**, unsigned — the ST API's native unit. Note the
+motion controllers use **cm**; converting is the caller's job.
+
+An invalid reading is `TOF_DISTANCE_INVALID` (0xFFFF), never a stale value, so
+ignoring a return code yields an obviously-wrong number rather than a
+plausible old one. `TOF_ERROR_RANGE` means the sensor answered but the
+measurement is unusable (usually nothing in range) — a normal condition, not a
+fault. The raw ST `RangeStatus` is kept in the measurement struct for
+diagnosis.
+
+### Modes
+
+Both are exposed because they suit different phases:
+
+| Mode | Call | Use |
+|---|---|---|
+| Single | `ToF_ReadSingle()` | Blocks ~30 ms per read. Bring-up, stationary checks. |
+| Continuous | `ToF_StartContinuous()` then `ToF_ReadContinuous()` | Sensor free-runs; reads are cheap and bounded. What a moving robot wants. |
+
+Continuous uses `CONTINUOUS_TIMED_RANGING`, not back-to-back: back-to-back
+pins the sensor at full duty and floods the bus when the consumer reads slower
+than the sensor produces. `TOF_INTER_MEASUREMENT_MS` sets the pace.
+
+`ToF_ReadContinuous(..., wait_for_new = 0)` is the non-blocking form — it
+returns `TOF_ERROR_TIMEOUT` when no new sample has landed yet. In a loop faster
+than the sensor that is expected, not an error.
+
+### Init and failure behaviour
+
+`ToF_Init()` runs the full ST sequence per sensor — `DataInit`, `StaticInit`,
+`PerformRefSpadManagement`, `PerformRefCalibration` — then applies the profile
+from `control_config.h`. Budget ~50–100 ms per sensor at boot.
+
+Two ordering rules inside that sequence are load-bearing:
+
+1. `DataInit` → `StaticInit` → reference calibrations. Mandated by the API.
+2. **VCSEL periods before the timing budget.** Changing a VCSEL period changes
+   how long a measurement takes, and the API recomputes the budget against the
+   current periods — set the budget first and it is silently readjusted.
+
+Reference calibration runs at boot rather than loading stored constants,
+because these sensors have not been characterised on this chassis yet. Once
+they have, caching the results would remove most of that boot cost.
+
+Like the IMU, **failure is not fatal**: a bad sensor is marked not-ready and
+skipped by every later call (so it cannot stall a loop with repeated I2C
+timeouts), while the healthy ones stay usable. `ToF_Init()` still returns
+`TOF_ERROR` if any sensor failed — use `ToF_IsSensorReady()` to find out which.
+**2 fast LED blinks at boot** flags a ToF init failure.
+
+### Bring-up order
+
+1. `TEST_TOF_SINGLE` (test 11). Check `tm_tof_ready` **first**: bit0 front,
+   bit1 left, bit2 right. An all-zero mask means the *mux* never answered —
+   that is a wiring or address problem, not a sensor problem.
+2. With `tm_tof_ready == 0x07`, hold a wall at a known distance in front of
+   each sensor and check `tm_tof_front_mm` / `_left_mm` / `_right_mm` against
+   a ruler. Confirm each sensor responds to the direction it is named for —
+   this is the check that catches a swapped `TOF_CHANNEL_*` mapping.
+3. `TEST_TOF_CONTINUOUS` (test 12). Same distances, free-running.
+   `tm_tof_error_count` rising while `tm_tof_sample_count` stays static is the
+   real fault signal; both rising together just means polling outpaced the
+   sensor.
+
+### Tuning
+
+All in `control_config.h` under the ToF section. The master knob is
+`TOF_TIMING_BUDGET_US` (speed vs. accuracy) — for a moving micromouse, sample
+rate matters more than the last millimetre, so lower this before touching
+anything else. `TOF_VCSEL_PERIOD_*` are left at ST's defaults deliberately:
+maze walls are under 20 cm away, and buying range the robot will never use
+costs ambient-light immunity.
+
+---
+
 ## Change log
+
+### 2026-09-10 — VL53L0X ToF ranging brought up
+- Added ST's official VL53L0X API (STSW-IMG005 v1.0.4) under
+  `Sensors/VL53L0X/`, verbatim. The five `Core/` sources are in the build;
+  see §9 for the three Win32-only `Platform/` files that are deliberately
+  **not**.
+- **Re-ported `Platform/vl53l0x_platform.c`.** ST ships it as a Win32
+  reference implementation (`#include <Windows.h>`, talks to a Nucleo over a
+  COM port via `ranging_sensor_comms.dll`) which cannot build for this
+  target. Replaced with a direct STM32 HAL I2C implementation:
+  read/write byte/word/dword built on `HAL_I2C_Mem_Read` /
+  `HAL_I2C_Master_Transmit`, MSB-first packing for the sensor's big-endian
+  registers, and a 1 ms `VL53L0X_PollingDelay()`. This is the only ST file
+  modified, so an API update means re-porting one file.
+- Added `Sensors/TCA9548A/TCA9548A.c/.h` — mux channel select, with the
+  active mask cached so a repeat select costs no I2C traffic. Every sensor
+  read is wrapped in a select, so that mattered.
+- Added `Sensors/VL53L0X_Driver/tof_sensors.c/.h` — the application-facing
+  driver. Three sensors (front/left/right), single **and** continuous
+  ranging, distances in **mm**. Every entry point selects the mux channel
+  first. Continuous mode uses `CONTINUOUS_TIMED_RANGING` rather than
+  back-to-back, and `ToF_ReadContinuous()` has a non-blocking form for use
+  from a control loop.
+- Failure handling mirrors the IMU's: a sensor that fails init is marked
+  not-ready and skipped by later calls rather than retried, so one dead
+  sensor cannot stall a loop with repeated I2C timeouts. The rest stay
+  usable. **2 fast LED blinks at boot** = ToF init failure.
+- Invalid readings return `TOF_DISTANCE_INVALID` (0xFFFF) rather than a stale
+  distance, so ignoring a return code fails loudly. `TOF_ERROR_RANGE`
+  (sensor fine, nothing in range) is kept distinct from `TOF_ERROR` (bus
+  fault) — different problems, different fixes.
+- `control_config.h`: added the ToF section — mux channel mapping, timing
+  budget, inter-measurement period, VCSEL periods, signal/sigma limits.
+  Note **VCSEL periods must be set before the timing budget** or the API
+  silently recomputes the budget; the init order encodes this.
+- `test_harness.c/.h`: added tests 11 (`TEST_TOF_SINGLE`) and 12
+  (`TEST_TOF_CONTINUOUS`) plus `tm_tof_*` telemetry. `tm_tof_ready` is a
+  bitmask latched at boot so the mask is readable whatever test is selected —
+  all-zero means the mux never answered, which is the failure worth
+  distinguishing first.
+- `main.c`: `ToF_Init()` in `USER CODE BEGIN 2`, after the controllers.
+- **Wall detection is deliberately not implemented.** This change reports
+  distances and nothing more; interpreting them belongs with the maze logic.
 
 ### 2026-09-09 — Test harness pulled out of main.c
 - `main.c`'s `USER CODE` blocks had absorbed the entire test harness (20

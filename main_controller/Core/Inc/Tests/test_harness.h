@@ -30,14 +30,16 @@
 #define TEST_IMU_RAW 8           /* No motion. Raw IMU + gyro sign check. */
 #define TEST_YAW_ESTIMATE 9      /* No motion. Rotate by hand, watch EKF. */
 #define TEST_GYRO_BIAS 10        /* No motion. Bias + drift measurement.  */
+#define TEST_TOF_SINGLE 11       /* No motion. Single-shot ToF ranging.   */
+#define TEST_TOF_CONTINUOUS 12   /* No motion. Continuous ToF ranging.    */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_STRAIGHT_FWD_BACK
+#define ACTIVE_TEST TEST_SQUARE 
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 100.0f    /* Straightline test distance (15 cm) */
 #define TEST_ANGLE_DEG 90.0f      /* Turn test angle                   */
-#define TEST_SQUARE_SIDE_CM 18.0f /* Square test side length           */
+#define TEST_SQUARE_SIDE_CM 50.0f /* Square test side length           */
 #define TEST_OPEN_LOOP_SPEED 120  /* Open loop test speed (0-255)      */
 
 /* Pause between individual moves, in ms. Lets the chassis settle so each
@@ -134,9 +136,28 @@ extern volatile float tm_yaw_sigma_deg;  /* EKF yaw 1-sigma, deg        */
 extern volatile float tm_bias_drift_deg; /* yaw drift while stationary  */
 extern volatile uint32_t tm_ekf_rejects; /* gated-out encoder updates   */
 
+/* ---- ToF telemetry ----
+ * Distances are in MILLIMETRES (the ST API's native unit), not the cm used
+ * by the motion controllers. TOF_DISTANCE_INVALID (0xFFFF = 65535) means the
+ * reading is not usable -- check the matching status/valid field to find out
+ * why before assuming the sensor is broken. */
+extern volatile uint8_t tm_tof_ready;         /* bit0 front, bit1 left, bit2 right */
+extern volatile uint16_t tm_tof_front_mm;
+extern volatile uint16_t tm_tof_left_mm;
+extern volatile uint16_t tm_tof_right_mm;
+extern volatile uint8_t tm_tof_front_status;  /* raw ST RangeStatus, 0 = good */
+extern volatile uint8_t tm_tof_left_status;
+extern volatile uint8_t tm_tof_right_status;
+extern volatile uint32_t tm_tof_sample_count; /* successful full sweeps      */
+extern volatile uint32_t tm_tof_error_count;  /* sweeps with any bad reading */
+
 /* Blink the on-board LED n times to signal progress without a serial port.
  * Shared by the test routines and main()'s own startup indicator. */
 void LED_Blink(uint8_t times, uint32_t on_ms, uint32_t off_ms);
+
+/* Latch which ToF sensors came up into tm_tof_ready. Called by main() once
+ * after ToF_Init(), so the mask is readable regardless of ACTIVE_TEST. */
+void TestHarness_CaptureToFReady(void);
 
 /* Run one iteration of the selected test, including its cycle pause.
  * Called from main()'s while(1) loop. */
