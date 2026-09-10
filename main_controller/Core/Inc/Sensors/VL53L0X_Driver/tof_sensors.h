@@ -62,6 +62,27 @@
  * caller that ignores the return code gets an obviously-wrong number instead
  * of a plausible old one. Out-of-range (nothing in front of the sensor) is
  * reported as TOF_ERROR_RANGE, which is a normal condition, not a fault.
+ *
+ * ---------------------------------------------------------------------------
+ * ACCURACY: TWO SEPARATE PROBLEMS
+ * ---------------------------------------------------------------------------
+ * Raw readings are both NOISY and BIASED, and the two need different fixes.
+ * Confusing them wastes a lot of time, so the pipeline separates them:
+ *
+ *     raw from sensor  ->  + TOF_OFFSET_*_MM  ->  filter  ->  distance_mm
+ *                             (fixes bias)      (fixes noise)
+ *
+ *   NOISE is random spread between consecutive readings of a stationary
+ *   target. Handled by tof_filter.c (median + EMA). See tof_filter.h.
+ *
+ *   BIAS is a consistent over- or under-read. Filtering CANNOT fix it -- the
+ *   average of biased samples is just as biased. Handled by the per-sensor
+ *   TOF_OFFSET_*_MM constants in control_config.h, which are applied before
+ *   the filter so the filter smooths an already-centred signal.
+ *
+ * If readings are stable but wrong, adjust the offsets. If they are centred
+ * but jumpy, adjust the filter. Reach for the other knob only after the first
+ * one is right.
  * ============================================================================
  */
 
@@ -82,11 +103,17 @@ typedef enum {
   TOF_SENSOR_COUNT
 } ToF_Sensor_t;
 
-/* One decoded measurement. */
+/* One decoded measurement.
+ *
+ * Both the filtered and the unfiltered distance are reported. distance_mm is
+ * what application code should use; raw_mm exists so bring-up can see what the
+ * filter is actually doing, and so a noisy sensor can be told apart from a
+ * badly-tuned filter. Both already include the per-sensor offset. */
 typedef struct {
-  uint16_t distance_mm; /* TOF_DISTANCE_INVALID when not valid          */
-  uint8_t range_status; /* Raw ST status; 0 = valid. Kept for diagnosis */
-  uint8_t valid;        /* 1 = distance_mm is trustworthy               */
+  uint16_t distance_mm; /* Filtered. TOF_DISTANCE_INVALID when not valid */
+  uint16_t raw_mm;      /* Offset-corrected but unfiltered               */
+  uint8_t range_status; /* Raw ST status; 0 = valid. Kept for diagnosis  */
+  uint8_t valid;        /* 1 = distance_mm is trustworthy                */
 } ToF_Measurement_t;
 
 /*
@@ -142,6 +169,24 @@ int ToF_StopContinuous(ToF_Sensor_t sensor);
 
 /* Stop continuous ranging on every sensor. */
 int ToF_StopContinuousAll(void);
+
+/* ---- Filtering ---- */
+
+/* Discard filter history for one sensor (or all of them).
+ *
+ * Call after anything that breaks continuity between consecutive readings --
+ * a pivot turn, say, where the sensor ends up pointing at a completely
+ * different wall. Blending readings from before and after such a move is
+ * meaningless, and the jump detector only catches it if the change happens to
+ * exceed its threshold. The next reading re-seeds the filter. */
+void ToF_ResetFilter(ToF_Sensor_t sensor);
+void ToF_ResetFilterAll(void);
+
+/* Number of step-jumps the filter has snapped to for this sensor. A useful
+ * bring-up signal: sitting still it should not move at all. If it climbs with
+ * the robot stationary, TOF_FILTER_JUMP_THRESHOLD_MM is set below the actual
+ * noise spread and the smoothing is being defeated. */
+uint32_t ToF_GetFilterJumpCount(ToF_Sensor_t sensor);
 
 /* ---- Bulk helper ---- */
 

@@ -48,6 +48,12 @@ volatile uint8_t  tm_tof_ready         = 0;
 volatile uint16_t tm_tof_front_mm      = TOF_DISTANCE_INVALID;
 volatile uint16_t tm_tof_left_mm       = TOF_DISTANCE_INVALID;
 volatile uint16_t tm_tof_right_mm      = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_front_raw_mm  = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_left_raw_mm   = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_right_raw_mm  = TOF_DISTANCE_INVALID;
+volatile uint32_t tm_tof_front_jumps   = 0;
+volatile uint32_t tm_tof_left_jumps    = 0;
+volatile uint32_t tm_tof_right_jumps   = 0;
 volatile uint8_t  tm_tof_front_status  = 255;
 volatile uint8_t  tm_tof_left_status   = 255;
 volatile uint8_t  tm_tof_right_status  = 255;
@@ -427,6 +433,14 @@ static void Telemetry_CaptureToF(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
   tm_tof_front_mm     = m[TOF_FRONT].distance_mm;
   tm_tof_left_mm      = m[TOF_LEFT].distance_mm;
   tm_tof_right_mm     = m[TOF_RIGHT].distance_mm;
+
+  tm_tof_front_raw_mm = m[TOF_FRONT].raw_mm;
+  tm_tof_left_raw_mm  = m[TOF_LEFT].raw_mm;
+  tm_tof_right_raw_mm = m[TOF_RIGHT].raw_mm;
+
+  tm_tof_front_jumps  = ToF_GetFilterJumpCount(TOF_FRONT);
+  tm_tof_left_jumps   = ToF_GetFilterJumpCount(TOF_LEFT);
+  tm_tof_right_jumps  = ToF_GetFilterJumpCount(TOF_RIGHT);
 
   tm_tof_front_status = m[TOF_FRONT].range_status;
   tm_tof_left_status  = m[TOF_LEFT].range_status;

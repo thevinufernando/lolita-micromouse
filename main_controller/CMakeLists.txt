@@ -62,6 +62,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/ICM-42688-P/ICM42688.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/TCA9548A/TCA9548A.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X_Driver/tof_sensors.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X_Driver/tof_filter.c
 
     # VL53L0X - stock ST API (STSW-IMG005 v1.0.4), do not edit.
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Core/vl53l0x_api.c

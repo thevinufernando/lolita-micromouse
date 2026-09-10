@@ -81,9 +81,10 @@ belong there and CubeMX adds them when you enable a peripheral.
 
 ### Host-side tests
 
-`tests/` contains a host harness for the EKF; see `tests/README.md`. Run it
-after any change to `EKF.c` — it catches maths errors that on-target testing
-cannot.
+`tests/` contains host harnesses for the EKF and the ToF noise filter; see
+`tests/README.md`. Run the relevant one after any change to `EKF.c` or
+`tof_filter.c` — they catch maths errors that on-target testing cannot, and
+the ToF suite has already caught one real design defect (see §9).
 
 ---
 
@@ -98,6 +99,7 @@ Core/Inc, Core/Src
 ├─ Sensors/ICM-42688-P/ ICM42688.c
 ├─ Sensors/TCA9548A/    TCA9548A.c            ← I2C mux channel select
 ├─ Sensors/VL53L0X_Driver/ tof_sensors.c      ← our ToF driver (this is the one to edit)
+│                       tof_filter.c          ← range noise filter (host-tested)
 ├─ Sensors/VL53L0X/     stock ST API — DO NOT EDIT (see §9)
 │  ├─ Core/             vl53l0x_api*.c        ← ST, verbatim
 │  └─ Platform/         vl53l0x_platform.c    ← ST's file, REWRITTEN for STM32 HAL
@@ -342,10 +344,79 @@ Consequences worth knowing:
 - The mux driver caches the active channel, so re-selecting the same one
   costs nothing. `TCA9548A_DisableAll()` parks the bus.
 
+### Accuracy: noise and bias are separate problems
+
+This trips people up, so it is worth being explicit. The pipeline is:
+
+```
+raw from sensor  ──►  + TOF_OFFSET_*_MM  ──►  filter  ──►  distance_mm
+                          (fixes bias)      (fixes noise)
+```
+
+**Noise** is random spread between consecutive readings of a stationary
+target. Measured on this robot: a wall at a true 80 mm reads 83–90 mm.
+Handled by `tof_filter.c`.
+
+**Bias** is a consistent over- or under-read — in that same measurement, every
+sample was high. **Filtering cannot fix this.** The average of biased samples
+is equally biased; you get a beautifully stable wrong number. Handled by the
+per-sensor `TOF_OFFSET_*_MM` constants.
+
+> If readings are stable but wrong → adjust the offsets.
+> If they are centred but jumpy → adjust the filter.
+> Never try to cancel a constant error by tuning filter constants.
+
+Offsets are per-sensor because bias comes from cover glass, mounting depth and
+the module's own calibration. Measure each with `TEST_TOF_SINGLE` against a
+ruler at a distance you actually care about (80–100 mm for maze walls) and set
+the offset to `(true − measured)`. VL53L0X error is not perfectly constant with
+range, so a single offset is a linear fix to a mildly nonlinear problem —
+calibrate near the distance you drive at.
+
+### The noise filter
+
+Two stages, each aimed at a different failure mode (full rationale in
+`tof_filter.h`):
+
+1. **Median** over the last 3 raw samples — rejects the occasional wild
+   outlier from a bad reflection. A minority of arbitrarily-wrong values
+   cannot move a median at all.
+2. **EMA** over the median output — smooths the dense small jitter.
+
+A plain moving average was rejected: its lag would feed a wall-following
+controller a stale distance, which is a textbook route to oscillation, and the
+lag gets worse exactly when you lengthen the window to reduce noise.
+
+Measured on the host harness against the real noise band: **σ 2.27 mm → 0.94 mm**
+(2.4× reduction) with the mean preserved.
+
+**The jump detector is the part that matters for maze solving.** Smoothing
+assumes the signal is roughly constant, and that assumption breaks at the most
+important moment — when a side wall ends and the reading legitimately jumps
+from ~80 mm to ~250 mm. That jump is *signal*, not noise; an EMA would ramp
+across it and the robot would believe in a wall that is no longer there for the
+whole ramp. So a step larger than `TOF_FILTER_JUMP_THRESHOLD_MM` snaps the
+filter to the new value instead.
+
+⚠️ **The jump detector tests the RAW sample, not the median — do not "tidy"
+this.** The host test caught the defect: a real transition arrives as one new
+value against a window of old ones, so `{86, 86, 250}` medians to `86` and the
+median stage suppresses the first sample of every genuine step exactly as if it
+were an outlier. The cost of testing raw is one sample of overshoot on a large
+lone outlier, which the median then pulls back — much cheaper than being blind
+to an opening.
+
+Call `ToF_ResetFilter()` after anything that breaks continuity between
+readings, such as a pivot turn that leaves a sensor facing a different wall.
+
 ### Units
 
 Distances are **millimetres**, unsigned — the ST API's native unit. Note the
 motion controllers use **cm**; converting is the caller's job.
+
+`ToF_Measurement_t` carries both `distance_mm` (filtered — use this) and
+`raw_mm` (offset-corrected, unfiltered — for diagnosis). Both include the
+offset.
 
 An invalid reading is `TOF_DISTANCE_INVALID` (0xFFFF), never a stale value, so
 ignoring a return code yields an obviously-wrong number rather than a
@@ -403,7 +474,16 @@ timeouts), while the healthy ones stay usable. `ToF_Init()` still returns
    each sensor and check `tm_tof_front_mm` / `_left_mm` / `_right_mm` against
    a ruler. Confirm each sensor responds to the direction it is named for —
    this is the check that catches a swapped `TOF_CHANNEL_*` mapping.
-3. `TEST_TOF_CONTINUOUS` (test 12). Same distances, free-running.
+3. **Calibrate the offsets.** With a target at a known distance, compare the
+   settled `tm_tof_*_mm` against a ruler and set `TOF_OFFSET_*_MM` to
+   `(true − measured)`. Do this per sensor; do it before judging the filter.
+4. **Check the filter is working.** Watch `tm_tof_*_raw_mm` next to
+   `tm_tof_*_mm`: raw should visibly jitter while filtered sits still. If both
+   jitter equally the filter is not engaging.
+5. **Check `tm_tof_*_jumps` does not climb while the robot is stationary.** If
+   it does, `TOF_FILTER_JUMP_THRESHOLD_MM` is below the actual noise floor and
+   the smoothing is being defeated — raise it.
+6. `TEST_TOF_CONTINUOUS` (test 12). Same distances, free-running.
    `tm_tof_error_count` rising while `tm_tof_sample_count` stays static is the
    real fault signal; both rising together just means polling outpaced the
    sensor.
@@ -417,9 +497,62 @@ anything else. `TOF_VCSEL_PERIOD_*` are left at ST's defaults deliberately:
 maze walls are under 20 cm away, and buying range the robot will never use
 costs ambient-light immunity.
 
+Filter knobs:
+
+| Constant | Effect |
+|---|---|
+| `TOF_FILTER_EMA_ALPHA` | Smoothing vs. lag. Lower = smoother/slower. 1.0 disables. Governs small jitter only — large steps bypass it. |
+| `TOF_FILTER_JUMP_THRESHOLD_MM` | Step size treated as real. Must sit above the noise spread (~7 mm) and below the smallest real transition (~100 mm). |
+| `TOF_OFFSET_*_MM` | Per-sensor bias. Not a filter knob — see the accuracy note above. |
+
+After changing `tof_filter.c`, run the host suite (`tests/README.md`) —
+several of its cases encode design decisions that are easy to undo by
+accident.
+
 ---
 
 ## Change log
+
+### 2026-09-11 — ToF noise filtering + per-sensor offsets
+- Bench measurement with the sensors working: a wall at a true 80 mm read
+  83–90 mm. That is **two** problems — ~7 mm of spread (noise) on top of a
+  ~+6 mm consistent over-read (bias) — and they are now handled separately,
+  because filtering cannot fix bias.
+- Added `Sensors/VL53L0X_Driver/tof_filter.c/.h`: median (3-sample) feeding an
+  EMA, plus a step detector. Median kills lone outliers, EMA smooths dense
+  jitter. A plain moving average was rejected — its lag into a wall-following
+  controller invites oscillation, and worsens as you lengthen the window.
+  Host-measured: **σ 2.27 mm → 0.94 mm**, mean preserved.
+- **The jump detector tests the RAW sample, not the median.** The host test
+  caught this as a real defect: a genuine wall transition arrives as one new
+  value against a window of old ones, so `{86, 86, 250}` medians to `86` and
+  the median stage suppressed the first sample of every real step exactly as
+  if it were an outlier — leaving the robot blind to an opening for two more
+  samples, which is the failure the detector exists to prevent. Cost of the
+  fix is one sample of overshoot on a large lone outlier; documented and
+  asserted in test 5.
+- Added per-sensor `TOF_OFFSET_*_MM` to `control_config.h`, applied **before**
+  filtering so the filter smooths an already-centred signal and the jump
+  threshold compares corrected values. Currently all 0 — they need measuring
+  against a ruler (see §9). Offset application clamps at 0 so a negative
+  offset cannot underflow `uint16_t` into a huge distance.
+- Added `TOF_FILTER_EMA_ALPHA` (0.2) and `TOF_FILTER_JUMP_THRESHOLD_MM` (30).
+  30 mm sits between the ~7 mm noise floor and the ~100 mm+ real transitions.
+- `ToF_Measurement_t` now carries `raw_mm` alongside `distance_mm`, so
+  bring-up can tell a noisy sensor from a badly-tuned filter.
+- Filter continuity is broken on genuine faults (bus error, blocking timeout,
+  invalid range) but **deliberately not** on the non-blocking
+  `TOF_ERROR_TIMEOUT` path — that fires whenever polling outpaces the sensor,
+  and resetting there would clear the history on most calls and destroy the
+  smoothing entirely.
+- Added `tests/tof_filter_host_test.c` (8 cases) and expanded
+  `tests/README.md`. Test 2 asserts a *limitation* on purpose — that the
+  filter does not remove bias — so nobody tries to fix a constant error with
+  filter constants.
+- `test_harness.c/.h`: added `tm_tof_*_raw_mm` and `tm_tof_*_jumps` telemetry.
+  Jump counts climbing while stationary means the threshold is below the noise
+  floor.
+- Channel mapping corrected to front=0, left=3, right=4 (was 0/1/2).
 
 ### 2026-09-10 — VL53L0X ToF ranging brought up
 - Added ST's official VL53L0X API (STSW-IMG005 v1.0.4) under

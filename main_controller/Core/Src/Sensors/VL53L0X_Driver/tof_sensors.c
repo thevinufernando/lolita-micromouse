@@ -1,4 +1,5 @@
 #include "tof_sensors.h"
+#include "tof_filter.h"
 #include "TCA9548A.h"
 #include "control_config.h"
 #include "vl53l0x_api.h"
@@ -25,6 +26,42 @@ static uint8_t s_ready[TOF_SENSOR_COUNT];
  * triggers, and guards against starting continuous mode twice. */
 static uint8_t s_continuous[TOF_SENSOR_COUNT];
 
+/* Noise filter state, one per sensor. Kept here rather than inside the filter
+ * module so the filter stays a pure, host-testable transform with no global
+ * state of its own. */
+static ToF_Filter_t s_filter[TOF_SENSOR_COUNT];
+
+/* Per-sensor bias correction, mm, added to the raw reading. Index order must
+ * match ToF_Sensor_t. Signed: a sensor that reads long needs a negative
+ * offset. */
+static const int16_t s_offset_mm[TOF_SENSOR_COUNT] = {
+    TOF_OFFSET_FRONT_MM,
+    TOF_OFFSET_LEFT_MM,
+    TOF_OFFSET_RIGHT_MM,
+};
+
+/* Apply a sensor's offset, clamped to a sane range.
+ *
+ * Clamping at 0 matters: a negative offset larger than a short reading would
+ * underflow uint16_t into a huge positive distance -- the robot would believe
+ * a wall pressed against its bumper was metres away. Clamping below
+ * TOF_DISTANCE_INVALID keeps a corrected value from colliding with the
+ * sentinel. */
+static uint16_t ToF_ApplyOffset(ToF_Sensor_t sensor, uint16_t raw_mm)
+{
+    int32_t corrected = (int32_t)raw_mm + (int32_t)s_offset_mm[sensor];
+
+    if (corrected < 0) {
+        corrected = 0;
+    }
+
+    if (corrected >= (int32_t)TOF_DISTANCE_INVALID) {
+        corrected = (int32_t)TOF_DISTANCE_INVALID - 1;
+    }
+
+    return (uint16_t)corrected;
+}
+
 /* Convert a float in MCPS/mm to the API's FixPoint1616 format. */
 #define TOF_FP1616(x) ((FixPoint1616_t)((x) * 65536.0f))
 
@@ -50,6 +87,7 @@ static void ToF_InvalidateMeasurement(ToF_Measurement_t *out)
 {
     if (out != NULL) {
         out->distance_mm = TOF_DISTANCE_INVALID;
+        out->raw_mm = TOF_DISTANCE_INVALID;
         out->range_status = 255U;
         out->valid = 0U;
     }
@@ -62,20 +100,37 @@ static void ToF_InvalidateMeasurement(ToF_Measurement_t *out)
  * transaction worked but the number is not usable. That distinction is worth
  * preserving: a bus fault needs investigating, an out-of-range reading just
  * means there is no wall there. */
-static int ToF_DecodeMeasurement(const VL53L0X_RangingMeasurementData_t *data,
+static int ToF_DecodeMeasurement(ToF_Sensor_t sensor,
+                                 const VL53L0X_RangingMeasurementData_t *data,
                                  ToF_Measurement_t *out)
 {
+    uint16_t corrected;
+    uint16_t filtered;
+
     if (data->RangeStatus != 0U) {
+        /* Break filter continuity rather than letting the next good sample
+         * blend with one from before an unknown-length gap. */
+        ToF_Filter_Invalidate(&s_filter[sensor]);
+
         if (out != NULL) {
             out->distance_mm = TOF_DISTANCE_INVALID;
+            out->raw_mm = TOF_DISTANCE_INVALID;
             out->range_status = data->RangeStatus;
             out->valid = 0U;
         }
         return TOF_ERROR_RANGE;
     }
 
+    /* Bias first, then noise: the filter should smooth an already-centred
+     * signal. Filtering first and offsetting after would give the same mean
+     * here, but it would mean the jump detector compares uncorrected values
+     * against a threshold chosen for corrected ones. */
+    corrected = ToF_ApplyOffset(sensor, data->RangeMilliMeter);
+    filtered = ToF_Filter_Update(&s_filter[sensor], corrected);
+
     if (out != NULL) {
-        out->distance_mm = data->RangeMilliMeter;
+        out->distance_mm = filtered;
+        out->raw_mm = corrected;
         out->range_status = data->RangeStatus;
         out->valid = 1U;
     }
@@ -183,6 +238,7 @@ int ToF_Init(void)
     for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
         s_ready[i] = 0U;
         s_continuous[i] = 0U;
+        ToF_Filter_Reset(&s_filter[i]);
     }
 
     /* No mux, no sensors -- fail early rather than emitting three identical
@@ -255,10 +311,11 @@ int ToF_ReadSingle(ToF_Sensor_t sensor, ToF_Measurement_t *out)
     status = VL53L0X_PerformSingleRangingMeasurement(&s_dev[sensor], &data);
 
     if (status != VL53L0X_ERROR_NONE) {
+        ToF_Filter_Invalidate(&s_filter[sensor]);
         return TOF_ERROR;
     }
 
-    return ToF_DecodeMeasurement(&data, out);
+    return ToF_DecodeMeasurement(sensor, &data, out);
 }
 
 uint16_t ToF_GetDistanceSingle(ToF_Sensor_t sensor)
@@ -354,13 +411,19 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
     status = VL53L0X_GetMeasurementDataReady(&s_dev[sensor], &data_ready);
 
     if (status != VL53L0X_ERROR_NONE) {
+        ToF_Filter_Invalidate(&s_filter[sensor]);
         return TOF_ERROR;
     }
 
     if (!data_ready) {
         if (!wait_for_new) {
             /* Nothing new yet. Expected in a loop faster than the sensor --
-             * the caller keeps its previous reading. */
+             * the caller keeps its previous reading.
+             *
+             * Deliberately does NOT invalidate the filter: this is the normal
+             * outcome of polling faster than TOF_INTER_MEASUREMENT_MS, and
+             * resetting here would clear the history on most calls and
+             * destroy the smoothing entirely. */
             return TOF_ERROR_TIMEOUT;
         }
 
@@ -368,6 +431,10 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
 
         while (!data_ready) {
             if ((HAL_GetTick() - start_ms) > TOF_DATA_READY_TIMEOUT_MS) {
+                /* Waited longer than a measurement can legitimately take, so
+                 * the stream really is broken -- unlike the non-blocking case
+                 * above. */
+                ToF_Filter_Invalidate(&s_filter[sensor]);
                 return TOF_ERROR_TIMEOUT;
             }
 
@@ -377,6 +444,7 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
                                                      &data_ready);
 
             if (status != VL53L0X_ERROR_NONE) {
+                ToF_Filter_Invalidate(&s_filter[sensor]);
                 return TOF_ERROR;
             }
         }
@@ -385,6 +453,7 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
     status = VL53L0X_GetRangingMeasurementData(&s_dev[sensor], &data);
 
     if (status != VL53L0X_ERROR_NONE) {
+        ToF_Filter_Invalidate(&s_filter[sensor]);
         return TOF_ERROR;
     }
 
@@ -393,7 +462,7 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
     (void)VL53L0X_ClearInterruptMask(
         &s_dev[sensor], VL53L0X_REG_SYSTEM_INTERRUPT_GPIO_NEW_SAMPLE_READY);
 
-    return ToF_DecodeMeasurement(&data, out);
+    return ToF_DecodeMeasurement(sensor, &data, out);
 }
 
 int ToF_StopContinuous(ToF_Sensor_t sensor)
@@ -447,6 +516,31 @@ int ToF_StopContinuousAll(void)
     }
 
     return result;
+}
+
+void ToF_ResetFilter(ToF_Sensor_t sensor)
+{
+    if (sensor >= TOF_SENSOR_COUNT) {
+        return;
+    }
+
+    ToF_Filter_Reset(&s_filter[sensor]);
+}
+
+void ToF_ResetFilterAll(void)
+{
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        ToF_Filter_Reset(&s_filter[i]);
+    }
+}
+
+uint32_t ToF_GetFilterJumpCount(ToF_Sensor_t sensor)
+{
+    if (sensor >= TOF_SENSOR_COUNT) {
+        return 0U;
+    }
+
+    return s_filter[sensor].jump_count;
 }
 
 int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT])

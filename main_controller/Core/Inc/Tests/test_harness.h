@@ -142,9 +142,25 @@ extern volatile uint32_t tm_ekf_rejects; /* gated-out encoder updates   */
  * reading is not usable -- check the matching status/valid field to find out
  * why before assuming the sensor is broken. */
 extern volatile uint8_t tm_tof_ready;         /* bit0 front, bit1 left, bit2 right */
-extern volatile uint16_t tm_tof_front_mm;
+extern volatile uint16_t tm_tof_front_mm;     /* filtered (what code should use) */
 extern volatile uint16_t tm_tof_left_mm;
 extern volatile uint16_t tm_tof_right_mm;
+
+/* Unfiltered, offset-corrected. Watch these ALONGSIDE the filtered values to
+ * see the filter working: raw should visibly jitter while the filtered value
+ * sits still. If both jitter equally the filter is not engaging; if the
+ * filtered value lags a moving target badly, lower TOF_FILTER_EMA_ALPHA's
+ * effect by raising it toward 1.0. */
+extern volatile uint16_t tm_tof_front_raw_mm;
+extern volatile uint16_t tm_tof_left_raw_mm;
+extern volatile uint16_t tm_tof_right_raw_mm;
+
+/* Step-jumps the filter has snapped to, per sensor. With the robot stationary
+ * these must NOT climb -- if they do, TOF_FILTER_JUMP_THRESHOLD_MM is below
+ * the noise floor and the smoothing is being defeated. */
+extern volatile uint32_t tm_tof_front_jumps;
+extern volatile uint32_t tm_tof_left_jumps;
+extern volatile uint32_t tm_tof_right_jumps;
 extern volatile uint8_t tm_tof_front_status;  /* raw ST RangeStatus, 0 = good */
 extern volatile uint8_t tm_tof_left_status;
 extern volatile uint8_t tm_tof_right_status;
