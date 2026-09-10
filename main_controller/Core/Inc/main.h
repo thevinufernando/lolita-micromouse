@@ -87,6 +87,10 @@ void Error_Handler(void);
 #define RM_ENC_CHA_GPIO_Port GPIOA
 #define RM_ENC_CHB_Pin GPIO_PIN_9
 #define RM_ENC_CHB_GPIO_Port GPIOA
+#define MUX_SCL_Pin GPIO_PIN_6
+#define MUX_SCL_GPIO_Port GPIOB
+#define MUX_SDA_Pin GPIO_PIN_7
+#define MUX_SDA_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
