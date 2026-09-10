@@ -34,7 +34,7 @@
 #define TEST_TOF_CONTINUOUS 12   /* No motion. Continuous ToF ranging.    */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_SQUARE 
+#define ACTIVE_TEST TEST_TOF_SINGLE 
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 100.0f    /* Straightline test distance (15 cm) */

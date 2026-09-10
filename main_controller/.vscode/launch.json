@@ -41,7 +41,11 @@
                     "turn_target_yaw_deg",
                     "turn_fused_yaw_deg",
                     "turn_encoder_yaw_deg",
-                    "turn_yaw_error_deg"
+                    "turn_yaw_error_deg",
+                    "tm_tof_ready",
+                    "tm_tof_front_mm",
+                    "tm_tof_left_mm",
+                    "tm_tof_right_mm"
                 ]
             }
         },
