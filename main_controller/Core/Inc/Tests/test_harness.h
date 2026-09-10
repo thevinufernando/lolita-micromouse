@@ -32,7 +32,7 @@
 #define TEST_GYRO_BIAS 10        /* No motion. Bias + drift measurement.  */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_TURN_LEFT_90
+#define ACTIVE_TEST TEST_SQUARE
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 15.0f    /* Straightline test distance (15 cm) */
