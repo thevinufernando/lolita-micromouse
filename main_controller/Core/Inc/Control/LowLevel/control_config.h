@@ -250,6 +250,48 @@
 #define TURN_STALL_CYCLES           20U
 
 
+/* ========================= TURN MOTION PROFILE ========================== */
+/*                                                                          */
+/* The turn no longer chases a step setpoint of "go to 90 degrees". It      */
+/* tracks a trapezoidal reference that the robot can actually be at right   */
+/* now, which keeps the PID in its linear region and, more importantly,     */
+/* gives the move a KNOWN DURATION. Tolerance-based turns on this robot     */
+/* ranged from 0.7 to 8 seconds; a profiled one is always the same.         */
+
+/* Peak rotation rate, deg/s. */
+#define TURN_PROFILE_MAX_DPS        200.0f
+
+/* Angular acceleration, deg/s^2. With the peak above, a 90 deg turn ramps
+ * for 0.167 s over 16.7 deg at each end and cruises the middle 56.7 deg,
+ * giving a total of 0.617 s. Raise both together to go faster; raising accel
+ * alone just spends longer at peak rate. */
+#define TURN_PROFILE_ACCEL_DPS2     1200.0f
+
+/* Feedforward gain: motor speed units per deg/s of commanded rotation.
+ *
+ * THIS IS THE NUMBER THAT MAKES A PROFILE WORTH HAVING. It supplies the
+ * command the move needs so the feedback term only has to correct the
+ * difference. Get it right and the PID output hovers near zero mid-turn.
+ *
+ * CALIBRATE IT from turn_ff_cmd and turn_fb_cmd during the cruise phase: if
+ * turn_fb_cmd sits consistently positive, the feedforward is too small and
+ * the feedback is doing work it should not have to. 1.0 is a starting
+ * estimate from a 90 deg turn taking ~750 ms at a command near 200. */
+#define TURN_FF_GAIN                1.0f
+
+/* Grace period after the profile ends, in ms, to close whatever small error
+ * is left. BOUNDED ON PURPOSE: this is the whole difference between a move
+ * that always finishes and the old settle-forever loop that could hang for 8
+ * seconds. Worst-case move time is the profile duration plus this. */
+#define TURN_PROFILE_SETTLE_MS      250U
+
+/* The stiction floor is applied only while the profile commands at least this
+ * much rotation. Below it the profile is deliberately winding down, and
+ * forcing CONTROL_MIN_MOVE_SPEED there would drive the robot straight through
+ * the target -- which is exactly how the old scheme produced its overshoots. */
+#define TURN_PROFILE_FLOOR_DPS      20.0f
+
+
 /* ============================ IMU / EKF ================================== */
 
 /* Sign of the gyro Z axis relative to the robot's yaw convention.

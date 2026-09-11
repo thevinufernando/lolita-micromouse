@@ -1,4 +1,5 @@
 #include "turn_controller.h"
+#include "motion_profile.h"
 
 #define DEG_TO_RAD_F (PI / 180.0f)
 #define RAD_TO_DEG_F (180.0f / PI)
@@ -18,6 +19,9 @@ static uint16_t settle_counter;
  * Gates the integrator's stall-recovery authority; see TURN_INT_LIMIT_MOVING. */
 static uint16_t stall_counter;
 
+/* Reference trajectory for the move in progress. */
+static MotionProfile_t turn_profile;
+
 /* Debugging / live-watch.
  *
  * These exist only to be observed from outside the firmware (ST-Link live
@@ -35,6 +39,20 @@ volatile float turn_basespeed;
 volatile float    turn_integrator;
 volatile float    turn_int_limit;
 volatile uint32_t turn_stall_boosts;
+
+/* Profile tracking. turn_profile_err_deg is the error the PID actually sees
+ * (reference minus actual), which is NOT the same as turn_yaw_error_deg --
+ * that one is distance from the FINAL target and is legitimately large
+ * mid-move. Watch the first to judge tracking, the second to judge the result.
+ *
+ * turn_ff_cmd and turn_fb_cmd split the command into its feedforward and
+ * feedback halves. During the cruise phase fb should hover near zero; if it
+ * sits consistently one way, TURN_FF_GAIN is wrong. */
+volatile float turn_profile_ref_deg;
+volatile float turn_profile_err_deg;
+volatile float turn_ff_cmd;
+volatile float turn_fb_cmd;
+volatile float turn_profile_duration_s;
 
 
 /* ---- Estimator forwarders ----
@@ -148,7 +166,10 @@ static float applyMinSpeed(float speed)
 
 
 /* One iteration of the control loop.
- * `target_yaw_deg` is signed: positive for a left turn, negative for right. */
+ *
+ * `target_yaw_deg` is the FINAL signed target: positive for a left turn,
+ * negative for right. The instantaneous setpoint comes from the profile, not
+ * from this value. */
 static void updateControl(float target_yaw_deg)
 {
     //Check if controller is running
@@ -160,11 +181,17 @@ static void updateControl(float target_yaw_deg)
     YawEstimator_Predict();
 
     uint32_t current_time = HAL_GetTick();
+    float    elapsed_s    = (float)(current_time - turn_start_time) * 0.001f;
+    float    duration_s   = MotionProfile_Duration(&turn_profile);
 
-    //Safety timeout so a stalled robot cannot spin here forever
-    if (current_time - turn_start_time >= CONTROL_MOVE_TIMEOUT_MS) {
+    /* Hard bound on the move: the profile plus a fixed grace period. This
+     * replaces CONTROL_MOVE_TIMEOUT_MS as the escape hatch, and unlike an 8
+     * second timeout it is reached in the normal course of events rather than
+     * only on failure. */
+    if (elapsed_s > duration_s + (float)TURN_PROFILE_SETTLE_MS * 0.001f) {
 
-        state = TURN_TIMEOUT;
+        state = (fabsf(target_yaw_deg - YawEstimator_GetYawDeg()) < TURN_TOLERANCE_DEG)
+                    ? TURN_COMPLETED : TURN_TIMEOUT;
         Motor_Brake();
         return;
     }
@@ -180,19 +207,29 @@ static void updateControl(float target_yaw_deg)
     YawEstimator_PublishTelemetry();
 
     float fused_yaw_deg = YawEstimator_GetYawDeg();
-    float error_deg = target_yaw_deg - fused_yaw_deg;
 
-    turn_target_yaw_deg = target_yaw_deg;
-    turn_yaw_error_deg  = error_deg;
+    /* The setpoint the robot is chased toward right now, and the rate the
+     * profile says it should be turning at. */
+    float ref_pos = MotionProfile_Position(&turn_profile, elapsed_s);
+    float ref_vel = MotionProfile_Velocity(&turn_profile, elapsed_s);
 
-    /* Completion needs BOTH proximity and low rotational speed, so the
-     * controller cannot declare success while coasting through the target.
-     * Without an IMU there is no rate signal, so fall back to position only. */
-    uint8_t within_tolerance = (fabsf(error_deg) < TURN_TOLERANCE_DEG);
+    float track_error = ref_pos - fused_yaw_deg;
+    float final_error = target_yaw_deg - fused_yaw_deg;
+
+    turn_target_yaw_deg  = target_yaw_deg;
+    turn_yaw_error_deg   = final_error;
+    turn_profile_ref_deg = ref_pos;
+    turn_profile_err_deg = track_error;
+
+    uint8_t profile_done    = (elapsed_s >= duration_s);
+    uint8_t within_tolerance = (fabsf(final_error) < TURN_TOLERANCE_DEG);
     uint8_t settled = YawEstimator_IsImuOk()
-                    ? (fabsf(yaw_gyro_rate_dps) < TURN_SETTLE_RATE_DPS) : 1U;
+                        ? (fabsf(yaw_gyro_rate_dps) < TURN_SETTLE_RATE_DPS) : 1U;
 
-    if (within_tolerance && settled) {
+    /* Finish early only once the profile has actually delivered the rotation.
+     * Completing mid-profile would mean stopping short of a move the caller
+     * asked for, even if yaw happens to be within tolerance at that instant. */
+    if (profile_done && within_tolerance && settled) {
 
         settle_counter++;
 
@@ -208,21 +245,17 @@ static void updateControl(float target_yaw_deg)
     }
 
     /* ---------------- stall-gated integral authority ----------------
-     * The integrator is wanted for one job only: growing the command until
-     * a robot that has stopped short breaks static friction again. It is NOT
-     * wanted during the turn proper, where Kp already saturates the output
-     * and anything the integrator banks comes back as overshoot.
-     *
-     * So it gets a small clamp normally, and the large one only after the
-     * robot has been measurably stationary AND outside tolerance for
-     * TURN_STALL_CYCLES in a row. A healthy turn never satisfies that, so
-     * the big limit simply never arms.
+     * Gated on the PROFILE error, not the final-target error. Early in a move
+     * the robot is legitimately far from the final target while tracking the
+     * reference perfectly, and judging a stall by that distance would arm the
+     * boost on every healthy turn. Being stationary while the profile says to
+     * move is the actual definition of stalled.
      *
      * Lowering a clamp also SHRINKS an already-wound integrator, because
-     * PIDController_Update clamps after integrating. Recovery authority
-     * therefore evaporates the moment the wheel starts turning, which is the
-     * property that stops this from reintroducing the overshoot. */
-    if (!within_tolerance && YawEstimator_IsImuOk() &&
+     * PIDController_Update clamps after integrating, so recovery authority
+     * evaporates the moment the wheel starts turning again. */
+    if (YawEstimator_IsImuOk() &&
+        fabsf(track_error) > TURN_TOLERANCE_DEG &&
         fabsf(yaw_gyro_rate_dps) < TURN_STALL_RATE_DPS) {
 
         if (stall_counter < TURN_STALL_CYCLES) stall_counter++;
@@ -242,31 +275,22 @@ static void updateControl(float target_yaw_deg)
     turn_pid.limMinInt = -int_limit;
     turn_int_limit     =  int_limit;
 
-    //Turn PID on fused yaw. Output is signed by the error: positive drives
-    //the robot anticlockwise, negative clockwise.
-    //
-    //Always evaluated, even inside the deadband below, so the integrator and
-    //the derivative filter stay in step with the real error instead of seeing
-    //a discontinuity when driving resumes.
-    float basespeed = PIDController_Update(&turn_pid, target_yaw_deg, fused_yaw_deg);
+    /* Feedforward supplies the command the move needs; feedback only corrects
+     * the difference. Without the feedforward this is just a PID chasing a
+     * moving target, which is strictly worse than chasing a fixed one. */
+    float ff = TURN_FF_GAIN * ref_vel;
+    float fb = PIDController_Update(&turn_pid, ref_pos, fused_yaw_deg);
 
     turn_integrator = turn_pid.integrator;
+    turn_ff_cmd     = ff;
+    turn_fb_cmd     = fb;
 
-    /* ---------------- terminal deadband ----------------
-     * Once inside the tolerance band, stop driving and brake instead.
-     *
-     * Without this, applyMinSpeed() floors the command to
-     * +/-CONTROL_MIN_MOVE_SPEED, so the controller kept kicking the robot at
-     * full stiction-breaking torque for the whole CONTROL_SETTLE_CYCLES
-     * window it was supposed to be settling in. That impulse is far coarser
-     * than the tolerance band, so it would routinely knock the robot straight
-     * back out of the band it had just reached -- a limit cycle, felt as
-     * vibration and seen in the logs as moves that sat just outside tolerance
-     * until CONTROL_MOVE_TIMEOUT_MS fired.
-     *
-     * Braking here also helps satisfy the TURN_SETTLE_RATE_DPS half of the
-     * completion test instead of fighting it. */
-    if (within_tolerance) {
+    float basespeed = ff + fb;
+
+    /* Terminal deadband, only once the profile is finished. Applying it
+     * mid-profile would stop the robot every time it happened to pass through
+     * the target on its way to the end of the move. */
+    if (profile_done && within_tolerance) {
 
         turn_basespeed = 0.0f;
         Motor_Brake();
@@ -274,8 +298,16 @@ static void updateControl(float target_yaw_deg)
         return;
     }
 
-    //Overcome gearbox stiction near the target
-    basespeed = applyMinSpeed(basespeed);
+    /* Stiction floor, only while the profile is genuinely asking for rotation.
+     * Below TURN_PROFILE_FLOOR_DPS the profile is winding down on purpose, and
+     * forcing the floor there drives the robot through the target -- the exact
+     * mechanism behind the old overshoots. */
+    if (fabsf(ref_vel) > TURN_PROFILE_FLOOR_DPS || !profile_done) {
+        basespeed = applyMinSpeed(basespeed);
+    }
+
+    if (basespeed >  CONTROL_MAX_SPEED) basespeed =  CONTROL_MAX_SPEED;
+    if (basespeed < -CONTROL_MAX_SPEED) basespeed = -CONTROL_MAX_SPEED;
 
     turn_basespeed = basespeed;
 
@@ -311,11 +343,18 @@ static uint8_t runTurn(float angle_deg, float direction)
         return 0;
     }
 
-    resetTurnState();
-
     float target_yaw_deg = angle_deg * direction;
 
-    //Run untill the angle is reached
+    /* Build the trajectory BEFORE resetting the clock, so elapsed time and the
+     * profile share an origin. */
+    MotionProfile_Init(&turn_profile, target_yaw_deg,
+                       TURN_PROFILE_MAX_DPS, TURN_PROFILE_ACCEL_DPS2);
+
+    turn_profile_duration_s = MotionProfile_Duration(&turn_profile);
+
+    resetTurnState();
+
+    //Run until the profile completes (plus its bounded grace period)
     while (1) {
 
         //Check whether the controller is finished

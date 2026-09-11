@@ -78,29 +78,29 @@ int main(void)
     check("east advance raises x", mouse_x, 1);
     check("east advance leaves y", mouse_y, 1);
 
-    printf("\nTEST 6: the arena -- fwd, fwd, (front wall), turn left, fwd\n");
-    /* Facing EAST from (0,0), not NORTH. Facing NORTH the left turn at the
-     * third cell would head WEST straight into the outer boundary, which is
-     * not a code problem but does mean the bench arena has to be placed where
-     * it fits. Facing EAST the whole L-shape sits inside the maze. */
+    printf("\nTEST 6: the real arena\n");
+    /* (0,0)N -> (0,1)N -> (0,2)N -> turn right -> (0,2)E -> (1,2)E.
+     * North to east is a RIGHT turn. The west wall present at every cell
+     * along x=0 is the maze's own outer boundary, which MazeMap_Init()
+     * already sets, so the robot re-seeing it is consistent, not a conflict. */
     MazeMap_Init();
-    MazeMap_SetPose(0, 0, EAST);
-    MazeMap_UpdateWalls(0, 1, 1);   /* (0,0): corridor east, both sides walled */
+    MazeMap_UpdateWalls(0, 1, 1);   /* (0,0) facing N: corridor, walls both sides */
     MazeMap_Advance();
-    MazeMap_UpdateWalls(0, 1, 1);   /* (1,0) */
+    check("advanced to (0,1)", mouse_y, 1);
+    MazeMap_UpdateWalls(0, 1, 1);   /* (0,1) */
     MazeMap_Advance();
-    MazeMap_UpdateWalls(1, 0, 1);   /* (2,0): wall ahead, open to the left */
-    check("mouse reached (2,0) x", mouse_x, 2);
-    check("mouse reached (2,0) y", mouse_y, 0);
-    check("wall ahead recorded east of (2,0)", MazeMap_WallEast(2, 0), 1);
-    check("left (north) is open at (2,0)", MazeMap_WallNorth(2, 0), 0);
-    check("right (south) walled at (2,0)", MazeMap_WallSouth(2, 0), 1);
-    check("side walls of the corridor recorded", MazeMap_WallNorth(1, 0), 1);
-    MazeMap_TurnLeft();
-    check("now facing NORTH", mouse_dir, NORTH);
+    check("advanced to (0,2)", mouse_y, 2);
+    MazeMap_UpdateWalls(1, 1, 0);   /* (0,2): wall ahead and left, open right */
+    check("wall ahead -> north of (0,2)", MazeMap_WallNorth(0, 2), 1);
+    check("left wall  -> west of (0,2)",  MazeMap_WallWest(0, 2), 1);
+    check("right open -> east of (0,2)",  MazeMap_WallEast(0, 2), 0);
+    check("corridor wall east of (0,1)",  MazeMap_WallEast(0, 1), 1);
+    MazeMap_TurnRight();
+    check("now facing EAST", mouse_dir, EAST);
     MazeMap_Advance();
-    check("advanced to (2,1) x", mouse_x, 2);
-    check("advanced to (2,1) y", mouse_y, 1);
+    check("advanced to (1,2) x", mouse_x, 1);
+    check("advanced to (1,2) y", mouse_y, 2);
+    check("the wall behind is still recorded", MazeMap_WallWest(1, 2), 0);
 
     printf("\nTEST 7: walls are never cleared by a later negative reading\n");
     MazeMap_Init();

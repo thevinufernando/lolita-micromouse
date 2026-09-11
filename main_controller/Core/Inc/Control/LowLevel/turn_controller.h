@@ -75,6 +75,20 @@ extern volatile float    turn_integrator;
 extern volatile float    turn_int_limit;
 extern volatile uint32_t turn_stall_boosts;
 
+/* Profile tracking. turn_profile_err_deg is the error the PID actually sees,
+ * which is NOT turn_yaw_error_deg -- that one is distance from the final
+ * target and is legitimately large mid-move. Judge tracking by the first and
+ * the result by the second.
+ *
+ * turn_ff_cmd / turn_fb_cmd split the command into feedforward and feedback.
+ * Mid-cruise the feedback half should hover near zero; a consistent bias
+ * there means TURN_FF_GAIN needs trimming. */
+extern volatile float turn_profile_ref_deg;
+extern volatile float turn_profile_err_deg;
+extern volatile float turn_ff_cmd;
+extern volatile float turn_fb_cmd;
+extern volatile float turn_profile_duration_s;
+
 //Function prototypes
 
 uint8_t TurnController_Init(void);
