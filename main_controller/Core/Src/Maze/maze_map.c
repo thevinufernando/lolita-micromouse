@@ -78,6 +78,23 @@ void MazeMap_SetPose(int16_t x, int16_t y, Direction dir)
 }
 
 
+uint8_t MazeMap_Retreat(void)
+{
+    /* Face the other way, step, face back. Reusing Advance() rather than
+     * repeating the bounds logic means the two can never disagree about where
+     * the edge of the maze is. */
+    MazeMap_TurnRight();
+    MazeMap_TurnRight();
+
+    uint8_t moved = MazeMap_Advance();
+
+    MazeMap_TurnRight();
+    MazeMap_TurnRight();
+
+    return moved;
+}
+
+
 uint8_t MazeMap_Advance(void)
 {
     switch (mouse_dir) {

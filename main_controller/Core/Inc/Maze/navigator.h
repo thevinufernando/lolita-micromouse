@@ -40,7 +40,16 @@
  *     right open -> turn right, advance    keeps the hand on the right wall
  *     front open -> advance
  *     left  open -> turn left,  advance
- *     else       -> dead end: turn around, advance
+ *     else       -> dead end: REVERSE one cell, then turn around
+ *
+ * That last one is the exception to the forward rule above, and it is the same
+ * two moves in the opposite order: it ends in the same cell facing the same
+ * way, for the same cost. Turning first means pivoting the instant the robot
+ * arrives, carrying whatever error it collected driving into the wall.
+ * Reversing first means pivoting after a full cell of lateral correction. The
+ * chassis is large for the cell -- every successful pivot in one measured run
+ * was within 8.5 mm of centre and the one that jammed was 24 mm out -- so that
+ * margin decides whether the turn happens at all.
  *
  * Switch hands by setting NAV_HAND_RIGHT to 0. Neither hand is better in
  * general; they differ in which way they go round an obstacle.
@@ -116,7 +125,7 @@
 #define NAV_ACT_FORWARD  1U      /* advance one cell                    */
 #define NAV_ACT_LEFT     2U      /* turn left,  then advance one cell   */
 #define NAV_ACT_RIGHT    3U      /* turn right, then advance one cell   */
-#define NAV_ACT_AROUND   4U      /* turn 180,   then advance one cell   */
+#define NAV_ACT_AROUND   4U      /* reverse one cell, THEN turn 180     */
 #define NAV_ACT_STOP     5U      /* logged on the final record          */
 
 /* Per-cell record of what the run actually did. One entry per completed action
@@ -181,7 +190,13 @@ extern volatile uint8_t  tm_maze_abort_reason;
  * it removes error the controller introduced. If the wheel diameter or gear
  * ratio is wrong, the encoders report a confident 19.2 cm while the robot
  * travels something else, and this will faithfully hold that wrong number.
- * Only an outside reference fixes that -- a front wall at a known distance. */
+ * Only an outside reference fixes that -- a front wall at a known distance.
+ *
+ * WHICH IS WHY IT STANDS DOWN WHEN THE FRONT WALL SPEAKS. A move that ended on
+ * the front-wall alignment reports zero here, whatever the encoders think. The
+ * outside reference has already placed the robot; the encoder disagreement is
+ * the measure of how wrong the encoders were, not of how far the robot still
+ * has to go. Carrying it would apply the correction twice. */
 extern volatile float tm_maze_residual_cm;
 
 /* BLOCKING. Runs the whole exploration and returns when it ends; check

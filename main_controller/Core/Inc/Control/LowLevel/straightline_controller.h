@@ -58,6 +58,18 @@ void StraightlineController_Init(void);
  * corrected here. That is the whole reason yaw is no longer reset per move. */
 uint8_t runForwardFused(float distance_cm);
 
+/* Drive BACKWARDS distance_cm (pass a positive number). Heading is held, not
+ * reversed -- the robot keeps facing the way it was.
+ *
+ * The wall follower runs with its lateral sign flipped, because tilting the
+ * nose left walks the robot left going forwards and right going backwards.
+ *
+ * Used to leave a dead end without pivoting in it. The turn then happens one
+ * cell later, in a corridor cell, after a full cell of lateral correction --
+ * the same two moves as turning on the spot and driving out, in the opposite
+ * order, from a far better position. */
+uint8_t runReverseFused(float distance_cm);
+
 /* Per-cycle trace of the last fused move, same idea as the turn trace.
  *
  * Guessing at the turn twice made things worse in two different directions;
@@ -88,6 +100,14 @@ extern volatile float sl_steering;
 extern volatile float sl_basespeed;
 extern volatile uint32_t sl_sat_cycles;    /* cycles where steering clipped base */
 extern volatile float sl_ref_cm;           /* profile reference position  */
+
+/* Front-wall alignment result for the last move. sl_align_applied says whether
+ * the retarget fired at all; sl_align_delta_cm is how far it moved the
+ * endpoint. A delta that is consistently one sign means WALL_FRONT_ALIGN_MM
+ * does not match where the robot actually stops -- re-measure it rather than
+ * letting the alignment fight the profile every move. */
+extern volatile float   sl_align_delta_cm;
+extern volatile uint8_t sl_align_applied;
 
 //Blocking moves. Return 1 on success, 0 if the safety timeout fired.
 uint8_t runForwardDistance(float distance_cm);

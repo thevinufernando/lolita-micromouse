@@ -528,6 +528,50 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (later) - Front-wall alignment, and backing out of dead ends
+- **The forward axis is now closed-loop.** The side walls always held the
+  robot's lateral position; nothing held its longitudinal position except
+  odometry. A pivot swaps the two axes, so an uncontrolled forward axis
+  reappears one move later as a clearance problem -- which is exactly why
+  back-to-back turns were far worse than corridors. Measured over one 24-cell
+  run: worst off-centre 6.5 mm in the corridor stretch, 23.0 mm in the
+  turn-dense stretch, with the front-wall gap at the ten walled stops
+  scattered over 50-110 mm. Same 60 mm, seen from two directions.
+- `runForwardFused()` now retargets so the move ENDS at `WALL_FRONT_ALIGN_MM`
+  from a wall ahead, when one is in range. Applied at most once and only in
+  the first quarter of the move: the retarget translates the profile, and a
+  step that arrives after the robot has braked would need a few cm closed from
+  rest, which this drivetrain cannot do.
+- **New `runReverseFused()`.** `runForwardFused()` and it are now two thin
+  wrappers over one `runFused()`; reverse needed no second copy of the loop
+  because the profile, the encoders and `applyMinSpeed()` were all already
+  signed. Two things did need flipping and are marked `!! DIRECTION !!`:
+  the wall follower (tilting the nose left walks the robot left going
+  forwards and RIGHT going backwards, so an unflipped cascade is positive
+  feedback in reverse), and the stiction-floor gate (`ref_acc >= 0` meant
+  "not braking" only going forwards; it is now `ref_acc * ref_vel >= 0`).
+- **Dead ends back out instead of pivoting in place.** `NAV_ACT_AROUND` is now
+  reverse one cell, then turn 180. Same two moves as before in the opposite
+  order, ending in the same cell facing the same way for the same cost -- the
+  host test asserts that equivalence. The gain is that the pivot happens after
+  a full cell of lateral correction rather than the instant the robot arrives.
+  Every pivot that succeeded in that run was within 8.5 mm of centre; the one
+  that jammed was 24 mm out.
+- **The reverse is the best-referenced move the robot makes.** Backing out, the
+  wall it just faced stays in view the whole way, so the move is measured
+  against the wall instead of counted in ticks -- and it corrects the error the
+  robot ARRIVED with, which odometry cannot. Arrive 50 mm from the wall and it
+  reverses 22.9 cm; arrive at 110 mm and it reverses 16.9 cm. Both finish in
+  the same place.
+- Added `MazeMap_Retreat()`, `sl_align_delta_cm` / `sl_align_applied`
+  telemetry, and `WALL_FRONT_ALIGN_MM` / `_RANGE_MM` / `_MAX_CM` to
+  `control_config.h`.
+- `WALL_FOLLOW_KP_DEG_PER_MM` raised 0.25 -> 0.50 (one cell of travel now
+  removes 81% of a lateral error rather than 57%), and
+  `TURN_PROFILE_MAX_DPS` lowered 120 -> 90 after a trace showed the command
+  saturated through every cruise and the robot delivering only 113 dps.
+
+
 ### 2026-09-12 - Reactive navigation, split out of the test harness
 - **The scripted arena route is gone.** `TEST_MAZE_RUN` used to drive a fixed
   sequence (forward, forward, turn right, forward). The robot now stops at

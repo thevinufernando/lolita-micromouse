@@ -265,6 +265,8 @@ volatile float    sl_steering;
 volatile float    sl_basespeed;
 volatile uint32_t sl_sat_cycles;
 volatile float    sl_ref_cm;
+volatile float    sl_align_delta_cm;
+volatile uint8_t  sl_align_applied;
 
 volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];
 volatile uint32_t        tm_sl_trace_count;
@@ -305,7 +307,17 @@ static void allocate(float base, float steer, float *left, float *right)
 }
 
 
-uint8_t runForwardFused(float distance_cm)
+/* Shared implementation of every fused straight move.
+ *
+ * `distance_cm` is SIGNED: negative drives backwards. The motion profile
+ * already carries a sign, the encoders already go negative, and applyMinSpeed
+ * already handles both, so reverse needs no separate copy of this loop --
+ * only the two places marked !! DIRECTION !! below.
+ *
+ * `front_target_mm` is the front-sensor reading the move should END at, or 0
+ * to run on odometry alone. See the FRONT-WALL ALIGNMENT block in
+ * control_config.h for what it is for. */
+static uint8_t runFused(float distance_cm, float front_target_mm)
 {
     if (controller.state != STRAIGHTLINE_IDLE) {
         return 0;
@@ -344,6 +356,22 @@ uint8_t runForwardFused(float distance_cm)
     MotionProfile_Init(&dist_profile, distance_cm,
                        STRAIGHT_PROFILE_MAX_CMS, STRAIGHT_PROFILE_ACCEL_CMS2);
 
+    /* !! DIRECTION !! -1 when reversing. Used to flip the wall follower, whose
+     * cascade assumes forward travel: tilting the nose left walks the robot
+     * left going forwards and RIGHT going backwards, so an unflipped lateral
+     * loop is positive feedback in reverse. */
+    const float dir = (distance_cm < 0.0f) ? -1.0f : 1.0f;
+
+    /* The endpoint, which front-wall alignment may move once. align_offset_cm
+     * translates the profile by the same amount so its ramps still land on the
+     * new endpoint; translation leaves velocity and acceleration untouched. */
+    float   target_cm        = distance_cm;
+    float   align_offset_cm  = 0.0f;
+    uint8_t align_tried      = (front_target_mm > 0.0f) ? 0U : 1U;
+
+    sl_align_delta_cm = 0.0f;
+    sl_align_applied  = 0U;
+
     uint32_t start_ms = HAL_GetTick();
     uint32_t last_pid = 0;
     uint32_t tof_div  = 0;
@@ -374,12 +402,13 @@ uint8_t runForwardFused(float distance_cm)
 
         float measured   = Encoder_getAverageDistance();
         float elapsed_s  = (float)(now - start_ms) * 0.001f;
-        float ref_pos    = MotionProfile_Position(&dist_profile, elapsed_s);
+        float ref_pos    = MotionProfile_Position(&dist_profile, elapsed_s)
+                           + align_offset_cm;
         float ref_vel    = MotionProfile_Velocity(&dist_profile, elapsed_s);
 
         sl_ref_cm = ref_pos;
 
-        if (fabsf(measured - distance_cm) < DISTANCE_TOLERANCE_CM) {
+        if (fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
             settle_counter++;
             if (settle_counter >= CONTROL_SETTLE_CYCLES) {
                 Motor_Brake();
@@ -398,7 +427,48 @@ uint8_t runForwardFused(float distance_cm)
             tof_div = 0;
             ToF_Measurement_t m[TOF_SENSOR_COUNT];
             (void)ToF_ReadAll(m);
-            tilt_deg = WallFollow_Update(m);
+
+            /* !! DIRECTION !! see `dir` above. */
+            tilt_deg = WallFollow_Update(m) * dir;
+
+            /* FRONT-WALL ALIGNMENT, attempted only in the first quarter of the
+             * move and applied at most once.
+             *
+             * Early on purpose. The correction translates the profile, so the
+             * reference steps by up to WALL_FRONT_ALIGN_MAX_CM the moment it
+             * lands. During the opening ramp the command is large and clipped
+             * anyway and the step vanishes into it; applied near the end it
+             * would arrive after the robot has already braked, and closing a
+             * few cm from rest is exactly what this drivetrain cannot do. */
+            if (!align_tried
+                && fabsf(measured) < 0.25f * fabsf(target_cm)) {
+
+                uint16_t f = m[TOF_FRONT].distance_mm;
+
+                if (m[TOF_FRONT].valid
+                    && f != TOF_DISTANCE_INVALID
+                    && f <= WALL_FRONT_ALIGN_RANGE_MM) {
+
+                    /* Signed travel still needed for the sensor to read the
+                     * target. Works in BOTH directions unchanged: driving at a
+                     * wall the reading falls, so this is positive; backing away
+                     * it rises, so this is negative. */
+                    float to_go_cm   = ((float)f - front_target_mm) * 0.1f;
+                    float new_target = measured + to_go_cm;
+                    float delta      = new_target - target_cm;
+
+                    if (fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM) {
+                        target_cm        += delta;
+                        align_offset_cm  += delta;
+                        sl_align_delta_cm = delta;
+                        sl_align_applied  = 1U;
+                        align_tried       = 1U;
+                    }
+                    /* Out of range: leave align_tried clear and look again on
+                     * the next sweep. The wall may simply not be the one this
+                     * move is aiming at yet. */
+                }
+            }
         }
 
         /* The cascade: lateral error tilts the HEADING TARGET, and the
@@ -435,10 +505,17 @@ uint8_t runForwardFused(float distance_cm)
          * the same gate. */
         float ref_acc = MotionProfile_Acceleration(&dist_profile, elapsed_s);
 
-        if (fabsf(measured - distance_cm) < DISTANCE_TOLERANCE_CM) {
+        /* !! DIRECTION !! `ref_acc >= 0` meant "not braking" only while driving
+         * forwards. Reversing, the robot speeds up with a NEGATIVE reference
+         * acceleration, so that test would have suppressed the floor through
+         * the whole launch and left the move unable to break stiction, then
+         * applied it through the braking ramp and driven the robot past the
+         * target. The sign-free statement of the same rule is that reference
+         * velocity and acceleration agree unless the profile is braking. */
+        if (fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
             base = 0.0f;
         }
-        else if (ref_acc >= 0.0f && fabsf(ref_vel) > 1.0f) {
+        else if (ref_acc * ref_vel >= 0.0f && fabsf(ref_vel) > 1.0f) {
             base = applyMinSpeed(base);
         }
 
@@ -458,4 +535,30 @@ uint8_t runForwardFused(float distance_cm)
             tm_sl_trace_count++;
         }
     }
+}
+
+
+uint8_t runForwardFused(float distance_cm)
+{
+    /* Aims to finish WALL_FRONT_ALIGN_MM from a wall ahead, when there is one.
+     * With no wall in range the alignment never fires and the move is exactly
+     * what it was before: odometry against a trapezoidal profile. */
+    return runFused(distance_cm, WALL_FRONT_ALIGN_MM);
+}
+
+
+uint8_t runReverseFused(float distance_cm)
+{
+    /* Backing out of a dead end, the wall the robot just faced stays in view
+     * the whole way, so the move can be referenced against it rather than
+     * counted in encoder ticks -- and unlike the encoders it corrects the
+     * error the robot ARRIVED with, not just the error this move makes.
+     *
+     * One cell back from a proper stop the sensor should read the alignment
+     * gap plus a cell. Overshoot the approach and the reverse comes up short
+     * by the same amount, which is the point: the robot ends where the wall
+     * says it should be, not where the wheels think it went. */
+    const float target_mm = WALL_FRONT_ALIGN_MM + distance_cm * 10.0f;
+
+    return runFused(-distance_cm, target_mm);
 }

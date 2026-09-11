@@ -86,6 +86,12 @@ void MazeMap_SetPose(int16_t x, int16_t y, Direction dir);
  * which is unrecoverable -- the map never clears a wall. A caller that
  * ignores this is not tracking the robot, it is tracking a fiction. */
 uint8_t MazeMap_Advance(void);
+
+/* One cell OPPOSITE the current heading, leaving the heading alone. Same
+ * contract as MazeMap_Advance(): returns 0 and changes nothing if that would
+ * leave the maze. Used when the robot backs out of a dead end rather than
+ * pivoting inside it. */
+uint8_t MazeMap_Retreat(void);
 void MazeMap_TurnLeft(void);
 void MazeMap_TurnRight(void);
 

@@ -541,6 +541,29 @@
 #define WALL_FOLLOW_SETPOINT_LEFT_MM 63.0f
 #define WALL_FOLLOW_SETPOINT_RIGHT_MM 64.0f
 
+/* Largest side reading the FOLLOWER will centre on, in mm.
+ *
+ * DELIBERATELY TIGHTER THAN WALL_SIDE_THRESHOLD_MM, and the difference is the
+ * point. Detection asks "is there a wall?", and it can afford to be generous
+ * because the two cases are hundreds of mm apart. Following asks "how far am I
+ * from THIS wall?", and a marginal reading there does not produce a marginal
+ * response -- it produces a full-scale steering command in whatever direction
+ * the number implies.
+ *
+ * Every genuine side reading in a 17-cell run fell between 51 and 87 mm, with
+ * a median of 62. The two that did not were 34 (robot hard over) and 113. At
+ * 120 the 113 was accepted, read as 50 mm of error against the setpoint,
+ * saturated the tilt, and steered the robot hard at something that was not the
+ * wall it thought it was -- which is what a junction looks like from the
+ * sensor's point of view: the beam passing an opening and catching a surface a
+ * cell away.
+ *
+ * 95 leaves room for a robot 30 mm off centre against a real wall and refuses
+ * everything beyond. A refused reading is not a failure; the follower simply
+ * holds heading open-loop, which is the right answer when it cannot see a wall
+ * it trusts. */
+#define WALL_FOLLOW_USABLE_MAX_MM 95U
+
 /* Lateral error (mm) -> commanded heading offset (deg).
  *
  * This is a CASCADE, not a second steering term added alongside the heading
@@ -576,9 +599,43 @@
  * not the gain. */
 #define WALL_FOLLOW_KP_DEG_PER_MM 0.50f
 
-/* Hard cap on that tilt. Bounds how sharply the robot ever turns to correct
- * sideways, which is the other thing summing the terms would not give. */
-#define WALL_FOLLOW_MAX_TILT_DEG 12.0f
+/* Hard cap on that tilt.
+ *
+ * !! IT MUST NOT EXCEED THE INNER LOOP'S LINEAR RANGE. Lowered 12 -> 6. !!
+ *
+ * This is the outer half of a cascade, and its output is the inner loop's
+ * SETPOINT. The inner loop here is STRAIGHT_YAW_*, which has gain 8 and clamps
+ * its output at STRAIGHT_YAW_LIMIT = 60, so it saturates at 60/8 = 7.5 degrees
+ * of heading error. Asking for 12 is therefore asking for something the inner
+ * loop can only answer with a pinned output -- the cascade stops being a
+ * cascade and becomes bang-bang.
+ *
+ * That is exactly how a reverse out of a dead end failed. The robot entered it
+ * 10 deg off heading and 30 mm off centre, the lateral loop asked for a further
+ * 12, steering pinned at +60 on the very first cycle and stayed there for 1.2
+ * seconds, and the robot rotated about 40 degrees -- far more than the 22 it
+ * was asked for -- then slammed to -60 coming back and jammed against the wall
+ * at 15.4 cm of a 19.9 cm move.
+ *
+ * 6 keeps the demand inside the inner loop's linear range with margin, and it
+ * still buys 192*sin(6) = 20 mm of lateral correction per cell, which covers
+ * the errors actually seen. Raising STRAIGHT_YAW_LIMIT would raise this
+ * ceiling too, but steering authority is taken out of forward speed, so widen
+ * the inner loop first and only then this. */
+#define WALL_FOLLOW_MAX_TILT_DEG 6.0f
+
+/* Fastest the tilt demand may CHANGE, in degrees per second.
+ *
+ * A clamp bounds where the heading target can go; this bounds how fast it gets
+ * there. They are different failures. The wall follower can legitimately jump
+ * its output in one cycle -- a wall ending, the active side changing, a robot
+ * arriving off-centre -- and a step in a heading setpoint asks the robot to
+ * rotate as hard as it can, which is never what centring wants.
+ *
+ * 30 deg/s crosses the full clamp range in 0.4 s, comfortably inside a 2.4 s
+ * cell, so the correction still completes while the inner loop only ever sees
+ * a ramp it can track. */
+#define WALL_FOLLOW_TILT_SLEW_DPS 30.0f
 
 /* Slowly bleed the steady-state tilt back into the heading estimate.
  *
@@ -616,6 +673,14 @@
  * TOF_INTER_MEASUREMENT_MS. Polling every cycle would just spend I2C time
  * re-reading the same measurement. */
 #define STRAIGHT_TOF_DIVIDER 4U
+
+/* Seconds between WallFollow_Update() calls. It runs once per ToF sweep, not
+ * once per control cycle, and both the slew limit and the drift bleed are
+ * rates -- so they need the interval they are actually integrated over. The
+ * bleed had been using the control period and was therefore running
+ * STRAIGHT_TOF_DIVIDER times slower than its constant claimed. */
+#define WALL_FOLLOW_UPDATE_S (CONTROL_SAMPLE_TIME_S * (float)STRAIGHT_TOF_DIVIDER)
+
 
 /* =================== STRAIGHTLINE MOTION PROFILE ======================== */
 /* Same reasoning as the turn profile, and the same generator.             */
@@ -665,6 +730,60 @@
  * IS the cruise speed, and getting it wrong is not something the loop
  * quietly absorbs. */
 #define STRAIGHT_FF_GAIN 8.0f
+
+/* ------------------- FRONT-WALL ALIGNMENT (longitudinal) ---------------- */
+/*                                                                          */
+/* The side walls close the loop on the robot's SIDEWAYS position. Nothing  */
+/* closed it on the FORWARD position until now -- that was odometry only,  */
+/* and odometry has no opinion about where the cell boundaries are.         */
+/*                                                                          */
+/* WHY THAT MATTERS MORE THAN IT SOUNDS. A pivot swaps the two axes: after  */
+/* a 90 degree turn, the error you had along the direction of travel        */
+/* becomes the error across it, which is what decides whether the chassis   */
+/* clears the walls. So an uncontrolled forward axis shows up one move      */
+/* later as a clearance problem, and that is why back-to-back turns were    */
+/* so much worse than corridors. Measured over one 24-cell run:             */
+/*                                                                          */
+/*    off-centre in the corridor stretch        worst  6.5 mm               */
+/*    off-centre in the turn-dense stretch      worst 23.0 mm               */
+/*    front-wall gap wherever a wall was ahead  50 to 110 mm, spread 60     */
+/*                                                                          */
+/* That 60 mm of scatter in where the robot stops is the same number as the */
+/* lateral error that follows a turn. It is one quantity seen from two      */
+/* directions, and this section is what removes it.                         */
+
+/* What the FRONT sensor reads with the robot at a cell centre and a wall on
+ * the far side of that cell.
+ *
+ * A MEASURED READING, not a true distance -- same convention as the
+ * WALL_FOLLOW_SETPOINT pair, and for the same reason: if the target is
+ * whatever the sensor says when the robot is where you want it, the sensor's
+ * close-range over-read cancels exactly and TOF_OFFSET_FRONT_MM stays at 0.
+ *
+ * 87 is the mean of the ten walled stops in that run, which is a reasonable
+ * starting point because the robot was aiming at cell centres. RE-MEASURE IT
+ * PROPERLY: put the robot at a cell centre by hand with a wall ahead and read
+ * tm_tof_front_mm. It is worth getting right; everything above depends on it. */
+#define WALL_FRONT_ALIGN_MM 87.0f
+
+/* Only align when the front reading is at or below this.
+ *
+ * Sits deliberately between the two cases. Starting a move into a cell that
+ * HAS a far wall, the sensor reads about 87 + 192 = 279 mm. Into a cell that
+ * does not, the nearest wall is another cell further and reads about 471. At
+ * 350 the first engages and the second does not, with wide margin either
+ * side, so no extra logic is needed to decide whether the wall is in the cell
+ * the robot is entering. */
+#define WALL_FRONT_ALIGN_RANGE_MM 350U
+
+/* Largest retarget the alignment may apply, in cm.
+ *
+ * A second guard behind the range test. A genuine correction is the size of
+ * the odometry scatter, a few cm at most; anything larger means the reading
+ * was not the wall this move is aiming at, or the sensor is lying. Refusing
+ * to act on it leaves the move on plain odometry, which is where it started,
+ * rather than steering it somewhere confidently wrong. */
+#define WALL_FRONT_ALIGN_MAX_CM 4.0f
 
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 
