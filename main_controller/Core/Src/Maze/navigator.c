@@ -15,6 +15,7 @@ volatile uint32_t    tm_maze_trace_count;
 volatile uint8_t     tm_maze_complete;
 volatile uint32_t    tm_maze_moves;
 volatile uint8_t     tm_maze_abort_reason;
+volatile float       tm_maze_residual_cm;
 
 
 static void recordCell(float move_error_cm, uint8_t move_ok,
@@ -100,6 +101,14 @@ static void afterTurn(void)
 {
     ToF_ResetFilterAll();
     WallFollow_Reset();
+
+    /* The carried residual is an error ALONG the direction of travel. A pivot
+     * makes that axis the new lateral axis, where this number means nothing --
+     * carrying it would aim the next move at a target derived from a distance
+     * measured sideways. Zero is the honest value: after a turn the robot does
+     * not know its longitudinal offset, and the wall follower and (later) the
+     * front-wall anchor are what recover it. */
+    tm_maze_residual_cm = 0.0f;
 }
 
 
@@ -150,12 +159,14 @@ void Navigator_Run(void)
     if (tm_maze_complete) return;
 
     MazeMap_Init();
+    MazeMap_SetPose(NAV_START_X, NAV_START_Y, NAV_START_DIR);
     WallFollow_Reset();
     ToF_ResetFilterAll();
     TurnController_ResetYaw();   /* start of run: heading origin is here */
 
     tm_maze_moves = 0U;
     tm_maze_abort_reason = NAV_END_RUNNING;
+    tm_maze_residual_cm = 0.0f;
 
     const int16_t start_x = mouse_x;
     const int16_t start_y = mouse_y;
@@ -216,13 +227,44 @@ void Navigator_Run(void)
         uint8_t ok = faceOpening(action);
 
         if (ok) {
-            Motor_Brake();
-            HAL_Delay(NAV_SETTLE_MS);
+            /* Settle ONLY after a pivot. On a straight-through cell the robot
+             * has already been standing still through observe() and the wall
+             * vote, so a second pause here bought nothing and cost 800 ms of
+             * every single cell -- 18% of a measured 4.48 s cell time. */
+            if (action != NAV_ACT_FORWARD) {
+                Motor_Brake();
+                HAL_Delay(NAV_SETTLE_MS);
+            }
 
-            ok = runForwardFused(NAV_CELL_CM);
-            arrival_err_cm = NAV_CELL_CM - Encoder_getAverageDistance();
+            /* Aim at one cell pitch PLUS whatever the last move left short,
+             * so the shortfall is corrected instead of accumulating. */
+            const float target_cm = NAV_CELL_CM + tm_maze_residual_cm;
 
-            if (ok) MazeMap_Advance();
+            ok = runForwardFused(target_cm);
+
+            float left_over = target_cm - Encoder_getAverageDistance();
+
+            if (left_over >  NAV_RESIDUAL_LIMIT_CM) left_over =  NAV_RESIDUAL_LIMIT_CM;
+            if (left_over < -NAV_RESIDUAL_LIMIT_CM) left_over = -NAV_RESIDUAL_LIMIT_CM;
+
+            tm_maze_residual_cm = left_over;
+
+            /* Logged as the CUMULATIVE offset from the ideal grid, not this
+             * move's own tracking error. It answers the question the map cares
+             * about -- how far from the cell centre the robot actually is --
+             * and with the carry in place the two are the same number anyway
+             * at the end of every move. */
+            arrival_err_cm = left_over;
+
+            /* The robot has physically moved. If the map cannot follow it,
+             * the run is over RIGHT HERE -- carrying on would log real wall
+             * readings against a pose that is no longer where the robot is,
+             * and the map never clears a wall once written. */
+            if (ok && !MazeMap_Advance()) {
+                recordCell(left_over, 1U, &w, NAV_ACT_STOP);
+                tm_maze_abort_reason = NAV_END_OFF_MAP;
+                break;
+            }
         } else {
             arrival_err_cm = 0.0f;   /* turn failed; no forward was attempted */
         }

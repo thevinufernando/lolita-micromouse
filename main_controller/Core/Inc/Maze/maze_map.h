@@ -76,7 +76,16 @@ void MazeMap_SetPose(int16_t x, int16_t y, Direction dir);
 
 /* Pose bookkeeping. Call these when a move actually completes, not when it is
  * commanded, so a failed move does not corrupt the position estimate. */
-void MazeMap_Advance(void);    /* one cell in the current heading */
+/* One cell in the current heading. Returns 1 if the pose moved, 0 if that
+ * would have left the maze -- in which case NOTHING is updated.
+ *
+ * !! CHECK THE RETURN VALUE !! This used to clamp silently, and that cost a
+ * whole run: the robot found an opening on the west side of column 0, drove
+ * through it, and the pose stayed put while the machine kept going. Four
+ * cells of real wall readings were then written into one cell it was not in,
+ * which is unrecoverable -- the map never clears a wall. A caller that
+ * ignores this is not tracking the robot, it is tracking a fiction. */
+uint8_t MazeMap_Advance(void);
 void MazeMap_TurnLeft(void);
 void MazeMap_TurnRight(void);
 

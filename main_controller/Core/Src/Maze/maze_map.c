@@ -78,15 +78,16 @@ void MazeMap_SetPose(int16_t x, int16_t y, Direction dir)
 }
 
 
-void MazeMap_Advance(void)
+uint8_t MazeMap_Advance(void)
 {
     switch (mouse_dir) {
-        case NORTH: if (mouse_y < MAZE_SIZE - 1) mouse_y++; break;
-        case EAST:  if (mouse_x < MAZE_SIZE - 1) mouse_x++; break;
-        case SOUTH: if (mouse_y > 0)             mouse_y--; break;
-        case WEST:  if (mouse_x > 0)             mouse_x--; break;
-        default: break;
+        case NORTH: if (mouse_y >= MAZE_SIZE - 1) return 0U; mouse_y++; break;
+        case EAST:  if (mouse_x >= MAZE_SIZE - 1) return 0U; mouse_x++; break;
+        case SOUTH: if (mouse_y <= 0)             return 0U; mouse_y--; break;
+        case WEST:  if (mouse_x <= 0)             return 0U; mouse_x--; break;
+        default: return 0U;
     }
+    return 1U;
 }
 
 

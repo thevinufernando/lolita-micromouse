@@ -111,5 +111,15 @@ int main(void)
 
     printf("\n===== %s (%d failures) =====\n\n",
            failures ? "FAILURES" : "ALL CHECKS PASSED", failures);
+    /* The edge case that cost a run: advancing out of the maze must REPORT it,
+       not clamp silently. */
+    MazeMap_Init();
+    MazeMap_SetPose(0, 0, WEST);
+    check("advance off the west edge is refused", MazeMap_Advance(), 0);
+    check("  pose x unchanged", mouse_x, 0);
+    check("  pose y unchanged", mouse_y, 0);
+    MazeMap_SetPose(0, 0, NORTH);
+    check("advance inside the maze succeeds", MazeMap_Advance(), 1);
+
     return failures ? 1 : 0;
 }

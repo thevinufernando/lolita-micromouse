@@ -268,11 +268,32 @@
  * the profile was asking for 200. It simply cannot go that fast, so the
  * reference ran away and the tracking lag peaked at 28 degrees mid-move.
  *
- * 120 leaves headroom: at TURN_FF_GAIN the feedforward alone is ~164 units at
- * cruise, so ~36 units remain for the feedback to correct with before the
- * command clips. A profile the robot cannot follow is worse than no profile,
- * because the feedback spends the whole move saturated. */
-#define TURN_PROFILE_MAX_DPS 120.0f
+ * !! 120 WAS STILL TOO FAST. Lowered to 90 after it failed a run. !!
+ *
+ * 36 units of headroom is not headroom. A per-cycle trace of the failing turn:
+ * feedforward pinned at -168 through the whole cruise, feedback asking for a
+ * further -20 to -60, so the total command sat at -188 to -228 against a
+ * +/-200 clamp. Saturated, for the entire middle of the move.
+ *
+ * Two things followed, and the second one ended the run:
+ *
+ *   THE ROBOT COULD NOT HOLD 120. At a command clipped to 200 it managed
+ *   113.5 dps, so the reference ran away and the robot tracked 5-7 deg behind
+ *   for the whole cruise. (The 143 dps recorded earlier was a different
+ *   surface; treat that number as the ceiling on a good day, not a spec.)
+ *
+ *   IT THEREFORE OVERSHOT, WHICH LOOKS BACKWARDS AND IS NOT. Lagging in
+ *   POSITION does not mean lagging in SPEED. When the profile finished its
+ *   deceleration ramp the robot was still 5 deg short and still doing ~114
+ *   dps, and shedding that at TURN_PROFILE_ACCEL_DPS2 needs 10.8 deg -- so it
+ *   sailed 5.26 deg PAST the target. From there it had to reverse from rest,
+ *   which this drivetrain cannot do, and the move timed out.
+ *
+ * 90 dps puts feedforward at 126 units and leaves 74 for the feedback, and it
+ * is comfortably under the 113 the robot actually delivers. A profile the
+ * robot cannot follow is worse than no profile, because the feedback spends
+ * the whole move saturated and the end of the ramp is a guess. */
+#define TURN_PROFILE_MAX_DPS 90.0f
 
 /* Angular acceleration, deg/s^2. With the peak above, a 90 deg turn ramps
  * for 0.167 s over 16.7 deg at each end and cruises the middle 56.7 deg,
@@ -527,8 +548,33 @@
  * independent corrections is undamped; feeding lateral error into the heading
  * SETPOINT makes the inner loop supply the derivative term for free.
  *
- * 0.25 deg per mm means a 10 mm offset asks for a 2.5 degree tilt. */
-#define WALL_FOLLOW_KP_DEG_PER_MM 0.25f
+ * RAISED 0.25 -> 0.50 after a jammed turn.
+ *
+ * THE ROBOT IS LARGE FOR THE CELL, so this gain is not a comfort setting --
+ * it is what decides whether a pivot fits. Measured across one 22-cell run:
+ *
+ *   every cell that turned successfully   within  8.5 mm of centre
+ *   both in-place 180s that worked        within  2.0 mm
+ *   the 180 that jammed on a wall        24.0 mm off, wall at 34 mm
+ *
+ * The chassis does fit. It just needs about a centimetre of centring accuracy
+ * to do it, and single-wall cells were not delivering that.
+ *
+ * The loop is proportional, so the error decays exponentially along a cell
+ * rather than closing linearly, and the fraction removed over one 19.2 cm cell
+ * is 1 - exp(-CELL * KP * pi/180):
+ *
+ *     KP 0.25   57% removed   a 27 mm error leaves 11.7 mm
+ *     KP 0.50   81% removed   a 27 mm error leaves  5.1 mm
+ *     KP 0.75   92% removed   a 27 mm error leaves  2.2 mm
+ *
+ * 0.50 brings a worst-case single-wall error back inside the budget in one
+ * cell. 0.75 is tempting and is the next thing to try, but this is a cascade
+ * whose inner heading loop has its own lag, so raise it one step at a time and
+ * watch for weaving. At 0.50 a 24 mm error already asks for the full
+ * WALL_FOLLOW_MAX_TILT_DEG, so beyond here the clamp is doing the limiting,
+ * not the gain. */
+#define WALL_FOLLOW_KP_DEG_PER_MM 0.50f
 
 /* Hard cap on that tilt. Bounds how sharply the robot ever turns to correct
  * sideways, which is the other thing summing the terms would not give. */

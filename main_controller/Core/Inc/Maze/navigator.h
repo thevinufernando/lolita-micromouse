@@ -55,8 +55,33 @@
  * ============================================================================
  */
 
-#define NAV_CELL_CM 18.0f    /* centre-to-centre cell pitch */
+#define NAV_CELL_CM 19.2f    /* centre-to-centre cell pitch */
+
+/* Where the robot is placed in the map at the start of a run.
+ *
+ * PUT THE ARENA INSIDE THE MAP. (0,0) facing north is the competition
+ * convention and is correct for a real 16x16 maze, but it pins the robot into
+ * a corner with the west and south boundaries hard against it. A bench arena
+ * that opens west of the start column does not fit there: a run found exactly
+ * that opening, drove through it, and left the map behind.
+ *
+ * Starting mid-map costs nothing -- the coordinates are arbitrary labels, and
+ * the recorded walls are the same shape wherever they land -- and it also
+ * exercises the recorder honestly, because none of the boundary walls are
+ * pre-set on top of readings the robot actually took. */
+#define NAV_START_X   8
+#define NAV_START_Y   0
+#define NAV_START_DIR NORTH
 #define NAV_HAND_RIGHT 1     /* 1 = right-hand rule, 0 = left-hand */
+
+/* How much of a previous move's shortfall may be carried into the next one,
+ * in cm. See tm_maze_residual_cm below for why anything is carried at all.
+ *
+ * A normal landing is inside STRAIGHT_TOLERANCE_CM, so a residual past twice
+ * that did not come from an ordinary approach -- a slipped wheel, a nudged
+ * robot, a move that barely finished. Carrying it would aim the next move at
+ * something well past a cell boundary and turn one bad move into two. */
+#define NAV_RESIDUAL_LIMIT_CM 3.0f
 
 /* Pause before each wall reading, in ms. Lets the chassis settle so the
  * sensors are not measuring during a rock, and so the encoder reading at the
@@ -83,6 +108,7 @@
 #define NAV_END_MOVE_FAILED 2U   /* a forward or turn timed out          */
 #define NAV_END_LOOPED      3U   /* back at the start cell, arena closed */
 #define NAV_END_TRACE_FULL  4U   /* ran out of room to record            */
+#define NAV_END_OFF_MAP     5U   /* the next cell is outside the maze     */
 
 /* Actions the decision rule can produce. Recorded per cell so the log shows
  * WHY the robot did what it did, not just where it ended up. */
@@ -134,6 +160,29 @@ extern volatile uint8_t     tm_maze_complete;
 /* Completed actions so far, and why the run stopped (NAV_END_*). */
 extern volatile uint32_t tm_maze_moves;
 extern volatile uint8_t  tm_maze_abort_reason;
+
+/* How far the robot is behind the ideal cell grid along the CURRENT direction
+ * of travel, in cm. Positive means short of where the map thinks it is.
+ *
+ * WHY THIS EXISTS. A move finishes as soon as it is inside
+ * STRAIGHT_TOLERANCE_CM, and it approaches the target from below, so it always
+ * stops a little early and never a little late. Measured over one corridor
+ * run: seven moves, every one short, mean 0.39 cm. That is a bias, not noise,
+ * and at 100 cells it is 39 cm -- more than two cells of disagreement between
+ * the robot and its own map, which is when a solver starts recording walls in
+ * the wrong place.
+ *
+ * So each move aims at one cell pitch PLUS what the last one left over, and
+ * the leftover is tracked rather than discarded. This is the same trick the
+ * heading already uses, and it is why heading error stayed inside +/-1.5 deg
+ * across that run while distance quietly walked away.
+ *
+ * IT IS NOT A CURE FOR MISCALIBRATION. It closes the loop on the ENCODERS, so
+ * it removes error the controller introduced. If the wheel diameter or gear
+ * ratio is wrong, the encoders report a confident 19.2 cm while the robot
+ * travels something else, and this will faithfully hold that wrong number.
+ * Only an outside reference fixes that -- a front wall at a known distance. */
+extern volatile float tm_maze_residual_cm;
 
 /* BLOCKING. Runs the whole exploration and returns when it ends; check
  * tm_maze_abort_reason for why. Calling it again after a run has completed
