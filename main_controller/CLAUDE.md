@@ -427,12 +427,50 @@ diagnosis.
 
 ### Modes
 
-Both are exposed because they suit different phases:
+**Single-shot is the chosen mode for wall detection.** Both are implemented,
+but the mux is the deciding constraint: only one sensor is reachable at a time,
+so continuous mode's main advantage — free-running sensors you poll cheaply —
+mostly evaporates when you still have to switch channels and can only ever read
+one of them at a given instant.
 
 | Mode | Call | Use |
 |---|---|---|
-| Single | `ToF_ReadSingle()` | Blocks ~30 ms per read. Bring-up, stationary checks. |
-| Continuous | `ToF_StartContinuous()` then `ToF_ReadContinuous()` | Sensor free-runs; reads are cheap and bounded. What a moving robot wants. |
+| Single | `ToF_ReadSingle()` | **What the robot uses.** Blocks one budget per read. |
+| Continuous | `ToF_StartContinuous()` then `ToF_ReadContinuous()` | Implemented and tested, not used for wall detection. |
+
+### Speed: what a sweep actually costs
+
+This is the number that limits robot speed, and it is **3× the budget**, not 1×:
+`ToF_ReadAll()` walks the three sensors sequentially and blocks on each, because
+the mux exposes one at a time.
+
+| Budget | Integration | Sweep (3 sensors) | Rate |
+|---|---|---|---|
+| 33 ms (ST default) | ~21 ms | ~105 ms | ~9.5 Hz |
+| **20 ms (current)** | ~8 ms | **~66 ms** | **~15 Hz** |
+| 16 ms | ~4 ms | ~54 ms | ~18 Hz |
+
+Only part of the budget is integration time — roughly **12 ms is fixed
+overhead** (start/end, DSS, pre-range, final-range overheads, all from
+`vl53l0x_api_core.c`). Below ~15 ms the API rejects the budget outright with
+`INVALID_PARAMS` and the sensor never initialises.
+
+That non-linearity is why **20 ms is the stopping point**: 33→20 costs ~60% of
+integration but saves 13 ms per sensor, whereas 20→16 saves only 4 ms more and
+costs *half* of what little integration is left. Precision scales with √(integration
+time), so the last milliseconds are the most expensive to surrender.
+
+**Why the accuracy loss is smaller than it looks.** Per-sample sigma worsens by
+~1.6×, but the sweep rate improves by ~1.6×. Per unit of *distance travelled*
+the robot gets proportionally more samples, and the filter averages them — so
+what the controller sees is close to a wash. This is the real justification for
+the change, and it is also why `TOF_FILTER_EMA_ALPHA` was **not** lowered to
+compensate: alpha buys smoothing with time, and time is exactly what the budget
+cut was spent to buy back.
+
+If you need more speed, the next real win is **not** a smaller budget — it is
+reading only the sensor you need (front before a decision, sides while
+corridor-following) instead of sweeping all three every cycle.
 
 Continuous uses `CONTINUOUS_TIMED_RANGING`, not back-to-back: back-to-back
 pins the sensor at full duty and floods the bus when the consumer reads slower
@@ -482,7 +520,16 @@ timeouts), while the healthy ones stay usable. `ToF_Init()` still returns
    jitter equally the filter is not engaging.
 5. **Check `tm_tof_*_jumps` does not climb while the robot is stationary.** If
    it does, `TOF_FILTER_JUMP_THRESHOLD_MM` is below the actual noise floor and
-   the smoothing is being defeated — raise it.
+   the smoothing is being defeated — raise it. This is the first thing to
+   re-check after any change to `TOF_TIMING_BUDGET_US`, since a shorter budget
+   widens the noise floor toward the threshold.
+5a. **After a budget change, characterise with the flight recorder rather than
+   by eye.** `tm_tof_history` captures 200 sweeps with filtered *and* raw per
+   sensor; noise is a property of a series, and one live-watch scalar gives one
+   aliased sample. Compare the raw spread against the previous budget, and
+   watch for new `RangeStatus` 1/4 rejections — those mean
+   `TOF_SIGMA_LIMIT_MM` is now too tight for the shorter integration time, not
+   that the hardware is faulty.
 6. `TEST_TOF_CONTINUOUS` (test 12). Same distances, free-running.
    `tm_tof_error_count` rising while `tm_tof_sample_count` stays static is the
    real fault signal; both rising together just means polling outpaced the
@@ -491,18 +538,24 @@ timeouts), while the healthy ones stay usable. `ToF_Init()` still returns
 ### Tuning
 
 All in `control_config.h` under the ToF section. The master knob is
-`TOF_TIMING_BUDGET_US` (speed vs. accuracy) — for a moving micromouse, sample
-rate matters more than the last millimetre, so lower this before touching
-anything else. `TOF_VCSEL_PERIOD_*` are left at ST's defaults deliberately:
-maze walls are under 20 cm away, and buying range the robot will never use
-costs ambient-light immunity.
+`TOF_TIMING_BUDGET_US` (speed vs. accuracy), now at **20 ms** — see the speed
+table above before changing it; it does not behave linearly.
+`TOF_VCSEL_PERIOD_*` are left at ST's defaults deliberately: maze walls are
+under 20 cm away, and buying range the robot will never use costs
+ambient-light immunity.
+
+`TOF_POLL_DELAY_US` (500 µs) is pure latency, not throughput: a blocking read
+cannot return until the next poll after the sensor finishes. It replaced
+`HAL_Delay(1)`, which actually blocks 1–2 ms because HAL counts whole SysTick
+ticks — up to 6 ms of rounding per three-sensor sweep, which was a ~10% tax
+once the budget came down to 20 ms.
 
 Filter knobs:
 
 | Constant | Effect |
 |---|---|
-| `TOF_FILTER_EMA_ALPHA` | Smoothing vs. lag. Lower = smoother/slower. 1.0 disables. Governs small jitter only — large steps bypass it. |
-| `TOF_FILTER_JUMP_THRESHOLD_MM` | Step size treated as real. Must sit above the noise spread (~7 mm) and below the smallest real transition (~100 mm). |
+| `TOF_FILTER_EMA_ALPHA` | Smoothing vs. lag. Lower = smoother/slower. 1.0 disables. Governs small jitter only — large steps bypass it. **Held at 0.2 after the budget cut — do not lower it to compensate for noise, that spends the time the cut just bought.** |
+| `TOF_FILTER_JUMP_THRESHOLD_MM` | Step size treated as real. Raised 30 → 40 mm with the budget cut, since a noisier signal sits closer to the old threshold. Must stay above the noise spread and below the smallest real transition (~100 mm). |
 | `TOF_OFFSET_*_MM` | Per-sensor bias. Not a filter knob — see the accuracy note above. |
 
 After changing `tof_filter.c`, run the host suite (`tests/README.md`) —
@@ -512,6 +565,51 @@ accident.
 ---
 
 ## Change log
+
+### 2026-09-12 — ToF timing budget cut for speed (single-shot chosen)
+- **Single-shot is now the committed mode for wall detection.** Continuous
+  stays implemented and tested but unused: the mux exposes one sensor at a
+  time, which removes most of continuous mode's advantage.
+- `TOF_TIMING_BUDGET_US` **33 ms → 20 ms**. A 3-sensor sweep is 3× the budget
+  (sequential, blocking, one mux channel at a time), so this is **~105 ms →
+  ~66 ms per sweep, ~9.5 Hz → ~15 Hz**.
+- **Stopped at 20 ms deliberately, not lower.** Only ~8 ms of a 20 ms budget is
+  integration time; ~12 ms is fixed overhead (start/end, DSS, pre-range,
+  final-range — values read out of `vl53l0x_api_core.c`). Below ~15 ms the API
+  returns `INVALID_PARAMS` and the sensor never inits. 33→20 saves 13 ms per
+  sensor for ~60% of integration; 20→16 saves only 4 ms more and costs half of
+  what remains. Precision goes as √(integration), so the last milliseconds are
+  the priciest.
+- **Why accuracy largely survives:** per-sample sigma worsens ~1.6× but the
+  sweep rate improves ~1.6×, so per unit distance travelled the robot gets more
+  samples for the filter to average. Roughly a wash for the controller.
+- `VL53L0X_PollingDelay()` now uses `DWT_DelayUs(TOF_POLL_DELAY_US)` (500 µs)
+  instead of `HAL_Delay(1)`. **`HAL_Delay(1)` really blocks 1–2 ms** — it counts
+  whole SysTick ticks and the first can land anywhere — so every blocking read
+  overshot completion by up to 2 ms and every sweep by up to 6 ms. At a 33 ms
+  budget that was noise; at 20 ms it was a ~10% latency tax paid purely in
+  rounding. Added `TOF_POLL_DELAY_US`. (`DWT_Timer_Init()` already runs well
+  before `ToF_Init()` in `main.c`, so the counter is live.)
+- `TOF_FILTER_JUMP_THRESHOLD_MM` **30 → 40 mm**. The old value was sized against
+  a ~7 mm spread measured at 33 ms; a noisier signal sits closer to it, and a
+  threshold the noise can reach is actively harmful — each trip resets the EMA
+  to a single raw sample, so the filter silently stops smoothing exactly when
+  needed. Still far below a real transition (~100 mm+).
+- **`TOF_FILTER_EMA_ALPHA` deliberately NOT lowered.** The instinct after making
+  samples noisier is to smooth harder, but alpha buys smoothing with *time* —
+  the very thing the budget cut was spent to buy back. At 15 Hz, α=0.2 already
+  settles in ~330 ms (~10 cm at 30 cm/s); halving it would double that to most
+  of two cells of lag. Reasoning recorded in `control_config.h` so it is not
+  "optimised" later.
+- `TOF_SIGMA_LIMIT_MM` left at ST's 18 mm, but now documented as budget-coupled:
+  the sensor's sigma estimate grows as integration shrinks, and a rejected
+  reading surfaces as `TOF_ERROR_RANGE` — indistinguishable from "no wall".
+  If the flight recorder shows new status-1/status-4 rejections after this
+  change, raise it to ~25 mm rather than suspecting hardware.
+- Verified: warning-free build, host filter suite passes at the new threshold.
+  **Not yet validated on hardware** — use Hiruna's ToF flight recorder
+  (`tm_tof_history`, 200 sweeps, filtered + raw per sensor) to compare spread
+  against the 33 ms baseline.
 
 ### 2026-09-11 — ToF noise filtering + per-sensor offsets
 - Bench measurement with the sensors working: a wall at a true 80 mm read

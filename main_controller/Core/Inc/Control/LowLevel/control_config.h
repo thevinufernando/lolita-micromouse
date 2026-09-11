@@ -362,14 +362,56 @@
 /* Measurement timing budget, microseconds. This is the master speed/accuracy
  * knob: longer budget = less noise and more range, at a lower sample rate.
  *
- *   20000  (20 ms) - ST's fastest preset, noticeably noisier
+ *   20000  (20 ms) - ST's fastest documented preset
  *   33000  (33 ms) - ST's default, ~30 Hz
  *   200000 (200 ms) - high accuracy preset
  *
- * 33 ms is the starting point here. For a moving micromouse the sample rate
- * matters more than the last millimetre, so if wall following turns out to
- * lag, drop this before touching anything else. */
-#define TOF_TIMING_BUDGET_US        33000U
+ * ---------------------------------------------------------------------------
+ * WHY 20 ms, AND WHY NOT LOWER
+ * ---------------------------------------------------------------------------
+ * The budget is NOT all integration time. The API spends a large fixed part of
+ * it on overheads that do nothing for precision (values from
+ * vl53l0x_api_core.c, this exact API version):
+ *
+ *     start + end overhead           2870 us
+ *     DSS  2 x (2000 + 690)          5380 us
+ *     pre-range timeout + overhead  ~3300 us
+ *     final-range overhead            550 us
+ *     ------------------------------------
+ *     fixed cost                   ~12100 us
+ *
+ * Only what is LEFT goes to the final-range integration, which is the part
+ * that actually buys precision. So:
+ *
+ *     33 ms budget -> ~21 ms integrating   (ST default)
+ *     20 ms budget -> ~8 ms integrating    (here)
+ *     16 ms budget -> ~4 ms integrating    (halves precision again)
+ *    <15 ms budget -> API returns INVALID_PARAMS, sensor never inits
+ *
+ * That non-linearity is the whole argument for stopping at 20 ms. Going 33->20
+ * costs ~60% of the integration time but saves 13 ms per sensor; going 20->16
+ * saves only 4 ms more and costs HALF of what little integration remains.
+ * Precision scales with the square root of integration time, so the last few
+ * milliseconds are the most expensive ones to give up. 20 ms is the knee.
+ *
+ * ---------------------------------------------------------------------------
+ * WHAT THIS COSTS THE ROBOT (single-shot, which is what we use)
+ * ---------------------------------------------------------------------------
+ * ToF_ReadAll() walks the three sensors SEQUENTIALLY and blocks on each,
+ * because they share one mux channel at a time. So a full sweep is 3x the
+ * budget plus polling overhead, not 1x:
+ *
+ *     33 ms budget -> ~105 ms per sweep -> ~9.5 Hz
+ *     20 ms budget ->  ~66 ms per sweep -> ~15 Hz
+ *
+ * At 30 cm/s that is the difference between moving 3.2 cm and 2.0 cm between
+ * wall updates. The mux is what makes this 3x rather than 1x -- see the note
+ * on TOF_POLL_DELAY_MS for the other half of the latency.
+ *
+ * If you need more than this, the next real win is not a smaller budget: it is
+ * reading only the sensor you need (front before a decision, sides while
+ * corridor-following) instead of sweeping all three every cycle. */
+#define TOF_TIMING_BUDGET_US        20000U
 
 /* Inter-measurement period for CONTINUOUS mode, milliseconds. Must be >= the
  * timing budget in ms, otherwise the sensor cannot keep up and simply runs
@@ -394,13 +436,46 @@
 #define TOF_SIGNAL_RATE_LIMIT_MCPS  0.25f
 
 /* Sigma (standard deviation) limit, millimetres. Rejects readings the sensor
- * itself considers imprecise. ST's default is 18 mm. */
+ * itself considers imprecise. ST's default is 18 mm.
+ *
+ * This interacts directly with TOF_TIMING_BUDGET_US. The sensor's own sigma
+ * estimate grows as integration time shrinks, so a limit that rejected nothing
+ * at a 33 ms budget can start rejecting perfectly good readings at 20 ms --
+ * and a rejected reading is reported as TOF_ERROR_RANGE, i.e. indistinguishable
+ * from "no wall there". Silently losing a wall is far worse for a maze solver
+ * than accepting a slightly imprecise distance, because the filter downstream
+ * is already there to absorb the imprecision.
+ *
+ * Kept at ST's 18 mm for now: maze walls are close and return a strong signal,
+ * which is the regime where sigma stays smallest, so the shorter budget should
+ * not push it over. IF the flight recorder shows status-1 / status-4
+ * rejections appearing after the budget cut, raise this to ~25 mm before
+ * suspecting the hardware -- that is the expected failure mode of this change,
+ * not a wiring fault. */
 #define TOF_SIGMA_LIMIT_MM          18.0f
 
 /* How long to wait for a measurement to complete before giving up, ms.
  * Must comfortably exceed the timing budget -- this is a stuck-sensor
  * detector, not a pacing mechanism. */
 #define TOF_DATA_READY_TIMEOUT_MS   100U
+
+/* How often the ST API's blocking poll loops re-check whether a measurement
+ * has completed, in MICROSECONDS.
+ *
+ * This is latency, not throughput: a blocking single-shot read cannot return
+ * any sooner than the next poll after the sensor finishes, so this interval is
+ * pure rounding error added to every read -- and with three sensors read in
+ * series, three times per sweep.
+ *
+ * It replaced HAL_Delay(1), which was really 1-2 ms because HAL_Delay counts
+ * whole SysTick ticks and the first one can land anywhere. See the comment in
+ * vl53l0x_platform.c.
+ *
+ * LOWER for slightly tighter latency, at the cost of more I2C polling traffic
+ * during the measurement. Do not go to single-digit microseconds: each poll is
+ * a real bus transaction and hammering the sensor mid-measurement is a good
+ * way to disturb the reading you are waiting for. */
+#define TOF_POLL_DELAY_US           500U
 
 /* How long ToF_StopContinuous() waits for the sensor to finish stopping, ms.
  * Only a runaway escape: the stop completes in a millisecond or two. */
@@ -423,6 +498,26 @@
  *
  * LOWER if readings are still too noisy to steer on.
  * RAISE if wall-following feels laggy or starts to oscillate. */
+/* HELD AT 0.2 AFTER THE BUDGET CUT TO 20 ms -- deliberately not lowered.
+ *
+ * The instinct after making samples noisier is to smooth harder. That is the
+ * wrong lever here, because alpha buys smoothing with TIME, and time is the
+ * thing the budget cut was spent to buy back. At ~15 Hz, alpha 0.2 already
+ * takes ~5 samples (~330 ms) to settle; at 30 cm/s the robot travels ~10 cm in
+ * that window, which is most of a maze cell. Halving alpha to 0.1 would double
+ * that to ~20 cm -- the robot would be steering on where the wall was a cell
+ * ago, which is exactly the lag failure the whole filter design avoids.
+ *
+ * The shorter budget is also less damaging than it first appears: precision
+ * scales with the square root of integration time, so dropping 21 ms -> 8 ms
+ * of integration costs a factor of ~1.6 in per-sample sigma, while the sweep
+ * rate improves by ~1.6x. Per unit of DISTANCE TRAVELLED the robot now gets
+ * more samples, and the filter averages them -- so the noise the controller
+ * actually sees is close to a wash. That is the real justification for the
+ * whole change.
+ *
+ * Revisit only if the flight recorder shows the filtered spread has genuinely
+ * grown, and even then prefer raising the sweep rate over lowering alpha. */
 #define TOF_FILTER_EMA_ALPHA        0.2f
 
 /* A median-stage change at least this large (mm) is treated as a real step
@@ -436,7 +531,22 @@
  * (watch tm_tof_jumps climbing while the robot sits still -- it should not
  * move at all when nothing is moving).
  * RAISE and real wall transitions get smoothed into a slow ramp. */
-#define TOF_FILTER_JUMP_THRESHOLD_MM 30U
+/* RAISED 30 -> 40 mm alongside the 33 -> 20 ms budget cut.
+ *
+ * 30 mm was chosen against a ~7 mm spread measured at the 33 ms budget. Less
+ * integration time means a wider spread (roughly 1.6x, see EMA_ALPHA above),
+ * so the old threshold now sits closer to the noise floor than intended. A
+ * threshold that the noise can reach is actively harmful: every trip RESETS
+ * the EMA to a single raw sample, so the filter stops smoothing exactly when
+ * it is needed most, and does it invisibly.
+ *
+ * 40 mm keeps the same comfortable ratio to the new noise floor while staying
+ * far below a real transition (a side wall ending changes the reading by
+ * 100 mm or more), so nothing is lost on the detection side.
+ *
+ * VERIFY THIS ON HARDWARE: with the robot stationary, tm_tof_*_jumps must not
+ * climb at all. If it does, this is still too low. */
+#define TOF_FILTER_JUMP_THRESHOLD_MM 40U
 
 /* ------------------------- Per-sensor offsets ---------------------------- */
 

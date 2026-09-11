@@ -33,6 +33,8 @@
 #include "vl53l0x_platform.h"
 #include "vl53l0x_api.h"
 #include "main.h"
+#include "control_config.h"
+#include "dwt_timer.h"
 
 /* CubeMX owns this handle; declared in main.c. */
 extern I2C_HandleTypeDef hi2c1;
@@ -182,9 +184,28 @@ VL53L0X_Error VL53L0X_UpdateByte(VL53L0X_DEV Dev, uint8_t index, uint8_t AndData
 VL53L0X_Error VL53L0X_PollingDelay(VL53L0X_DEV Dev)
 {
     (void)Dev;
+
     /* Called from the API's internal poll loops (measurement-ready, stop
-     * complete). 1 ms matches ST's reference cadence — the sensor's fastest
-     * timing budget is ~20 ms, so polling faster only burns bus bandwidth. */
-    HAL_Delay(1);
+     * complete), so this interval sets how precisely a blocking read can
+     * detect that the sensor has finished.
+     *
+     * This was HAL_Delay(1). That is worse than it looks: HAL_Delay counts
+     * SysTick ticks, and the first tick can land anywhere between 0 and 1 ms
+     * away, so HAL_Delay(1) actually blocks for 1-2 ms. Every single-shot read
+     * therefore overshot completion by up to 2 ms, and a three-sensor sweep by
+     * up to 6 ms -- which, once the budget came down to 20 ms, is a ~10%
+     * latency tax on top of the measurement itself, paid purely in rounding.
+     *
+     * DWT_DelayUs busy-waits on the cycle counter instead, so the granularity
+     * is the poll interval itself rather than the OS tick. 500 us keeps the
+     * I2C traffic modest (a data-ready poll is a 2-byte read) while removing
+     * the quantisation. Busy-waiting is acceptable here because the caller is
+     * already blocked inside a blocking read -- there is nothing else for this
+     * loop to do.
+     *
+     * Do NOT drop this to a few microseconds: each poll is a real I2C
+     * transaction, and hammering the bus during a measurement can disturb the
+     * sensor it is trying to read. */
+    DWT_DelayUs(TOF_POLL_DELAY_US);
     return VL53L0X_ERROR_NONE;
 }
