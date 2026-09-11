@@ -65,6 +65,11 @@ volatile uint32_t tm_tof_error_count   = 0;
 volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
 volatile uint32_t    tm_tof_history_count = 0;
 
+/* TEST_TOF_MODE_CYCLE counters */
+volatile uint32_t tm_tof_mode_cycles     = 0;
+volatile uint32_t tm_tof_stop_fail_count = 0;
+volatile uint32_t tm_tof_post_stop_fail  = 0;
+
 /* Only the test selected by ACTIVE_TEST is called, so the others would each
  * raise -Wunused-function. Mark them so real warnings stay visible. */
 #define TEST_FN __attribute__((unused)) static
@@ -433,7 +438,7 @@ TEST_FN void Test_GyroBias(void)
  * Shared by both ToF tests so single and continuous mode report identically
  * and their numbers can be compared directly. */
 static void Telemetry_CaptureToF(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
-                                 int sweep_status)
+                                 int sweep_status, uint8_t phase)
 {
   tm_tof_front_mm     = m[TOF_FRONT].distance_mm;
   tm_tof_left_mm      = m[TOF_LEFT].distance_mm;
@@ -479,6 +484,7 @@ static void Telemetry_CaptureToF(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
     r->left_status   = m[TOF_LEFT].range_status;
     r->right_status  = m[TOF_RIGHT].range_status;
     r->ok            = (sweep_status == TOF_OK) ? 1U : 0U;
+    r->phase         = phase;
 
     tm_tof_history_count++;
   }
@@ -535,7 +541,7 @@ TEST_FN void Test_ToFSingle(void)
   ToF_Measurement_t m[TOF_SENSOR_COUNT];
   int status = ToF_ReadAll(m);
 
-  Telemetry_CaptureToF(m, status);
+  Telemetry_CaptureToF(m, status, TOF_PHASE_SINGLE);
   ToF_HaltIfBufferFull();
 
   HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
@@ -565,11 +571,78 @@ TEST_FN void Test_ToFContinuous(void)
   ToF_Measurement_t m[TOF_SENSOR_COUNT];
   int status = ToF_ReadAll(m);
 
-  Telemetry_CaptureToF(m, status);
+  Telemetry_CaptureToF(m, status, TOF_PHASE_CONTINUOUS);
   ToF_HaltIfBufferFull();
 
   HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
   HAL_Delay(20);
+}
+
+/* ---------------------------------------------------------------------------
+ * TEST 13: ToF mode switching. Exercises the one path no other test touches.
+ *
+ * The other two ToF tests each stay in a single mode forever, so nothing ever
+ * calls ToF_StopContinuous(). That matters because stopping is not
+ * instantaneous: VL53L0X_StopMeasurement() only REQUESTS the stop, and the
+ * sensor finishes a measurement already in flight before it takes effect.
+ * Reconfiguring the device during that window leaves it in an undefined state.
+ * Worse, the stop-completion poll is also what rewrites StopVariable to re-arm
+ * the part, so skipping it skips a required device write rather than just a
+ * wait.
+ *
+ * Each cycle runs: single-shot -> continuous -> STOP -> single-shot, and the
+ * last step is the one that breaks if the stop was mishandled.
+ *
+ * HOW TO READ THE RESULT. Point the robot at a static scene and leave it
+ * alone. Then:
+ *   - tm_tof_stop_fail_count and tm_tof_post_stop_fail must both stay 0.
+ *   - PRE and POST records must report the SAME distances. The scene did not
+ *     move, so any disagreement between a single-shot before the start and one
+ *     after the stop is the sensor, not the world.
+ * A silent wrong number is the failure worth catching here; an outright error
+ * would have been obvious already.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_ToFModeCycle(void)
+{
+  Motor_Brake();
+
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+
+  /* Baseline, from a known single-shot state. */
+  Telemetry_CaptureToF(m, ToF_ReadAll(m), TOF_PHASE_CYCLE_PRE);
+
+  /* Free-run for a few samples so the stop lands on a genuinely running
+   * sensor rather than an idle one. */
+  (void)ToF_StartContinuousAll();
+
+  for (uint8_t i = 0; i < TEST_TOF_CONT_POLLS; i++)
+  {
+    HAL_Delay(TOF_INTER_MEASUREMENT_MS + 10U);
+    Telemetry_CaptureToF(m, ToF_ReadAll(m), TOF_PHASE_CYCLE_CONT);
+  }
+
+  if (ToF_StopContinuousAll() != TOF_OK)
+  {
+    tm_tof_stop_fail_count++;
+  }
+
+  /* The measurement under test: a single-shot read immediately after the
+   * stop, with no settling delay hiding the problem. */
+  int post = ToF_ReadAll(m);
+
+  if (post != TOF_OK)
+  {
+    tm_tof_post_stop_fail++;
+  }
+
+  Telemetry_CaptureToF(m, post, TOF_PHASE_CYCLE_POST);
+
+  tm_tof_mode_cycles++;
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+
+  /* Checked once per cycle, not per record, so a cycle is never cut in half. */
+  ToF_HaltIfBufferFull();
 }
 
 void TestHarness_RunCycle(void)
@@ -615,6 +688,10 @@ void TestHarness_RunCycle(void)
 
 #elif (ACTIVE_TEST == TEST_TOF_CONTINUOUS)
   Test_ToFContinuous();
+  return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_TOF_MODE_CYCLE)
+  Test_ToFModeCycle();
   return;   /* poll continuously, no cycle pause */
 
 #else

@@ -32,9 +32,10 @@
 #define TEST_GYRO_BIAS 10        /* No motion. Bias + drift measurement.  */
 #define TEST_TOF_SINGLE 11       /* No motion. Single-shot ToF ranging.   */
 #define TEST_TOF_CONTINUOUS 12   /* No motion. Continuous ToF ranging.    */
+#define TEST_TOF_MODE_CYCLE 13   /* No motion. Mode switching + stop path. */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_STRAIGHT_FORWARD
+#define ACTIVE_TEST TEST_TOF_MODE_CYCLE
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */
@@ -69,6 +70,10 @@
 
 /* How long TEST_GYRO_BIAS lets yaw drift before reporting, in ms. */
 #define TEST_BIAS_DRIFT_MS 10000U
+
+/* Continuous polls per cycle of TEST_TOF_MODE_CYCLE. Only needs to be enough
+ * for the sensor to be genuinely free-running when the stop is issued. */
+#define TEST_TOF_CONT_POLLS 5U
 
 /* ---------------------------------------------------------------------------
  * Telemetry for the debugger live-watch panel.
@@ -146,6 +151,15 @@ extern volatile float tm_yaw_sigma_deg;  /* EKF yaw 1-sigma, deg        */
 extern volatile float tm_bias_drift_deg; /* yaw drift while stationary  */
 extern volatile uint32_t tm_ekf_rejects; /* gated-out encoder updates   */
 
+/* Which phase of a test produced a ToF record. Only TEST_TOF_MODE_CYCLE uses
+ * more than one; the other two tag every record with their own constant so the
+ * column always means the same thing. */
+#define TOF_PHASE_SINGLE 0U     /* TEST_TOF_SINGLE                          */
+#define TOF_PHASE_CONTINUOUS 1U /* TEST_TOF_CONTINUOUS                      */
+#define TOF_PHASE_CYCLE_PRE 2U  /* mode cycle: single-shot BEFORE the start */
+#define TOF_PHASE_CYCLE_CONT 3U /* mode cycle: free-running                 */
+#define TOF_PHASE_CYCLE_POST 4U /* mode cycle: single-shot AFTER the stop   */
+
 /* ---- ToF telemetry ----
  * Distances are in MILLIMETRES (the ST API's native unit), not the cm used
  * by the motion controllers. TOF_DISTANCE_INVALID (0xFFFF = 65535) means the
@@ -204,16 +218,26 @@ typedef struct {
   uint8_t front_status; /* raw ST RangeStatus, 0 = good               */
   uint8_t left_status;
   uint8_t right_status;
-  uint8_t ok; /* 1 = all three sensors gave a valid reading */
+  uint8_t ok;    /* 1 = all three sensors gave a valid reading */
+  uint8_t phase; /* TOF_PHASE_*, so records can be grouped     */
 } ToFRecord_t;
 
 /* Same stride contract as MoveRecord_t: the offline reader walks this by raw
  * byte offset, so a layout change must fail the build, not the analysis. */
-_Static_assert(sizeof(ToFRecord_t) == 20,
+_Static_assert(sizeof(ToFRecord_t) == 24,
                "ToFRecord_t stride changed: update the SWD telemetry reader");
 
 extern volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
 extern volatile uint32_t tm_tof_history_count;
+
+/* TEST_TOF_MODE_CYCLE counters. A stop that reports failure, or a single-shot
+ * read after a stop that does not succeed, is the defect this test exists to
+ * catch. Both must stay at 0. */
+extern volatile uint32_t tm_tof_mode_cycles; /* completed start/stop cycles */
+extern volatile uint32_t
+    tm_tof_stop_fail_count; /* ToF_StopContinuousAll != OK */
+extern volatile uint32_t
+    tm_tof_post_stop_fail; /* single-shot after stop failed */
 
 /* Blink the on-board LED n times to signal progress without a serial port.
  * Shared by the test routines and main()'s own startup indicator. */
