@@ -78,6 +78,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # reference code and are deliberately NOT built. Do not add them.
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Platform/vl53l0x_platform.c
 
+    # Maze layer - map + wall interpretation (no solving; that is the
+    # MicroMouseAlgorithm repo)
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/maze_map.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_sense.c
+
     # Utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c
 
@@ -96,6 +101,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X_Driver
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X/Core
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X/Platform
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Maze
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Utils
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Tests
 )

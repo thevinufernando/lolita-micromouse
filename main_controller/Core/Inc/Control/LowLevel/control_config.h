@@ -406,6 +406,35 @@
  * Only a runaway escape: the stop completes in a millisecond or two. */
 #define TOF_STOP_TIMEOUT_MS         100U
 
+
+/* ========================== WALL DETECTION ============================== */
+/* Distances to booleans. See Core/Inc/Maze/wall_sense.h for the reasoning.  */
+
+/* A front reading at or below this means the current cell has a wall ahead.
+ * Robot centred, a front wall sits ~77 mm away as read; with no wall the
+ * nearest surface is the far side of the NEXT cell at ~250 mm. The gap is
+ * enormous, which is why the sensors' +27 mm close-range over-read is
+ * irrelevant here and the offset constants are not needed for detection. */
+#define WALL_FRONT_THRESHOLD_MM     150U
+
+/* Same for the sides: a wall reads ~62 mm, an opening 300 mm and up. */
+#define WALL_SIDE_THRESHOLD_MM      120U
+
+/* Samples majority-voted by WallSense_ReadCell() at a cell centre.
+ * Keep this ODD so there is never a tie. Worth the ~1 s it costs: the
+ * algorithm never clears a wall once set, so a single bad reflection writing
+ * a phantom wall closes a corridor permanently. */
+#define WALL_SENSE_SAMPLES          5U
+
+/* Extra distance a latched wall must recede before it counts as gone, used
+ * only by the moving/hysteretic path. Without a separate exit level the
+ * decision chatters at every cell boundary, which is exactly where the wall
+ * really does end and where a wrong answer is most expensive. */
+#define WALL_SENSE_HYSTERESIS_MM    40U
+
+/* Consecutive cycles a changed answer must hold before it is latched. */
+#define WALL_SENSE_CONFIRM          3U
+
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 
 /* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:
