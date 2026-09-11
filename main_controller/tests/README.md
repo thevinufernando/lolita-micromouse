@@ -111,3 +111,28 @@ so an outlier larger than the threshold produces one sample of overshoot
 before the median pulls it back. The test asserts it does not persist rather
 than that it never happens. A one-sample blip is much cheaper than being blind
 to a real opening in the maze.
+
+
+## navigator_host_test.c - reactive wall-following rule
+
+```sh
+gcc -O1 -Wall -Wextra -o nav_test tests/navigator_host_test.c \
+    Core/Src/Maze/maze_map.c -I Core/Inc/Maze && ./nav_test
+```
+
+Checks the decision rule's truth table, then drives it around a simulated
+arena through the real `maze_map.c` and asserts the recorded walls match.
+
+**It caught the defining bug in that rule.** The first version returned "turn
+right" as a complete action. The trace showed the robot reaching the opening,
+turning into it, seeing another open right, and pivoting straight back down
+the corridor it came from without ever entering the new cell. Every action a
+wall follower takes must end in one cell of forward motion; the turn only
+chooses which way to leave. This is the classic way the rule is written wrong,
+and on hardware it would have looked like a turn-tuning problem rather than a
+logic error.
+
+The rule itself is copied into the test rather than linked, because
+`navigator.c` needs the HAL and cannot build on the host. The constants come
+from the real `navigator.h`, so the test also proves that header parses
+standalone and that `MazeTrace_t` still satisfies its 36-byte stride assert.

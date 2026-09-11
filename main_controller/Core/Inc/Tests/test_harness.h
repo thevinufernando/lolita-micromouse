@@ -33,7 +33,7 @@
 #define TEST_TOF_SINGLE 11       /* No motion. Single-shot ToF ranging.   */
 #define TEST_TOF_CONTINUOUS 12   /* No motion. Continuous ToF ranging.    */
 #define TEST_TOF_MODE_CYCLE 13   /* No motion. Mode switching + stop path. */
-#define TEST_MAZE_RUN 14         /* MOVES. Scripted arena run + wall map.  */
+#define TEST_MAZE_RUN 14         /* MOVES. Reactive navigation + wall map. */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
 #define ACTIVE_TEST TEST_MAZE_RUN
@@ -76,40 +76,9 @@
  * for the sensor to be genuinely free-running when the stop is issued. */
 #define TEST_TOF_CONT_POLLS 5U
 
-/* ---- TEST_MAZE_RUN ----
- * The arena: (0,0)N -> (0,1)N -> (0,2)N -> turn right -> (1,2)E.
- * Three forward moves and one right turn, reading walls at every cell centre
- * INCLUDING the start, because the map has to know about the cell it begins
- * in as well as the ones it drives to. */
-#define TEST_MAZE_CELL_CM 18.0f   /* centre-to-centre cell pitch */
-
-/* Per-cell record of what the run actually did. */
-#define MAZE_TRACE_CAPACITY 12U
-
-typedef struct {
-  uint32_t timestamp_ms;
-  int16_t x;             /* pose when the walls were read */
-  int16_t y;
-  uint8_t dir;           /* Direction enum                */
-  uint8_t front;         /* walls seen, robot-relative    */
-  uint8_t left;
-  uint8_t right;
-  uint16_t front_mm;     /* distances behind those calls  */
-  uint16_t left_mm;
-  uint16_t right_mm;
-  float yaw_deg;         /* fused heading at the cell     */
-  float heading_target;  /* what it should have been      */
-  float move_error_cm;   /* distance error of the move in */
-  uint8_t move_ok;       /* 1 = the move that got here completed */
-  uint8_t wall_side;     /* WallFollowSide_t in use       */
-} MazeTrace_t;
-
-_Static_assert(sizeof(MazeTrace_t) == 36,
-               "MazeTrace_t stride changed: update the SWD telemetry reader");
-
-extern volatile MazeTrace_t tm_maze_trace[MAZE_TRACE_CAPACITY];
-extern volatile uint32_t    tm_maze_trace_count;
-extern volatile uint8_t     tm_maze_complete;
+/* TEST_MAZE_RUN has no parameters here. It is a one-line call into the
+ * navigator, whose rule, tuning and per-cell trace all live in
+ * Core/Inc/Maze/navigator.h -- that is robot behaviour, not test scaffolding. */
 
 /* ---------------------------------------------------------------------------
  * Telemetry for the debugger live-watch panel.

@@ -94,6 +94,8 @@ the ToF suite has already caught one real design defect (see §9).
 Core/Inc, Core/Src
 ├─ Control/LowLevel/    PID.c  EKF.c  straightline_controller.c  turn_controller.c
 │                       control_config.h  ← ALL tuning lives here
+├─ Maze/                maze_map.c  wall_sense.c  wall_follow.c
+│                       navigator.c           ← reactive exploration (no solver)
 ├─ Encoders/            encoders.c
 ├─ Motors/              DRV8833.c
 ├─ Sensors/ICM-42688-P/ ICM42688.c
@@ -216,7 +218,7 @@ There are no magic numbers scattered in the controllers. Change values there,
 rebuild, flash.
 
 `Core/Inc/Tests/test_harness.h` has an `ACTIVE_TEST` switch selecting one of
-13 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
+15 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
 rebuild, flash, and read results in live-watch.
 
 | # | Test | Purpose |
@@ -233,6 +235,8 @@ rebuild, flash, and read results in live-watch.
 | 10 | `TEST_GYRO_BIAS` | Bias + stationary drift measurement |
 | 11 | `TEST_TOF_SINGLE` | **Run first after ToF wiring** — mux + single-shot ranging |
 | 12 | `TEST_TOF_CONTINUOUS` | Free-running ranging, same distances |
+| 13 | `TEST_TOF_MODE_CYCLE` | Mode switching and the stop path |
+| 14 | `TEST_MAZE_RUN` | **Moves.** Reactive navigation, wall map, one run |
 
 ### Bring-up order for the IMU
 
@@ -287,15 +291,26 @@ failing, so a silent fallback is possible — check `tm_imu_ok`.
 
 Currently **out of scope** unless explicitly requested:
 
-- **Wall detection logic** — the ToF sensors now report distances (see
-  §9), but nothing turns those into "there is a wall here" decisions.
-  That judgement belongs with the maze logic, which does not exist yet.
-- ToF in either motion controller — straight-line and turns remain
-  encoder/IMU only; range data is not fed back into control
-- Any maze-solving algorithm (flood fill, DFS, …)
-- IMU in the straight-line controller
+- **Any goal-seeking maze solver** (flood fill, DFS, …). The robot explores by
+  wall following, which visits cells but does not aim at anything. Porting the
+  flood fill from `MicroMouseAlgorithm` replaces `decide()` in
+  `Maze/navigator.c` and nothing underneath it.
 - Magnetometer — **not present in hardware**, so absolute heading is
-  impossible. Yaw is always relative to the last reset.
+  impossible. Yaw is always relative to the last reset. The wall follower's
+  standing tilt is the closest thing to an absolute reference: holding a wall
+  at its setpoint while the gyro drifts requires a persistent tilt, so that
+  tilt *is* the drift, and it is bled back into the heading target.
+
+**No longer out of scope**, as of 2026-09-12 — earlier revisions of this file
+said all four were deliberately absent:
+
+- Wall detection — `Maze/wall_sense.c` turns distances into booleans.
+- ToF in the straight-line controller — `runForwardFused()` centres on
+  whichever side wall is in range.
+- IMU in the straight-line controller — it holds fused heading, not encoder
+  tick difference.
+- Reactive navigation — `Maze/navigator.c` chooses each move from live sensor
+  readings.
 
 ---
 
@@ -512,6 +527,51 @@ accident.
 ---
 
 ## Change log
+
+### 2026-09-12 - Reactive navigation, split out of the test harness
+- **The scripted arena route is gone.** `TEST_MAZE_RUN` used to drive a fixed
+  sequence (forward, forward, turn right, forward). The robot now stops at
+  each cell centre, reads its three ToF sensors, and picks the next action
+  from what it saw, so the same binary runs any arena. Right-hand wall
+  following, not flood fill: it knows nothing about where a goal is.
+- **New module `Maze/navigator.c/.h`.** The behaviour does not belong in the
+  test harness -- everything else there is bring-up scaffolding that exercises
+  one subsystem and is then never touched again, whereas this is the robot's
+  actual job and is what the flood fill eventually replaces. `test_harness.c`
+  dropped from 989 to 754 lines and now calls `Navigator_Run()`.
+  `MazeTrace_t` and the `tm_maze_*` telemetry moved with it; the names did not
+  change, so the SWD reader is unaffected.
+- **Every action ends in one cell of forward motion.** The turn only chooses
+  which way to leave. The first version treated "turn right" as a complete
+  action and `tests/navigator_host_test.c` caught it: the robot reached the
+  opening, turned into it, saw another open right, and pivoted back down the
+  corridor it came from without entering the new cell. On hardware that would
+  have looked like a turn-tuning problem.
+- **Decisions read the SENSORS, never the map.** The map has the outer
+  boundary pre-set and never clears a wall, so deciding from it would let one
+  bad reflection close a corridor for the rest of the run.
+- **Every pivot now resets the ToF filter and the wall follower.** Nothing did
+  this before. The median and EMA stages carry several samples across a turn,
+  and the jump detector only rescues large steps -- so turning from one wall
+  to another at a similar distance slipped through as a slow ramp. It mattered
+  little with a fixed route; it matters a lot when the next reading picks the
+  next turn.
+- **A failed move no longer writes walls into the map.** The pose is
+  deliberately not advanced on failure, so the robot is between cells and the
+  readings belong to no cell the map can name. They are still logged, because
+  they are the evidence of what went wrong.
+- Runs are bounded four ways, reported in `tm_maze_abort_reason`: cell budget,
+  failed move, returning to the start cell, or a full trace buffer. A wall
+  follower in open space circles forever and a bench arena has no outer
+  boundary to stop it.
+- `MazeTrace_t` gained the chosen action and the per-sensor vote tallies,
+  packed into padding the compiler was already inserting, so it stays 36 bytes
+  and the reader's stride is unchanged. A 3-2 vote on the FRONT sensor is now
+  visible -- that is the reading that decides whether the robot drives into a
+  wall.
+- Added `tests/navigator_host_test.c` (9 checks) and a `tests/README.md`
+  section.
+
 
 ### 2026-09-11 — ToF noise filtering + per-sensor offsets
 - Bench measurement with the sensors working: a wall at a true 80 mm read

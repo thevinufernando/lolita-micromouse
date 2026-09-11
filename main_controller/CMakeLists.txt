@@ -84,6 +84,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/maze_map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_sense.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_follow.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/navigator.c
 
     # Utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c
