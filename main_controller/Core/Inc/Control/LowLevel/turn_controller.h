@@ -92,6 +92,29 @@ extern volatile float turn_profile_duration_s;
 /* Absolute heading bookkeeping. turn_heading_target_deg is an exact multiple
  * of 90 for the whole run; the gap between it and yaw_fused_deg is the
  * accumulated heading error that the next move inherits and corrects. */
+/* Per-cycle trace of the LAST move, reset at the start of each one.
+ *
+ * The end-of-move snapshot cannot calibrate a feedforward: by then both
+ * reference velocity and acceleration are zero, so the split between ff and fb
+ * says nothing about how the ramps went. This records the whole move so the
+ * gains can be fitted rather than guessed -- two guesses in a row have now
+ * each made things worse in a different direction. */
+#define TURN_TRACE_CAPACITY 100U
+
+typedef struct {
+  float t_s;       /* since move start                              */
+  float ref_deg;   /* profile reference, relative to the move start */
+  float act_deg;   /* fused yaw, relative to the move start         */
+  float ff;        /* feedforward half of the command               */
+  float fb;        /* feedback half                                 */
+} TurnTrace_t;
+
+_Static_assert(sizeof(TurnTrace_t) == 20,
+               "TurnTrace_t stride changed: update the SWD telemetry reader");
+
+extern volatile TurnTrace_t tm_turn_trace[TURN_TRACE_CAPACITY];
+extern volatile uint32_t    tm_turn_trace_count;
+
 extern volatile float turn_heading_target_deg;
 extern volatile float turn_heading_error_deg;
 

@@ -65,6 +65,9 @@ volatile float turn_profile_duration_s;
  * making it visible is the entire reason yaw is no longer zeroed per move.
  * A turn that finishes 2 degrees short leaves that 2 degrees here, where the
  * next move inherits it as an ordinary setpoint error instead of losing it. */
+volatile TurnTrace_t tm_turn_trace[TURN_TRACE_CAPACITY];
+volatile uint32_t    tm_turn_trace_count;
+
 volatile float turn_heading_target_deg;
 volatile float turn_heading_error_deg;
 
@@ -159,6 +162,18 @@ void TurnController_ResetYaw(void)
 static void resetPID(void)
 {
     PIDController_Init(&turn_pid);
+
+    /* !! Seed the derivative's history with the CURRENT yaw. !!
+     *
+     * PIDController_Init() zeroes prevMeasurement, which was harmless when yaw
+     * was reset to 0 at every move. Now that yaw is continuous the measurement
+     * starts at whatever the run has accumulated, so the first cycle saw a step
+     * of the entire heading and the derivative term slammed to its limit. The
+     * trace caught it: the very first sample of a move at 1710 degrees showed
+     * a feedback command of -200, full reverse, fighting the start of the move
+     * before decaying over the next few samples. */
+    turn_pid.prevMeasurement = YawEstimator_GetYawDeg();
+    turn_pid.prevError       = 0.0f;
 
     pid_last_time = 0;
     settle_counter = 0;
@@ -301,12 +316,41 @@ static void updateControl(float target_yaw_deg)
     /* Feedforward supplies the command the move needs; feedback only corrects
      * the difference. Without the feedforward this is just a PID chasing a
      * moving target, which is strictly worse than chasing a fixed one. */
-    float ff = TURN_FF_GAIN * ref_vel + TURN_FF_ACCEL_GAIN * ref_acc;
+    /* Acceleration feedforward, ON THE WAY UP ONLY.
+     *
+     * The plant-inverse model says less command is needed while decelerating,
+     * and mathematically that is right -- but it assumes the motor is the only
+     * thing slowing the robot down. On this drivetrain friction is enormous
+     * (breakaway is above 140 units), so friction alone brakes harder than the
+     * profile asks for, and subtracting command on top of that stalls the
+     * robot early.
+     *
+     * The trace showed it plainly: at the end of the decel ramp the velocity
+     * term wanted +27 and the acceleration term wanted -60, for a net
+     * feedforward of -33 -- commanding reverse. The tracking lag, flat at
+     * ~3 deg through cruise, grew 3.0 -> 5.8 over exactly that stretch. */
+    float acc_ff = TURN_FF_ACCEL_GAIN * ref_acc;
+
+    if (ref_acc * ref_vel < 0.0f) {
+        acc_ff = 0.0f;
+    }
+
+    float ff = TURN_FF_GAIN * ref_vel + acc_ff;
     float fb = PIDController_Update(&turn_pid, ref_pos, fused_yaw_deg);
 
     turn_integrator = turn_pid.integrator;
     turn_ff_cmd     = ff;
     turn_fb_cmd     = fb;
+
+    if (tm_turn_trace_count < TURN_TRACE_CAPACITY) {
+        volatile TurnTrace_t *tr = &tm_turn_trace[tm_turn_trace_count];
+        tr->t_s     = elapsed_s;
+        tr->ref_deg = ref_pos - turn_profile_start_deg;
+        tr->act_deg = fused_yaw_deg - turn_profile_start_deg;
+        tr->ff      = ff;
+        tr->fb      = fb;
+        tm_turn_trace_count++;
+    }
 
     float basespeed = ff + fb;
 
@@ -352,6 +396,8 @@ static void resetTurnState(void)
     Encoders_Reset();
     YawEstimator_RebaseEncoders();
     resetPID();
+
+    tm_turn_trace_count = 0U;   /* the trace holds the most recent move */
 
     turn_start_time = HAL_GetTick();
 

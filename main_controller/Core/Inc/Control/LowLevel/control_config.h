@@ -231,7 +231,15 @@
  * breakaway pulse (full scale for ~30 ms, then hand back to the PID) is the
  * right consumer for it. Static friction is broken by amplitude, not by an
  * integrator patiently ramping through a range where the wheel cannot move. */
-#define TURN_INT_LIMIT_MOVING       20.0f
+/* REVERTED 20 -> 60 after a 0/20 run. Cutting it to 20 removed the authority
+ * that was rescuing moves which end the profile stopped and short: the ceiling
+ * at the end of a move is P + this clamp, so at 3 deg short that fell from 93
+ * units to 53, against a measured breakaway above 140. Every one of 20 moves
+ * then died 1.2-4.6 deg short with the command pointing the right way and
+ * simply too small. The profile makes this worse than the old scheme did,
+ * because it deliberately brings the robot to REST at the end of the sweep --
+ * so being short means restarting from zero, which this drivetrain cannot do. */
+#define TURN_INT_LIMIT_MOVING       60.0f
 
 /* Stall detector: rotation below this rate (deg/s) while still outside
  * TURN_TOLERANCE_DEG counts as "not moving".
@@ -259,13 +267,24 @@
 /* ranged from 0.7 to 8 seconds; a profiled one is always the same.         */
 
 /* Peak rotation rate, deg/s. */
-#define TURN_PROFILE_MAX_DPS        200.0f
+/* MEASURED, not chosen. A per-cycle trace of a real turn showed the robot
+ * sustaining 143 deg/s with the command saturated at CONTROL_MAX_SPEED, while
+ * the profile was asking for 200. It simply cannot go that fast, so the
+ * reference ran away and the tracking lag peaked at 28 degrees mid-move.
+ *
+ * 120 leaves headroom: at TURN_FF_GAIN the feedforward alone is ~164 units at
+ * cruise, so ~36 units remain for the feedback to correct with before the
+ * command clips. A profile the robot cannot follow is worse than no profile,
+ * because the feedback spends the whole move saturated. */
+#define TURN_PROFILE_MAX_DPS        120.0f
 
 /* Angular acceleration, deg/s^2. With the peak above, a 90 deg turn ramps
  * for 0.167 s over 16.7 deg at each end and cruises the middle 56.7 deg,
  * giving a total of 0.617 s. Raise both together to go faster; raising accel
  * alone just spends longer at peak rate. */
-#define TURN_PROFILE_ACCEL_DPS2     1200.0f
+/* Also measured: 0 to ~145 deg/s took about 200 ms, so roughly 725 deg/s^2 is
+ * all this drivetrain has. 600 keeps a margin. */
+#define TURN_PROFILE_ACCEL_DPS2     600.0f
 
 /* Feedforward gain: motor speed units per deg/s of commanded rotation.
  *
@@ -273,11 +292,12 @@
  * command the move needs so the feedback term only has to correct the
  * difference. Get it right and the PID output hovers near zero mid-turn.
  *
- * CALIBRATE IT from turn_ff_cmd and turn_fb_cmd during the cruise phase: if
- * turn_fb_cmd sits consistently positive, the feedforward is too small and
- * the feedback is doing work it should not have to. 1.0 is a starting
- * estimate from a 90 deg turn taking ~750 ms at a command near 200. */
-#define TURN_FF_GAIN                1.0f
+ * NOW MEASURED rather than guessed: the trace showed 200 command units
+ * producing 143 deg/s sustained, so 200/143 = 1.40. The previous value of 1.0
+ * under-drove every move by 40%, which the integrator then covered for.
+ * Re-check it from tm_turn_trace: during cruise the fb column should hover
+ * near zero rather than sitting hard one way. */
+#define TURN_FF_GAIN                1.40f
 
 /* Acceleration feedforward: motor speed units per deg/s^2.
  *
@@ -289,7 +309,7 @@
  *
  * 0.03 x the 1200 deg/s^2 ramp is ~36 speed units, which is about what the
  * integrator was winding to. Trim it from turn_fb_cmd during the ramps. */
-#define TURN_FF_ACCEL_GAIN          0.03f
+#define TURN_FF_ACCEL_GAIN          0.10f
 
 /* Grace period after the profile ends, in ms, to close whatever small error
  * is left. BOUNDED ON PURPOSE: this is the whole difference between a move
@@ -489,6 +509,128 @@
 /* Consecutive cycles a changed answer must hold before it is latched. */
 #define WALL_SENSE_CONFIRM          3U
 
+
+/* ===================== WALL FOLLOWING (LATERAL) ========================= */
+/*                                                                          */
+/* Holds the robot centred in a corridor using ONE side wall, whichever is  */
+/* currently in range. Two walls would let the common-mode sensor bias      */
+/* cancel in the difference; with one it does not, which is why the         */
+/* setpoints below are MEASURED READINGS rather than true distances.        */
+
+/* What each sensor reads with the robot centred in a cell. NOT the true gap.
+ *
+ * These absorb the sensors' ~27 mm close-range over-read without needing
+ * TOF_OFFSET_*_MM: if the setpoint is whatever the sensor says when the robot
+ * is where you want it, a constant bias cancels exactly. Measure them by
+ * centring the robot by hand and reading tm_tof_left_mm / _right_mm.
+ *
+ * From the maze-cell measurement: left 62.7, right 64.2, with the robot
+ * roughly but not exactly centred. Re-measure properly before trusting them. */
+#define WALL_FOLLOW_SETPOINT_LEFT_MM   63.0f
+#define WALL_FOLLOW_SETPOINT_RIGHT_MM  64.0f
+
+/* Lateral error (mm) -> commanded heading offset (deg).
+ *
+ * This is a CASCADE, not a second steering term added alongside the heading
+ * loop. Lateral position is two integrations from steering, so summing two
+ * independent corrections is undamped; feeding lateral error into the heading
+ * SETPOINT makes the inner loop supply the derivative term for free.
+ *
+ * 0.25 deg per mm means a 10 mm offset asks for a 2.5 degree tilt. */
+#define WALL_FOLLOW_KP_DEG_PER_MM      0.25f
+
+/* Hard cap on that tilt. Bounds how sharply the robot ever turns to correct
+ * sideways, which is the other thing summing the terms would not give. */
+#define WALL_FOLLOW_MAX_TILT_DEG       12.0f
+
+/* Slowly bleed the steady-state tilt back into the heading estimate.
+ *
+ * THIS IS THE DRIFT CORRECTOR, and it falls out of the cascade for free. If
+ * the gyro has drifted, holding the wall at its setpoint requires a persistent
+ * non-zero tilt -- so the standing output of the lateral loop IS the drift.
+ * Bleeding it into the heading target bounds the drift with no magnetometer
+ * and no differentiating of wall distance.
+ *
+ * Deliberately tiny: this must be far slower than the lateral loop, or the two
+ * fight and the robot weaves. Degrees of correction per second of held tilt. */
+#define WALL_FOLLOW_DRIFT_BLEED        0.02f
+
+
+/* ============ STRAIGHTLINE: FUSED HEADING PID (degrees) ================= */
+/* Used by runForwardFused(). Distinct from STRAIGHT_HEADING_*, which holds  */
+/* (left - right) encoder TICKS and is blind to wheel slip -- if a wheel     */
+/* slips, that loop steers to correct a rotation that never happened. This   */
+/* one closes on fused yaw, which is the only signal that can tell the two   */
+/* apart. Output is a differential speed correction.                          */
+
+#define STRAIGHT_YAW_KP             8.0f
+#define STRAIGHT_YAW_KI             0.0f
+#define STRAIGHT_YAW_KD             0.20f
+
+/* Steering authority clamp, motor speed units. Steering takes PRIORITY over
+ * forward speed when the two together would clip: the base speed is reduced
+ * to make room. Clipping each wheel independently instead turns a pure
+ * steering command into a net speed change, which is how the existing
+ * straight-line path loses steering authority exactly when it is fastest. */
+#define STRAIGHT_YAW_LIMIT          60.0f
+#define STRAIGHT_YAW_INT_LIMIT      20.0f
+
+/* Control cycles between ToF sweeps during a fused move.
+ * 4 at CONTROL_SAMPLE_TIME_S is 25 Hz, which already outruns the sensors'
+ * TOF_INTER_MEASUREMENT_MS. Polling every cycle would just spend I2C time
+ * re-reading the same measurement. */
+#define STRAIGHT_TOF_DIVIDER        4U
+
+
+/* =================== STRAIGHTLINE MOTION PROFILE ======================== */
+/* Same reasoning as the turn profile, and the same generator.             */
+/*                                                                         */
+/* The first arena run overshot an 18 cm cell by 2.07 cm and then TIMED    */
+/* OUT trying to come back -- the distance loop was still chasing a step   */
+/* setpoint, so it ran at the stiction floor until it was already past.    */
+/* A profile decelerates on a plan instead of on saturation decay.         */
+
+/* MEASURED from a per-cycle trace, not guessed. The robot sustains 20.1 cm/s
+ * with the command saturated at 200, and reaches it in about 600 ms.
+ *
+ * The first values here were 25 cm/s and 50 cm/s^2, and they failed exactly
+ * the way the turn profile failed at 200 deg/s: the command sat at 200 for a
+ * full second, the reference ran 7.75 cm ahead, and the profile declared the
+ * move over while the robot was still at 14.5 cm doing full speed. It then
+ * coasted to 20.2 and could not reverse back.
+ *
+ * 14 cm/s leaves headroom: feedforward alone is ~133 units at cruise, so ~67
+ * remain for the feedback to correct with before the command clips. */
+#define STRAIGHT_PROFILE_MAX_CMS    10.0f
+#define STRAIGHT_PROFILE_ACCEL_CMS2 20.0f
+
+/* WHY SO SLOW: this robot's braking distance, not its top speed, sets the
+ * cell time. Measured coasting from 18.7 cm/s to rest took 8.5 cm -- half a
+ * maze cell -- and it cannot reverse out of an overshoot because that needs
+ * breaking static friction from a standstill.
+ *
+ * So the plan must be one the robot can actually stop from. At 10 cm/s and
+ * 20 cm/s^2 the braking ramp is 2.5 cm, which is both what the profile
+ * budgets and what the robot physically does. 18 cm then takes 2.3 s.
+ *
+ * Faster is available only after the stopping problem is solved properly,
+ * either with real braking authority or by not requiring the robot to stop
+ * at every cell. */
+
+/* Motor speed units per cm/s.
+ *
+ * Lowered 9.9 -> 8.0. The 9.9 came from dividing a SATURATED command by the
+ * speed it produced, which measures the top of the curve rather than its
+ * slope -- this motor is already speed-limited by about 130 units, so 139 and
+ * 200 both give ~19 cm/s. Using that as a gain made the feedforward command
+ * 139 units for a requested 14 cm/s and the robot ran 34% fast.
+ *
+ * The feedforward sets the speed almost on its own here: at cruise it was 139
+ * of a 133 total command, with the feedback trimming by only -5. So this gain
+ * IS the cruise speed, and getting it wrong is not something the loop
+ * quietly absorbs. */
+#define STRAIGHT_FF_GAIN            8.0f
+
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 
 /* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:
@@ -591,10 +733,28 @@
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */
-#define STRAIGHT_TOLERANCE_CM       0.7f
+/* Widened 0.7 -> 1.0.
+ *
+ * There is NO SECOND CHANCE on a straight move: the profile brings the robot
+ * to rest, and from rest it cannot restart at the command a sub-centimetre
+ * error produces. So the move has to land inside the band first time, and a
+ * band narrower than the landing scatter just guarantees a timeout. */
+#define STRAIGHT_TOLERANCE_CM       1.5f
 
 /* How close (degrees of fused yaw) counts as "arrived" for turns. */
-#define TURN_TOLERANCE_DEG          1.0f
+/* Widened 1.0 -> 2.0.
+ *
+ * Not a retreat: it is the tolerance that was failing moves, not the motion.
+ * Across the last three runs every single failure landed between 1.0 and 1.4
+ * degrees -- the controller's real repeatability is about +/-1.4, and a 1.0
+ * band sits inside its own noise.
+ *
+ * 2.0 is also what the architecture downstream actually needs. Heading error
+ * after a turn is absorbed by the wall-following straight that follows it, and
+ * over one 18 cm cell 2 degrees is ~6 mm of lateral drift against ~35 mm of
+ * clearance. Demanding better from the turn buys nothing the next move does
+ * not already provide. */
+#define TURN_TOLERANCE_DEG          2.0f
 
 /* A turn only completes when the robot is both within tolerance AND rotating
  * slower than this (deg/s). Without the rate check the controller can declare

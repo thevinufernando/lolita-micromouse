@@ -1,4 +1,9 @@
 #include "straightline_controller.h"
+#include "yaw_estimator.h"
+#include "turn_controller.h"
+#include "wall_follow.h"
+#include "tof_sensors.h"
+#include "motion_profile.h"
 
 static Controller_t controller;
 
@@ -245,4 +250,212 @@ uint8_t runForwardDistance(float distance_cm) {
 uint8_t runBackwardDistance(float distance_cm) {
 
     return runDistance(distance_cm, -1.0f);
+}
+
+
+/* ==========================================================================
+ *            FUSED FORWARD MOVE: gyro heading + one-wall centring
+ * ======================================================================== */
+
+static PIDController yaw_pid;
+
+volatile float    sl_yaw_target_deg;
+volatile float    sl_yaw_error_deg;
+volatile float    sl_steering;
+volatile float    sl_basespeed;
+volatile uint32_t sl_sat_cycles;
+volatile float    sl_ref_cm;
+
+volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];
+volatile uint32_t        tm_sl_trace_count;
+
+
+/* Steering priority allocation.
+ *
+ * base + steer can exceed the motor range, and letting the driver clip each
+ * wheel independently silently converts a pure steering command into a net
+ * speed change -- the robot stops turning as hard as it was told to, exactly
+ * when it is going fastest and needs it most. Reducing the COMMON MODE
+ * instead preserves the differential, so the robot gives up speed rather
+ * than giving up steering. */
+static void allocate(float base, float steer, float *left, float *right)
+{
+    if (steer >  STRAIGHT_YAW_LIMIT) steer =  STRAIGHT_YAW_LIMIT;
+    if (steer < -STRAIGHT_YAW_LIMIT) steer = -STRAIGHT_YAW_LIMIT;
+
+    float headroom = CONTROL_MAX_SPEED - fabsf(steer);
+
+    if (headroom < 0.0f) headroom = 0.0f;
+
+    if (base >  headroom) { base =  headroom; sl_sat_cycles++; }
+    if (base < -headroom) { base = -headroom; sl_sat_cycles++; }
+
+    sl_basespeed = base;
+    sl_steering  = steer;
+
+    /* !! SIGN !! Positive steer means turn LEFT (anticlockwise, +yaw), and by
+     * this project's convention that is right wheel forward, left wheel back.
+     * So steer SUBTRACTS from the left wheel. Getting this backwards turns the
+     * heading loop into positive feedback: a robot drifting clockwise gets
+     * steered further clockwise. Observed as 25-30 degrees of runaway in the
+     * first arena run. Cross-check against turn_controller's
+     * Motor_runSignedSpeed(-basespeed, +basespeed). */
+    *left  = base - steer;
+    *right = base + steer;
+}
+
+
+uint8_t runForwardFused(float distance_cm)
+{
+    if (controller.state != STRAIGHTLINE_IDLE) {
+        return 0;
+    }
+
+    /* Encoders FIRST, then re-base the estimator onto the current yaw. REBASE,
+     * not reset: the heading this move inherits from the last turn is exactly
+     * what it exists to correct. See yaw_estimator.h. */
+    Encoders_Reset();
+    YawEstimator_RebaseEncoders();
+    WallFollow_Reset();
+
+    PIDController_Init(&controller.distance_pid);
+    PIDController_Init(&yaw_pid);
+
+    yaw_pid.Kp = STRAIGHT_YAW_KP;
+    yaw_pid.Ki = STRAIGHT_YAW_KI;
+    yaw_pid.Kd = STRAIGHT_YAW_KD;
+    yaw_pid.tau = CONTROL_DERIV_TAU_S;
+    yaw_pid.T = CONTROL_SAMPLE_TIME_S;
+    yaw_pid.limMin = -STRAIGHT_YAW_LIMIT;
+    yaw_pid.limMax =  STRAIGHT_YAW_LIMIT;
+    yaw_pid.limMinInt = -STRAIGHT_YAW_INT_LIMIT;
+    yaw_pid.limMaxInt =  STRAIGHT_YAW_INT_LIMIT;
+
+    /* Same trap as the turn controller: yaw is continuous, so a zeroed
+     * derivative history makes the first cycle see a step of the whole
+     * accumulated heading. */
+    yaw_pid.prevMeasurement = YawEstimator_GetYawDeg();
+
+    settle_counter    = 0;
+    sl_sat_cycles     = 0;
+    tm_sl_trace_count = 0U;
+
+    MotionProfile_t dist_profile;
+    MotionProfile_Init(&dist_profile, distance_cm,
+                       STRAIGHT_PROFILE_MAX_CMS, STRAIGHT_PROFILE_ACCEL_CMS2);
+
+    uint32_t start_ms = HAL_GetTick();
+    uint32_t last_pid = 0;
+    uint32_t tof_div  = 0;
+    float    tilt_deg = 0.0f;
+
+    controller.state = STRAIGHTLINE_RUNNING;
+
+    while (1) {
+
+        YawEstimator_Predict();
+
+        uint32_t now = HAL_GetTick();
+
+        if (now - start_ms >= CONTROL_MOVE_TIMEOUT_MS) {
+            Motor_Brake();
+            controller.state = STRAIGHTLINE_IDLE;
+            return 0;
+        }
+
+        if (now - last_pid < (uint32_t)(CONTROL_SAMPLE_TIME_S * 1000.0f)) {
+            continue;
+        }
+
+        last_pid = now;
+
+        YawEstimator_Correct();
+        YawEstimator_PublishTelemetry();
+
+        float measured   = Encoder_getAverageDistance();
+        float elapsed_s  = (float)(now - start_ms) * 0.001f;
+        float ref_pos    = MotionProfile_Position(&dist_profile, elapsed_s);
+        float ref_vel    = MotionProfile_Velocity(&dist_profile, elapsed_s);
+
+        sl_ref_cm = ref_pos;
+
+        if (fabsf(measured - distance_cm) < DISTANCE_TOLERANCE_CM) {
+            settle_counter++;
+            if (settle_counter >= CONTROL_SETTLE_CYCLES) {
+                Motor_Brake();
+                controller.state = STRAIGHTLINE_IDLE;
+                return 1;
+            }
+        }
+        else {
+            settle_counter = 0;
+        }
+
+        /* ToF at a fraction of the control rate. Sampling faster than the
+         * sensor produces just spends I2C time on a stale measurement, and
+         * that time is taken out of the 1 kHz gyro loop. */
+        if (++tof_div >= STRAIGHT_TOF_DIVIDER) {
+            tof_div = 0;
+            ToF_Measurement_t m[TOF_SENSOR_COUNT];
+            (void)ToF_ReadAll(m);
+            tilt_deg = WallFollow_Update(m);
+        }
+
+        /* The cascade: lateral error tilts the HEADING TARGET, and the
+         * heading loop closes on that. The drift bleed rides along on the
+         * same signal. */
+        float heading_target = TurnController_GetHeadingTargetDeg()
+                               + WallFollow_GetDriftDeg();
+
+        sl_yaw_target_deg = heading_target + tilt_deg;
+
+        float yaw = YawEstimator_GetYawDeg();
+
+        sl_yaw_error_deg = sl_yaw_target_deg - yaw;
+
+        /* Track the profile, not the endpoint. Feedforward supplies the
+         * command the move needs; feedback only trims. */
+        float base = STRAIGHT_FF_GAIN * ref_vel
+                     + PIDController_Update(&controller.distance_pid, ref_pos, measured);
+        float steer = PIDController_Update(&yaw_pid, sl_yaw_target_deg, yaw);
+
+        /* Stiction floor, NEVER during deceleration.
+         *
+         * The floor exists to raise a command too small to move the robot. It
+         * must not raise a command that is deliberately small because the
+         * profile is braking. The trace caught it doing exactly that: at
+         * t=1512 the distance PID wanted to slow down and applyMinSpeed forced
+         * the command back up to +45, driving the robot straight through the
+         * target to 21.6 cm.
+         *
+         * Gating on reference ACCELERATION rather than velocity is what makes
+         * this correct: velocity is still large during the braking ramp, which
+         * is precisely when flooring is most harmful. turn_controller already
+         * guards this with TURN_PROFILE_FLOOR_DPS; the straight path never got
+         * the same gate. */
+        float ref_acc = MotionProfile_Acceleration(&dist_profile, elapsed_s);
+
+        if (fabsf(measured - distance_cm) < DISTANCE_TOLERANCE_CM) {
+            base = 0.0f;
+        }
+        else if (ref_acc >= 0.0f && fabsf(ref_vel) > 1.0f) {
+            base = applyMinSpeed(base);
+        }
+
+        float left, right;
+        allocate(base, steer, &left, &right);
+
+        Motor_runSignedSpeed(left, right);
+
+        if (tm_sl_trace_count < SL_TRACE_CAPACITY) {
+            volatile StraightTrace_t *tr = &tm_sl_trace[tm_sl_trace_count];
+            tr->t_s     = elapsed_s;
+            tr->ref_cm  = ref_pos;
+            tr->act_cm  = measured;
+            tr->base    = sl_basespeed;
+            tr->steer   = sl_steering;
+            tr->yaw_err = sl_yaw_error_deg;
+            tm_sl_trace_count++;
+        }
+    }
 }

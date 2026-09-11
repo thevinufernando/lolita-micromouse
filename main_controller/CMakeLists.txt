@@ -83,6 +83,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # MicroMouseAlgorithm repo)
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/maze_map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_sense.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_follow.c
 
     # Utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c

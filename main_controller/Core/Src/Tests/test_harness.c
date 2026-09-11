@@ -6,6 +6,9 @@
 #include "turn_controller.h"
 #include "ICM42688.h"
 #include "tof_sensors.h"
+#include "maze_map.h"
+#include "wall_sense.h"
+#include "wall_follow.h"
 
 /* Result of the most recent move */
 volatile float  tm_final_left_cm    = 0.0f;
@@ -64,6 +67,10 @@ volatile uint32_t tm_tof_error_count   = 0;
  * above are not enough to characterise a sensor. */
 volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
 volatile uint32_t    tm_tof_history_count = 0;
+
+volatile MazeTrace_t tm_maze_trace[MAZE_TRACE_CAPACITY];
+volatile uint32_t    tm_maze_trace_count;
+volatile uint8_t     tm_maze_complete;
 
 /* TEST_TOF_MODE_CYCLE counters */
 volatile uint32_t tm_tof_mode_cycles     = 0;
@@ -153,8 +160,14 @@ static void Telemetry_CaptureYaw(float target_deg, uint8_t ok)
 
   if (!ok) tm_timeout_count++;
 
+  /* Yaw is CONTINUOUS now -- it accumulates across the whole run rather than
+   * resetting per move -- so the per-move commanded angle is no longer a
+   * meaningful thing to subtract from it. Grade against the absolute heading
+   * target instead, which is what the controller is actually aiming at.
+   * `target_deg` is kept only as the record's label. */
   tm_yaw_deg        = TurnController_GetYawDeg();
-  tm_yaw_error_deg  = target_deg - tm_yaw_deg;
+  tm_yaw_error_deg  = TurnController_GetHeadingTargetDeg() - tm_yaw_deg;
+  target_deg        = TurnController_GetHeadingTargetDeg();
   tm_enc_yaw_deg    = yaw_encoder_deg;
   tm_fusion_gap_deg = tm_yaw_deg - yaw_encoder_deg;
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
@@ -645,6 +658,125 @@ TEST_FN void Test_ToFModeCycle(void)
   ToF_HaltIfBufferFull();
 }
 
+/* ---------------------------------------------------------------------------
+ * TEST 14: the arena. (0,0)N -> (0,1)N -> (0,2)N -> turn right -> (1,2)E.
+ *
+ * The first end-to-end run: profiled turns, continuous heading, fused
+ * straight moves with single-wall centring, and wall recording into the same
+ * v_walls/h_walls arrays the simulator uses.
+ *
+ * Walls are read at every cell centre with the robot STATIONARY, by majority
+ * vote. That is deliberate and it is why the robot stops at each cell rather
+ * than reading on the move: the algorithm never clears a wall once set, so a
+ * single bad reflection closes a corridor permanently. A second of voting is
+ * cheap insurance against a map that can never be repaired.
+ *
+ * Runs ONCE and then halts. Re-running would drive the robot a second cell
+ * beyond the arena.
+ * ------------------------------------------------------------------------ */
+static void Maze_RecordCell(float move_error_cm, uint8_t move_ok,
+                            const WallReading_t *w)
+{
+  if (tm_maze_trace_count >= MAZE_TRACE_CAPACITY) return;
+
+  volatile MazeTrace_t *r = &tm_maze_trace[tm_maze_trace_count];
+
+  r->timestamp_ms   = HAL_GetTick();
+  r->x              = mouse_x;
+  r->y              = mouse_y;
+  r->dir            = (uint8_t)mouse_dir;
+  r->front          = w->front;
+  r->left           = w->left;
+  r->right          = w->right;
+  r->front_mm       = wall_front_mm;
+  r->left_mm        = wall_left_mm;
+  r->right_mm       = wall_right_mm;
+  r->yaw_deg        = TurnController_GetYawDeg();
+  r->heading_target = TurnController_GetHeadingTargetDeg();
+  r->move_error_cm  = move_error_cm;
+  r->move_ok        = move_ok;
+  r->wall_side      = wf_side;
+
+  tm_maze_trace_count++;
+}
+
+/* Read the walls here, write them into the map, and log it. */
+static void Maze_SurveyCell(float move_error_cm, uint8_t move_ok)
+{
+  WallReading_t w = {0U, 0U, 0U};
+
+  Motor_Brake();
+  HAL_Delay(TEST_MOVE_PAUSE_MS);
+
+  (void)WallSense_ReadCell(&w);
+
+  MazeMap_UpdateWalls(w.front, w.left, w.right);
+  Maze_RecordCell(move_error_cm, move_ok, &w);
+}
+
+TEST_FN void Test_MazeRun(void)
+{
+  if (tm_maze_complete) {
+    Motor_Brake();
+    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_RESET);
+    HAL_Delay(900);
+    return;
+  }
+
+  MazeMap_Init();
+  WallFollow_Reset();
+  TurnController_ResetYaw();      /* start of run: heading origin is here */
+
+  LED_Blink(1, 300, 300);
+
+  /* Survey the starting cell before moving. */
+  Maze_SurveyCell(0.0f, 1U);
+
+  /* ABORT ON THE FIRST FAILED MOVE.
+   *
+   * The pose is only advanced when a move reports success, so that a failure
+   * cannot write walls into the wrong cell. But that means after a failure
+   * the map and the robot disagree, and every later survey records real
+   * readings against a fictional pose. The first run did exactly that: one
+   * timed-out move, and the remaining three cells were logged at (0,1) facing
+   * north while the robot was physically somewhere else entirely.
+   *
+   * Stopping immediately makes the log say where it went wrong instead of
+   * burying it under three cells of plausible-looking nonsense. */
+
+  /* Two cells north. */
+  for (uint8_t i = 0; i < 2U; i++) {
+    if (!runForwardFused(TEST_MAZE_CELL_CM)) {
+      Maze_SurveyCell(TEST_MAZE_CELL_CM - Encoder_getAverageDistance(), 0U);
+      goto done;
+    }
+    MazeMap_Advance();
+    Maze_SurveyCell(TEST_MAZE_CELL_CM - Encoder_getAverageDistance(), 1U);
+  }
+
+  /* Wall ahead: turn right to face east. */
+  if (!turnRightAngle(90.0f)) {
+    Maze_SurveyCell(0.0f, 0U);
+    goto done;
+  }
+  MazeMap_TurnRight();
+  Maze_SurveyCell(0.0f, 1U);
+
+  /* One cell east. */
+  if (!runForwardFused(TEST_MAZE_CELL_CM)) {
+    Maze_SurveyCell(TEST_MAZE_CELL_CM - Encoder_getAverageDistance(), 0U);
+    goto done;
+  }
+  MazeMap_Advance();
+  Maze_SurveyCell(TEST_MAZE_CELL_CM - Encoder_getAverageDistance(), 1U);
+
+done:
+  Motor_Brake();
+  tm_maze_complete = 1U;
+}
+
 void TestHarness_RunCycle(void)
 {
 #if   (ACTIVE_TEST == TEST_MOTORS_OPEN_LOOP)
@@ -693,6 +825,10 @@ void TestHarness_RunCycle(void)
 #elif (ACTIVE_TEST == TEST_TOF_MODE_CYCLE)
   Test_ToFModeCycle();
   return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_MAZE_RUN)
+  Test_MazeRun();
+  return;   /* runs once, then heartbeats */
 
 #else
   #error "ACTIVE_TEST is not set to a valid test id"
