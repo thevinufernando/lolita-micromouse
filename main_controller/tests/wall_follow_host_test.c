@@ -8,8 +8,20 @@ static int fails=0;
 /* Mirrors the arithmetic in WallFollow_Update(). */
 static float err_both(float L,float R){
     return ((L-R)-(WALL_FOLLOW_SETPOINT_LEFT_MM-WALL_FOLLOW_SETPOINT_RIGHT_MM))*0.5f; }
-static float err_left(float L){ return L-WALL_FOLLOW_SETPOINT_LEFT_MM; }
-static float err_right(float R){ return -(R-WALL_FOLLOW_SETPOINT_RIGHT_MM); }
+static float err_left(float L){
+    float e = L-WALL_FOLLOW_SETPOINT_LEFT_MM;
+#if WALL_FOLLOW_SINGLE_ONE_SIDED
+    if (e > 0.0f) e = 0.0f;
+#endif
+    return e; }
+static float err_right(float R){
+    float e = -(R-WALL_FOLLOW_SETPOINT_RIGHT_MM);
+#if WALL_FOLLOW_SINGLE_ONE_SIDED
+    if (e < 0.0f) e = 0.0f;
+#endif
+    return e; }
+static int pair_ok(float L,float R){
+    return fabsf((L+R)-WALL_FOLLOW_SPAN_MM) <= WALL_FOLLOW_SPAN_TOL_MM; }
 static float tilt(float e,float dir){
     float kp  = dir<0? WALL_FOLLOW_KP_REVERSE_DEG_PER_MM : WALL_FOLLOW_KP_DEG_PER_MM;
     float cap = dir<0? WALL_FOLLOW_MAX_TILT_REVERSE_DEG  : WALL_FOLLOW_MAX_TILT_DEG;
@@ -24,15 +36,24 @@ int main(void){
   CHECK(err_both(80,50)>0, "both: closer to the right wall -> move left");
   CHECK(err_both(50,80)<0, "both: closer to the left wall  -> move right");
   CHECK(fabsf(err_both(62,62)-0.5f)<0.01f, "both: equal readings -> ~the sensor trim");
-  CHECK(err_left(80)>0,  "left only: too far from left  -> move left");
-  CHECK(err_left(40)<0,  "left only: too close to left  -> move right");
-  CHECK(err_right(80)<0, "right only: too far from right -> move right");
+  /* Single wall corrects only AWAY from a wall that is too close; a long
+     reading is ambiguous at a junction and must produce no command. */
+  CHECK(err_left(40)<0,  "left only: too close to left -> move right");
+  CHECK(err_left(90)==0.0f, "left only: a long reading is ignored");
   CHECK(err_right(40)>0, "right only: too close to right -> move left");
+  CHECK(err_right(90)==0.0f, "right only: a long reading is ignored");
+
+  /* The span test is what separates a same-cell wall from something beyond an
+     opening, which no absolute distance threshold can do. */
+  CHECK(pair_ok(60,64),  "span: an ordinary pair is accepted");
+  CHECK(pair_ok(90,34),  "span: badly off-centre but consistent -> accepted");
+  CHECK(!pair_ok(41,108),"span: the (41,108) junction pair is rejected");
+  CHECK(!pair_ok(60,239),"span: a wall a cell away is rejected");
 
   /* the difference must be immune to a common-mode sensor bias */
   CHECK(fabsf(err_both(58,64)-err_both(58+27,64+27))<0.001f,
         "both: a common +27mm over-read cancels exactly");
-  CHECK(fabsf(err_left(58)-err_left(58+27))>20.0f,
+  CHECK(fabsf(err_left(30)-err_left(30+27))>20.0f,
         "left only: the same bias does NOT cancel");
 
   /* forwards tilts toward the correction, backwards tilts away from it */

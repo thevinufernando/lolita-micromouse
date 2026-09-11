@@ -293,7 +293,21 @@
  * is comfortably under the 113 the robot actually delivers. A profile the
  * robot cannot follow is worse than no profile, because the feedback spends
  * the whole move saturated and the end of the ramp is a guess. */
-#define TURN_PROFILE_MAX_DPS 90.0f
+/* LOWERED AGAIN, 90 -> 80, and for the same reason as 120 -> 90: the number
+ * that matters is not the speed, it is what is left over for the feedback
+ * after the feedforward has taken its share. With TURN_FF_GAIN at its
+ * corrected 2.00:
+ *
+ *     90 deg/s -> feedforward 180 of 200, leaving 20 for feedback
+ *     80 deg/s -> feedforward 160 of 200, leaving 40
+ *
+ * 20 units is not enough to absorb a feedforward that is wrong by tens of
+ * units, and it will be wrong, because the gain above moves with surface and
+ * battery. 40 units is. Braking from 80 also costs 5.3 degrees against 6.8
+ * from 90, so the end of the move is more forgiving as well.
+ *
+ * The cost is 0.1 s per turn. */
+#define TURN_PROFILE_MAX_DPS 80.0f
 
 /* Angular acceleration, deg/s^2. With the peak above, a 90 deg turn ramps
  * for 0.167 s over 16.7 deg at each end and cruises the middle 56.7 deg,
@@ -309,12 +323,31 @@
  * command the move needs so the feedback term only has to correct the
  * difference. Get it right and the PID output hovers near zero mid-turn.
  *
- * NOW MEASURED rather than guessed: the trace showed 200 command units
- * producing 143 deg/s sustained, so 200/143 = 1.40. The previous value of 1.0
- * under-drove every move by 40%, which the integrator then covered for.
- * Re-check it from tm_turn_trace: during cruise the fb column should hover
- * near zero rather than sitting hard one way. */
-#define TURN_FF_GAIN 1.40f
+ * RAISED 1.40 -> 2.00, and the old value is worth keeping in view because it
+ * was also measured. 200 units once produced 143 deg/s, giving 1.40. A later
+ * trace on the arena floor showed 176 units producing 87.9 deg/s, giving 2.00.
+ * Same robot, same firmware, 43% apart.
+ *
+ * SO THIS NUMBER IS NOT A CONSTANT OF THE ROBOT. It moves with surface and
+ * with battery state, and a fixed feedforward will always be somewhat wrong.
+ * What matters is that the FEEDBACK has enough headroom to absorb the error
+ * rather than clipping, which is why TURN_PROFILE_MAX_DPS was lowered
+ * alongside this rather than left where it was.
+ *
+ * Under-driving is not harmless, and it does not merely make the turn slow.
+ * At 1.40 the feedforward supplied 126 units while the move needed 176, so
+ * the feedback carried a steady -49 and the robot tracked 5 to 7 degrees
+ * BEHIND the reference for the entire cruise. It then arrived at the target
+ * still doing nearly full rate, because the controller was pushing it to catch
+ * up, instead of decelerating into the target with the profile. Shedding that
+ * takes 6.75 degrees, so the move finished 4.25 degrees past and outside
+ * TURN_TOLERANCE_DEG, and from there recovery needs breaking static friction
+ * from rest, which this drivetrain cannot do.
+ *
+ * HOW TO RE-MEASURE: read tm_turn_trace and look at the fb column during
+ * cruise. It should hover near zero. If it sits hard one way, scale this gain
+ * by (ff + fb) / ff -- the offline reader prints that factor directly. */
+#define TURN_FF_GAIN 2.00f
 
 /* Acceleration feedforward: motor speed units per deg/s^2.
  *
@@ -549,6 +582,27 @@
 #define WALL_FOLLOW_SETPOINT_LEFT_MM 63.0f
 #define WALL_FOLLOW_SETPOINT_RIGHT_MM 64.0f
 
+/* What the two side readings SUM to when both are walls of the robot's own
+ * cell, in mm. Measured, like the setpoints, and for the same reason.
+ *
+ * This is the cell's inner width as the sensors see it, and it does not depend
+ * on where the robot sits between the walls -- move 10 mm left and one reading
+ * falls by 10 while the other rises by 10. That makes it the one quantity that
+ * can tell a same-cell wall from something further away, which an absolute
+ * distance threshold cannot: a reading of 90 mm is a perfectly ordinary wall
+ * if the other side reads 34, and is not a wall at all if the other side reads
+ * 239.
+ *
+ * Measured over ten two-wall cells in one run: 117 to 128, mean 124. */
+#define WALL_FOLLOW_SPAN_MM 124.0f
+
+/* How far the sum may stray before the pair is called inconsistent.
+ *
+ * Covers the spread above with room to spare, and still rejects the failures:
+ * a (41, 108) pair from an earlier run sums to 149, which is 25 mm out and is
+ * the beam catching a surface a cell away through an opening. */
+#define WALL_FOLLOW_SPAN_TOL_MM 20.0f
+
 /* Largest side reading the FOLLOWER will centre on, in mm.
  *
  * DELIBERATELY TIGHTER THAN WALL_SIDE_THRESHOLD_MM, and the difference is the
@@ -571,6 +625,29 @@
  * holds heading open-loop, which is the right answer when it cannot see a wall
  * it trusts. */
 #define WALL_FOLLOW_USABLE_MAX_MM 95U
+
+/* ONE-SIDED SINGLE-WALL CORRECTION.
+ *
+ * With both walls the difference says where the robot is and nothing is
+ * ambiguous. With one wall it does not, and the two directions of error are
+ * not equally trustworthy:
+ *
+ *   READING BELOW THE SETPOINT is unambiguous. Something IS there and it IS
+ *   close. Whether the robot is off-centre or the corridor is narrow does not
+ *   matter -- moving away is right either way, and this is also the dangerous
+ *   case, because being hard against a wall is what jams the next pivot.
+ *
+ *   READING ABOVE THE SETPOINT is ambiguous, and at a junction it is usually
+ *   wrong. The robot might be off-centre away from the wall, or the wall might
+ *   have ended and the beam is catching an edge or a surface beyond it. Acting
+ *   on it steers the robot hard TOWARDS something that may not be there.
+ *
+ * A run showed both in consecutive cells: 35 mm, a real wall much too close,
+ * and 90 mm, which produced a full-scale tilt toward a wall that the open
+ * opposite side says was not where the follower thought. Set to 1 to correct
+ * only in the trustworthy direction when running on a single wall; the
+ * two-wall path is always bidirectional and is unaffected. */
+#define WALL_FOLLOW_SINGLE_ONE_SIDED 1
 
 /* Lateral error (mm) -> commanded heading offset (deg).
  *
@@ -932,6 +1009,42 @@
 #define STRAIGHT_TOLERANCE_CM 1.5f
 
 /* How close (degrees of fused yaw) counts as "arrived" for turns. */
+/* WIDENED AGAIN, 2.0 -> 5.0, and this time on the architecture rather than on
+ * the controller's repeatability.
+ *
+ * THE HEADING TARGET IS ABSOLUTE AND CONTINUOUS. Every turn aims at an exact
+ * multiple of 90 in a heading that accumulates across the whole run, so a turn
+ * that finishes 4 degrees short does not push the next one 4 degrees off -- the
+ * next move inherits the gap as an ordinary setpoint error and the straight
+ * line's own yaw loop closes it. Errors do not compound here; they are handed
+ * forward and paid off. That was true when the band was 2.0 as well, but there
+ * was no evidence yet that the machinery downstream actually worked. There is
+ * now: fused heading hold, two-wall lateral centring, front-wall alignment and
+ * the drift bleed all measurably do their job.
+ *
+ * WHAT IT COSTS. An inherited heading error becomes lateral drift over the
+ * following cell, 192*sin(e), of which the lateral loop removes about 80%:
+ *
+ *     2 deg ->  6.7 mm of drift, ~1.3 mm surviving
+ *     5 deg -> 16.7 mm of drift, ~3.2 mm surviving
+ *     8 deg -> 26.7 mm of drift, ~5.1 mm surviving
+ *
+ * Against roughly 35 mm of side clearance, 5 degrees is comfortable and 8 is
+ * not somewhere to go.
+ *
+ * WHAT IT MUST STILL CATCH. Every turn miss recorded on this robot falls into
+ * two clearly separated groups: 3.67, 4.25 and 5.26 degrees for turns that
+ * completed their profile and simply stopped outside the band, against 9.53 and
+ * 31.25 for turns that physically jammed against a wall. A 5 degree band
+ * accepts the first group and still rejects the second, which is the
+ * distinction worth making -- an overshoot is absorbed downstream, a jam means
+ * the robot is not where the map says and the run must stop.
+ *
+ * Note this does NOT relax the rate check: TURN_SETTLE_RATE_DPS still has to be
+ * satisfied, so a robot swinging through the band at speed cannot claim the
+ * move. Widening the band only forgives where it stops, never how fast.
+ *
+ * Previous note, still relevant, from the 1.0 -> 2.0 change: */
 /* Widened 1.0 -> 2.0.
  *
  * Not a retreat: it is the tolerance that was failing moves, not the motion.
@@ -944,7 +1057,7 @@
  * over one 18 cm cell 2 degrees is ~6 mm of lateral drift against ~35 mm of
  * clearance. Demanding better from the turn buys nothing the next move does
  * not already provide. */
-#define TURN_TOLERANCE_DEG 2.0f
+#define TURN_TOLERANCE_DEG 5.0f
 
 /* A turn only completes when the robot is both within tolerance AND rotating
  * slower than this (deg/s). Without the rate check the controller can declare

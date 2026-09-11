@@ -50,7 +50,29 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir)
      * is always taken. */
     uint8_t want;
 
-    if (left_ok && right_ok)                               want = WALL_FOLLOW_BOTH;
+    /* Both readings in range is not enough -- they must also be CONSISTENT
+     * with each other. Two walls of the same cell sum to its width whatever
+     * the robot is doing between them, so a sum far from WALL_FOLLOW_SPAN_MM
+     * means at least one of them is not the wall it is being taken for. When
+     * that happens, fall through to the single-wall path, which will pick the
+     * CLOSER reading -- a close return is unambiguous, a distant one is not. */
+    uint8_t pair_ok = 0U;
+
+    if (left_ok && right_ok) {
+        const float span = (float)m[TOF_LEFT].distance_mm
+                         + (float)m[TOF_RIGHT].distance_mm;
+
+        pair_ok = (fabsf(span - WALL_FOLLOW_SPAN_MM) <= WALL_FOLLOW_SPAN_TOL_MM)
+                  ? 1U : 0U;
+
+        if (!pair_ok) {
+            /* Keep only the nearer sensor as a reference. */
+            if (m[TOF_LEFT].distance_mm <= m[TOF_RIGHT].distance_mm) right_ok = 0U;
+            else                                                     left_ok  = 0U;
+        }
+    }
+
+    if (pair_ok)                                           want = WALL_FOLLOW_BOTH;
     else if (active_side == WALL_FOLLOW_LEFT && left_ok)   want = WALL_FOLLOW_LEFT;
     else if (active_side == WALL_FOLLOW_RIGHT && right_ok) want = WALL_FOLLOW_RIGHT;
     else if (left_ok)                                      want = WALL_FOLLOW_LEFT;
@@ -100,10 +122,22 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir)
         /* Reading above setpoint means too far from the LEFT wall, so move
          * left, which is positive (anticlockwise) yaw. */
         wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM;
+
+#if WALL_FOLLOW_SINGLE_ONE_SIDED
+        /* Only push AWAY from a wall that is too close. A single reading
+         * longer than the setpoint cannot tell an off-centre robot from a wall
+         * that has ended, and at a junction it is usually the latter. See
+         * control_config.h. */
+        if (wf_error_mm > 0.0f) wf_error_mm = 0.0f;
+#endif
     }
     else {
         /* Mirrored: too far from the RIGHT wall means move right. */
         wf_error_mm = -(right_mm - WALL_FOLLOW_SETPOINT_RIGHT_MM);
+
+#if WALL_FOLLOW_SINGLE_ONE_SIDED
+        if (wf_error_mm < 0.0f) wf_error_mm = 0.0f;
+#endif
     }
 
     /* !! DIRECTION !! Backwards the loop is non-minimum-phase, because the
