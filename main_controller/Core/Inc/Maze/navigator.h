@@ -100,8 +100,14 @@
 /* Hard bound on the run, counted in CELLS ENTERED. A wall follower in an open
  * area circles forever, and a bench arena has no outer boundary to stop it, so
  * this is the only thing that guarantees the robot ends up somewhere you can
- * reach it. At roughly 3 s per cell, 24 is about 90 s of driving. */
-#define NAV_MAX_MOVES 24U
+ * reach it.
+ *
+ * Raised 24 -> 48 after a run used the whole 24 without a single failed move.
+ * Measured pace on that run was 5.2 s per cell including the stop-and-vote at
+ * each centre, so 48 is about four minutes of driving -- long enough that
+ * battery state becomes part of the experiment, since the turn feedforward
+ * moves with it. */
+#define NAV_MAX_MOVES 48U
 
 /* Also stop on returning to the starting cell, after at least this many cells.
  * A wall follower in a closed arena comes home and then repeats the identical
@@ -129,8 +135,12 @@
 #define NAV_ACT_STOP     5U      /* logged on the final record          */
 
 /* Per-cell record of what the run actually did. One entry per completed action
- * plus one for the start cell, so this must outlast the move budget. */
-#define MAZE_TRACE_CAPACITY 32U
+ * plus one for the start cell, so this must outlast the move budget -- if it
+ * does not, the run stops on a full buffer instead of on the budget and the
+ * reason is reported as NAV_END_TRACE_FULL. Keep it comfortably above
+ * NAV_MAX_MOVES + 2, which covers the budget, the final record, and the extra
+ * one a failed move writes. At 36 bytes each this costs 2304 bytes of RAM. */
+#define MAZE_TRACE_CAPACITY 64U
 
 typedef struct {
   uint32_t timestamp_ms;

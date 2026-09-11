@@ -899,6 +899,47 @@
  * rather than steering it somewhere confidently wrong. */
 #define WALL_FRONT_ALIGN_MAX_CM 4.0f
 
+/* ------------------------- BREAKAWAY PULSE ------------------------------ */
+/*                                                                          */
+/* The oldest unsolved problem on this robot, finally addressed.            */
+/*                                                                          */
+/* Static friction here needs more than 140 command units to break. Once    */
+/* moving, far less sustains it. A proportional controller cannot deliver   */
+/* that near the target, because its output shrinks with exactly the error  */
+/* it is trying to close -- so a move that comes to rest slightly short can */
+/* never restart, and simply waits out CONTROL_MOVE_TIMEOUT_MS.             */
+/*                                                                          */
+/* Caught red-handed: a move froze at 17.40 of 19.20 cm with the command    */
+/* sitting at 36.0 units, which is exactly STRAIGHT_DIST_KP * 1.80 cm. It   */
+/* held that for five and a half seconds and went nowhere. The stiction     */
+/* floor did not apply, because it is gated on reference velocity and the   */
+/* profile had already finished -- and at 45 units it would not have helped */
+/* anyway.                                                                  */
+/*                                                                          */
+/* AMPLITUDE BREAKS STATIC FRICTION, NOT PATIENCE. An integrator ramping    */
+/* through a range where the wheel cannot move just arrives late. A short   */
+/* full-scale pulse gets the wheel over the hump, and the ordinary feedback */
+/* then has only kinetic friction to fight.                                 */
+
+/* Travel below this rate (cm/s) counts as "not moving" for the detector. */
+#define STRAIGHT_BREAKAWAY_RATE_CMS 0.4f
+
+/* Consecutive cycles the stall must hold before a pulse is fired. At
+ * CONTROL_SAMPLE_TIME_S this is a dwell, and it is what stops the detector
+ * arming during the ordinary deceleration into the target. */
+#define STRAIGHT_BREAKAWAY_CYCLES 12U
+
+/* How long a pulse lasts, in ms. Long enough to break the wheel free, short
+ * enough that it adds little momentum -- this is a nudge, not a move. Too
+ * long and the robot lurches past the target and has to come back, which on
+ * this drivetrain is the same problem mirrored. */
+#define STRAIGHT_BREAKAWAY_MS 40U
+
+/* Most pulses one move may fire. A move that needs several is not suffering
+ * from stiction, it is jammed against something, and hammering it at full
+ * scale will not help. Let the timeout report the failure instead. */
+#define STRAIGHT_BREAKAWAY_MAX 3U
+
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 
 /* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:
@@ -1000,13 +1041,26 @@
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */
-/* Widened 0.7 -> 1.5.
+/* Widened again 1.5 -> 2.5, on the same architectural grounds as
+ * TURN_TOLERANCE_DEG: the mechanism that absorbs the leftover exists and is
+ * proven. A straight move that stops short hands the gap to the next one
+ * through tm_maze_residual_cm, so position does not accumulate -- and a
+ * failing move hands over nothing at all, because it aborts the run.
+ *
+ * Kept below NAV_RESIDUAL_LIMIT_CM (3.0) on purpose: an error the carry would
+ * refuse to carry is one the next move cannot absorb, and accepting it would
+ * quietly break that contract.
+ *
+ * This is belt and braces, not the fix. The real answer to a move that stops
+ * short is the breakaway pulse above; this only widens the band so a move that
+ * lands near the edge is not thrown away. */
+/* Previous note: widened 0.7 -> 1.5.
  *
  * There is NO SECOND CHANCE on a straight move: the profile brings the robot
  * to rest, and from rest it cannot restart at the command a sub-centimetre
  * error produces. So the move has to land inside the band first time, and a
  * band narrower than the landing scatter just guarantees a timeout. */
-#define STRAIGHT_TOLERANCE_CM 1.5f
+#define STRAIGHT_TOLERANCE_CM 2.5f
 
 /* How close (degrees of fused yaw) counts as "arrived" for turns. */
 /* WIDENED AGAIN, 2.0 -> 5.0, and this time on the architecture rather than on

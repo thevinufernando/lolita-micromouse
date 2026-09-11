@@ -109,6 +109,12 @@ extern volatile float sl_ref_cm;           /* profile reference position  */
 extern volatile float   sl_align_delta_cm;
 extern volatile uint8_t sl_align_applied;
 
+/* Breakaway pulses fired during the last move. Should normally be 0. A move
+ * that needed one still succeeded; a move that needed STRAIGHT_BREAKAWAY_MAX
+ * and then timed out was jammed, not merely stuck, and the difference is worth
+ * knowing before reaching for the tuning. */
+extern volatile uint32_t sl_breakaway_count;
+
 //Blocking moves. Return 1 on success, 0 if the safety timeout fired.
 uint8_t runForwardDistance(float distance_cm);
 uint8_t runBackwardDistance(float distance_cm);

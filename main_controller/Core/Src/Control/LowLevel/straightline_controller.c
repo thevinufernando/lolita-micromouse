@@ -267,6 +267,7 @@ volatile uint32_t sl_sat_cycles;
 volatile float    sl_ref_cm;
 volatile float    sl_align_delta_cm;
 volatile uint8_t  sl_align_applied;
+volatile uint32_t sl_breakaway_count;
 
 volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];
 volatile uint32_t        tm_sl_trace_count;
@@ -370,6 +371,15 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
     sl_align_delta_cm = 0.0f;
     sl_align_applied  = 0U;
+
+    /* Breakaway detector state. See the BREAKAWAY PULSE block in
+     * control_config.h for why a proportional controller cannot restart this
+     * drivetrain on its own. */
+    float    prev_measured   = 0.0f;
+    uint32_t stall_cycles    = 0;
+    uint32_t pulse_until_ms  = 0;
+
+    sl_breakaway_count = 0U;
 
     uint32_t start_ms = HAL_GetTick();
     uint32_t last_pid = 0;
@@ -517,6 +527,44 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
         }
         else if (ref_acc * ref_vel >= 0.0f && fabsf(ref_vel) > 1.0f) {
             base = applyMinSpeed(base);
+        }
+
+        /* BREAKAWAY. Armed only once the profile has finished: while it is
+         * still running a slow patch is the controller's problem to solve, and
+         * a full-scale pulse mid-move would wreck the tracking. After it ends,
+         * a robot that is outside tolerance and not moving is stuck, and no
+         * amount of waiting fixes that.
+         *
+         * The command is applied at full scale in the direction of the
+         * remaining error, briefly. It is a nudge to get the wheel over static
+         * friction, after which the ordinary feedback has only kinetic
+         * friction to work against. */
+        const float travelled = fabsf(measured - prev_measured);
+        const float still_threshold =
+            STRAIGHT_BREAKAWAY_RATE_CMS * CONTROL_SAMPLE_TIME_S;
+
+        prev_measured = measured;
+
+        const uint8_t profile_done = (elapsed_s >= MotionProfile_Duration(&dist_profile));
+        const uint8_t short_of_it  = (fabsf(measured - target_cm) >= DISTANCE_TOLERANCE_CM);
+
+        if (profile_done && short_of_it && travelled < still_threshold) {
+            stall_cycles++;
+        }
+        else {
+            stall_cycles = 0;
+        }
+
+        if (stall_cycles >= STRAIGHT_BREAKAWAY_CYCLES
+            && sl_breakaway_count < STRAIGHT_BREAKAWAY_MAX) {
+
+            pulse_until_ms = now + STRAIGHT_BREAKAWAY_MS;
+            stall_cycles   = 0;
+            sl_breakaway_count++;
+        }
+
+        if (now < pulse_until_ms) {
+            base = (target_cm > measured) ? CONTROL_MAX_SPEED : -CONTROL_MAX_SPEED;
         }
 
         float left, right;
