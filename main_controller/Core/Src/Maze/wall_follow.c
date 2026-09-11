@@ -28,18 +28,30 @@ static uint8_t usable(const ToF_Measurement_t *m)
 }
 
 
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir)
 {
     uint8_t left_ok  = usable(&m[TOF_LEFT]);
     uint8_t right_ok = usable(&m[TOF_RIGHT]);
 
-    /* Stick with the wall already being followed for as long as it is usable.
-     * Swapping sides mid-corridor puts a step into the error signal and kicks
-     * the robot, so the preference order only decides which one to ADOPT, not
-     * whether to keep the current one. */
+    /* BOTH WALLS BEAT EITHER ONE, and it is not a small difference.
+     *
+     * With one wall the robot holds a measured distance from it, so the
+     * sensor's ~27 mm close-range over-read has to be baked into the setpoint,
+     * and any variation in corridor width lands straight in the error. With
+     * two it holds the DIFFERENCE, where the common-mode over-read cancels
+     * exactly and the width cancels with it -- only the ~1 mm mismatch between
+     * the pair survives. Measured across one run, L + R came to 121-129 mm on
+     * every genuine pair, so the difference is the trustworthy quantity and
+     * either reading alone is not.
+     *
+     * The preference order below only decides what to ADOPT. A side already
+     * being followed is kept while it stays usable, because swapping puts a
+     * step into the error signal. Gaining the second wall is not a swap, so it
+     * is always taken. */
     uint8_t want;
 
-    if (active_side == WALL_FOLLOW_LEFT && left_ok)        want = WALL_FOLLOW_LEFT;
+    if (left_ok && right_ok)                               want = WALL_FOLLOW_BOTH;
+    else if (active_side == WALL_FOLLOW_LEFT && left_ok)   want = WALL_FOLLOW_LEFT;
     else if (active_side == WALL_FOLLOW_RIGHT && right_ok) want = WALL_FOLLOW_RIGHT;
     else if (left_ok)                                      want = WALL_FOLLOW_LEFT;
     else if (right_ok)                                     want = WALL_FOLLOW_RIGHT;
@@ -72,30 +84,45 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
         return wf_tilt_deg;
     }
 
-    float measured;
-    float setpoint;
-    float sign;
+    const float left_mm  = (float)m[TOF_LEFT].distance_mm;
+    const float right_mm = (float)m[TOF_RIGHT].distance_mm;
 
-    if (active_side == WALL_FOLLOW_LEFT) {
-        measured = (float)m[TOF_LEFT].distance_mm;
-        setpoint = WALL_FOLLOW_SETPOINT_LEFT_MM;
-        /* Reading below setpoint means too close to the LEFT wall, so the
-         * robot must steer right, which is negative (clockwise) yaw. */
-        sign = 1.0f;
+    /* Error is POSITIVE when the robot must move LEFT, whichever reference is
+     * in use, so everything downstream is direction-agnostic. */
+    if (active_side == WALL_FOLLOW_BOTH) {
+        /* Half the difference is the offset from centre. The setpoint term is
+         * just the trim between the two sensors, about half a millimetre. */
+        wf_error_mm = ((left_mm - right_mm)
+                       - (WALL_FOLLOW_SETPOINT_LEFT_MM - WALL_FOLLOW_SETPOINT_RIGHT_MM))
+                      * 0.5f;
+    }
+    else if (active_side == WALL_FOLLOW_LEFT) {
+        /* Reading above setpoint means too far from the LEFT wall, so move
+         * left, which is positive (anticlockwise) yaw. */
+        wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM;
     }
     else {
-        measured = (float)m[TOF_RIGHT].distance_mm;
-        setpoint = WALL_FOLLOW_SETPOINT_RIGHT_MM;
-        /* Mirrored: too close to the RIGHT wall means steer left. */
-        sign = -1.0f;
+        /* Mirrored: too far from the RIGHT wall means move right. */
+        wf_error_mm = -(right_mm - WALL_FOLLOW_SETPOINT_RIGHT_MM);
     }
 
-    wf_error_mm = measured - setpoint;
+    /* !! DIRECTION !! Backwards the loop is non-minimum-phase, because the
+     * sensors sit ahead of the wheel axis and swing the wrong way first. It
+     * gets its own, much smaller gain and clamp. See control_config.h. */
+    const uint8_t reverse   = (dir < 0.0f) ? 1U : 0U;
+    const float   kp        = reverse ? WALL_FOLLOW_KP_REVERSE_DEG_PER_MM
+                                      : WALL_FOLLOW_KP_DEG_PER_MM;
+    const float   max_tilt  = reverse ? WALL_FOLLOW_MAX_TILT_REVERSE_DEG
+                                      : WALL_FOLLOW_MAX_TILT_DEG;
 
-    float tilt = sign * WALL_FOLLOW_KP_DEG_PER_MM * wf_error_mm;
+    /* The tilt that corrects this error, expressed in the TRAVEL direction.
+     * Reversing, a given tilt walks the robot the opposite way, so the demand
+     * is negated -- this is the one place that flip belongs, rather than in
+     * every caller. */
+    float tilt = dir * kp * wf_error_mm;
 
-    if (tilt >  WALL_FOLLOW_MAX_TILT_DEG) tilt =  WALL_FOLLOW_MAX_TILT_DEG;
-    if (tilt < -WALL_FOLLOW_MAX_TILT_DEG) tilt = -WALL_FOLLOW_MAX_TILT_DEG;
+    if (tilt >  max_tilt) tilt =  max_tilt;
+    if (tilt < -max_tilt) tilt = -max_tilt;
 
     /* SLEW LIMIT. The value above is where the heading target should go; this
      * decides how fast it is allowed to get there.

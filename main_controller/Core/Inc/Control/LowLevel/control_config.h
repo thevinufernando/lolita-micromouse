@@ -537,7 +537,15 @@
  * centring the robot by hand and reading tm_tof_left_mm / _right_mm.
  *
  * From the maze-cell measurement: left 62.7, right 64.2, with the robot
- * roughly but not exactly centred. Re-measure properly before trusting them. */
+ * roughly but not exactly centred. Re-measure properly before trusting them.
+ *
+ * NOTE these now matter far less than they used to. When BOTH walls are in
+ * range the follower centres on the DIFFERENCE, (L - R)/2, and only the ~1 mm
+ * mismatch between the pair survives -- the common-mode over-read cancels
+ * exactly, and so does any error in the corridor width. These full values are
+ * used only on the single-wall path, where nothing cancels. Measured over one
+ * run, L + R came to 121-129 mm with a mean of 124 across every genuine pair,
+ * which is what makes the difference trustworthy. */
 #define WALL_FOLLOW_SETPOINT_LEFT_MM 63.0f
 #define WALL_FOLLOW_SETPOINT_RIGHT_MM 64.0f
 
@@ -636,6 +644,35 @@
  * cell, so the correction still completes while the inner loop only ever sees
  * a ramp it can track. */
 #define WALL_FOLLOW_TILT_SLEW_DPS 30.0f
+
+/* ---- REVERSE. The lateral loop is a different, harder problem backwards. ----
+ *
+ * WHY IT NEEDS ITS OWN NUMBERS, and it is not just "be gentler".
+ *
+ * The side sensors sit AHEAD of the wheel axis. Rotating the robot therefore
+ * swings them sideways, and which way that helps depends on the direction of
+ * travel:
+ *
+ *   FORWARDS  to move right, tilt the nose right. The sensors lead the body,
+ *             so the reading improves immediately and keeps improving. That
+ *             is phase LEAD, and it is free stabilisation.
+ *
+ *   BACKWARDS to move right, tilt the nose LEFT. The sensors swing LEFT, so
+ *             the reading gets WORSE first and only recovers once the body
+ *             has travelled far enough to catch up. The loop is
+ *             non-minimum-phase, and a gain that is comfortable forwards
+ *             winds itself into the wall backwards.
+ *
+ * Observed: backing out of a dead end 15 mm off centre, the robot came out
+ * 26 mm off -- the correction moved it the wrong way before it moved it the
+ * right way, and the move ended inside that window.
+ *
+ * There is a geometric limit too. A tilt in a tight cell swings the corners,
+ * and the chassis is large for the cell, so a correction big enough to matter
+ * is also big enough to catch a wall. Backwards the useful move is a small
+ * one held steadily, not a big one. */
+#define WALL_FOLLOW_KP_REVERSE_DEG_PER_MM 0.20f
+#define WALL_FOLLOW_MAX_TILT_REVERSE_DEG 3.0f
 
 /* Slowly bleed the steady-state tilt back into the heading estimate.
  *

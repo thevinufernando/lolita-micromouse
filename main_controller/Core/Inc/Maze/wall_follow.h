@@ -52,9 +52,10 @@
  */
 
 typedef enum {
-  WALL_FOLLOW_NONE = 0,  /* no usable wall; hold heading open-loop */
-  WALL_FOLLOW_LEFT = 1,
-  WALL_FOLLOW_RIGHT = 2
+  WALL_FOLLOW_NONE = 0,  /* no usable wall; hold heading open-loop      */
+  WALL_FOLLOW_LEFT = 1,  /* one wall, measured against its setpoint     */
+  WALL_FOLLOW_RIGHT = 2,
+  WALL_FOLLOW_BOTH = 3   /* centred on (L - R)/2 -- the reference to want */
 } WallFollowSide_t;
 
 /* Which wall is being used right now, and by how much the loop is tilting. */
@@ -71,10 +72,17 @@ void WallFollow_Reset(void);
 /* Feed one ToF sweep. Returns the heading offset in degrees to ADD to the
  * heading target: positive tilts the robot anticlockwise.
  *
+ * `dir` is +1 driving forwards and -1 in reverse. It selects the gains and
+ * applies the sign flip, so callers pass their direction and use the result
+ * as-is -- the flip belongs here because it is a property of the lateral loop,
+ * not of whoever is running it. Backwards the loop is non-minimum-phase (the
+ * sensors sit ahead of the wheel axis and swing the wrong way first), so it
+ * runs a much smaller gain and clamp.
+ *
  * Returns 0 when no wall is usable, which is the correct behaviour rather
  * than a failure -- the robot then holds its heading target open-loop until a
  * wall comes back. */
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT]);
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir);
 
 /* Drift accumulated so far, in degrees, to be applied to the heading target.
  * See the drift corrector note above. */

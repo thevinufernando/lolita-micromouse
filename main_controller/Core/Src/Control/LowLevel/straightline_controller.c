@@ -356,10 +356,9 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     MotionProfile_Init(&dist_profile, distance_cm,
                        STRAIGHT_PROFILE_MAX_CMS, STRAIGHT_PROFILE_ACCEL_CMS2);
 
-    /* !! DIRECTION !! -1 when reversing. Used to flip the wall follower, whose
-     * cascade assumes forward travel: tilting the nose left walks the robot
-     * left going forwards and RIGHT going backwards, so an unflipped lateral
-     * loop is positive feedback in reverse. */
+    /* !! DIRECTION !! -1 when reversing. Handed to the wall follower, which
+     * owns the sign flip and the reverse gains, and used below to keep the
+     * stiction floor off during braking in either direction. */
     const float dir = (distance_cm < 0.0f) ? -1.0f : 1.0f;
 
     /* The endpoint, which front-wall alignment may move once. align_offset_cm
@@ -428,8 +427,9 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             ToF_Measurement_t m[TOF_SENSOR_COUNT];
             (void)ToF_ReadAll(m);
 
-            /* !! DIRECTION !! see `dir` above. */
-            tilt_deg = WallFollow_Update(m) * dir;
+            /* The flip and the reverse gains live inside the follower now;
+             * it only needs telling which way the robot is going. */
+            tilt_deg = WallFollow_Update(m, dir);
 
             /* FRONT-WALL ALIGNMENT, attempted only in the first quarter of the
              * move and applied at most once.
