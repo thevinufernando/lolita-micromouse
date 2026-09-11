@@ -60,6 +60,22 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 
     # Sensors
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/ICM-42688-P/ICM42688.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/TCA9548A/TCA9548A.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X_Driver/tof_sensors.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X_Driver/tof_filter.c
+
+    # VL53L0X - stock ST API (STSW-IMG005 v1.0.4), do not edit.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Core/vl53l0x_api.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Core/vl53l0x_api_calibration.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Core/vl53l0x_api_core.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Core/vl53l0x_api_ranging.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Core/vl53l0x_api_strings.c
+
+    # VL53L0X platform layer - rewritten for STM32 HAL I2C.
+    # NOTE: the other three files ST ships in Platform/ (vl53l0x_i2c_platform.c,
+    # vl53l0x_i2c_win_serial_comms.c, vl53l0x_platform_log.c) are Win32-only
+    # reference code and are deliberately NOT built. Do not add them.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Platform/vl53l0x_platform.c
 
     # Utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c
@@ -75,6 +91,10 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Encoders
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Control/LowLevel
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/ICM-42688-P
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/TCA9548A
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X_Driver
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X/Core
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X/Platform
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Utils
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Tests
 )

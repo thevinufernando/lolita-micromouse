@@ -5,6 +5,7 @@
 #include "straightline_controller.h"
 #include "turn_controller.h"
 #include "ICM42688.h"
+#include "tof_sensors.h"
 
 /* Result of the most recent move */
 volatile float  tm_final_left_cm    = 0.0f;
@@ -41,6 +42,23 @@ volatile float    tm_gyro_bias_dps  = 0.0f;
 volatile float    tm_yaw_sigma_deg  = 0.0f;
 volatile float    tm_bias_drift_deg = 0.0f;
 volatile uint32_t tm_ekf_rejects    = 0;
+
+/* ---- ToF telemetry ---- */
+volatile uint8_t  tm_tof_ready         = 0;
+volatile uint16_t tm_tof_front_mm      = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_left_mm       = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_right_mm      = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_front_raw_mm  = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_left_raw_mm   = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_right_raw_mm  = TOF_DISTANCE_INVALID;
+volatile uint32_t tm_tof_front_jumps   = 0;
+volatile uint32_t tm_tof_left_jumps    = 0;
+volatile uint32_t tm_tof_right_jumps   = 0;
+volatile uint8_t  tm_tof_front_status  = 255;
+volatile uint8_t  tm_tof_left_status   = 255;
+volatile uint8_t  tm_tof_right_status  = 255;
+volatile uint32_t tm_tof_sample_count  = 0;
+volatile uint32_t tm_tof_error_count   = 0;
 
 /* Only the test selected by ACTIVE_TEST is called, so the others would each
  * raise -Wunused-function. Mark them so real warnings stay visible. */
@@ -406,6 +424,101 @@ TEST_FN void Test_GyroBias(void)
   tm_ekf_rejects    = turn_reject_count;
 }
 
+/* Publish one full sweep to the live-watch globals.
+ * Shared by both ToF tests so single and continuous mode report identically
+ * and their numbers can be compared directly. */
+static void Telemetry_CaptureToF(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+                                 int sweep_status)
+{
+  tm_tof_front_mm     = m[TOF_FRONT].distance_mm;
+  tm_tof_left_mm      = m[TOF_LEFT].distance_mm;
+  tm_tof_right_mm     = m[TOF_RIGHT].distance_mm;
+
+  tm_tof_front_raw_mm = m[TOF_FRONT].raw_mm;
+  tm_tof_left_raw_mm  = m[TOF_LEFT].raw_mm;
+  tm_tof_right_raw_mm = m[TOF_RIGHT].raw_mm;
+
+  tm_tof_front_jumps  = ToF_GetFilterJumpCount(TOF_FRONT);
+  tm_tof_left_jumps   = ToF_GetFilterJumpCount(TOF_LEFT);
+  tm_tof_right_jumps  = ToF_GetFilterJumpCount(TOF_RIGHT);
+
+  tm_tof_front_status = m[TOF_FRONT].range_status;
+  tm_tof_left_status  = m[TOF_LEFT].range_status;
+  tm_tof_right_status = m[TOF_RIGHT].range_status;
+
+  if (sweep_status == TOF_OK)
+  {
+    tm_tof_sample_count++;
+  }
+  else
+  {
+    tm_tof_error_count++;
+  }
+}
+
+/* Which sensors survived init, as a bitmask. Read this FIRST: an all-zero
+ * mask means the mux itself never answered, which is a wiring/address
+ * problem, not a sensor problem.
+ *
+ * Not static: main() calls it once after ToF_Init() so the mask is visible in
+ * live-watch even when a non-ToF test is selected. */
+void TestHarness_CaptureToFReady(void)
+{
+  tm_tof_ready = (uint8_t)((ToF_IsSensorReady(TOF_FRONT) ? 0x01U : 0x00U) |
+                           (ToF_IsSensorReady(TOF_LEFT)  ? 0x02U : 0x00U) |
+                           (ToF_IsSensorReady(TOF_RIGHT) ? 0x04U : 0x00U));
+}
+
+/* Single-shot ranging. Run this first after wiring the sensors: it is the
+ * simplest path that exercises mux -> sensor -> distance, and each reading is
+ * triggered by us so nothing is stale.
+ *
+ * Hold a hand or a wall at a known distance in front of each sensor and check
+ * the matching tm_tof_*_mm against a ruler. A sensor reading a plausible
+ * distance for the WRONG direction means the TOF_CHANNEL_* mapping in
+ * control_config.h does not match the PCB. */
+TEST_FN void Test_ToFSingle(void)
+{
+  Motor_Brake();
+
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+  int status = ToF_ReadAll(m);
+
+  Telemetry_CaptureToF(m, status);
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(100);
+}
+
+/* Continuous ranging. Same readings, but the sensors free-run and each poll
+ * returns the newest completed measurement without waiting.
+ *
+ * Started once on the first call rather than in ToF_Init(), so that selecting
+ * this test is all it takes to switch modes. Expect tm_tof_error_count to
+ * climb faster here than in the single-shot test: polling faster than
+ * TOF_INTER_MEASUREMENT_MS legitimately returns "no new data yet". Rising
+ * counts alongside a static tm_tof_sample_count is the real fault signal. */
+TEST_FN void Test_ToFContinuous(void)
+{
+  static uint8_t started = 0;
+
+  Motor_Brake();
+
+  if (!started)
+  {
+    (void)ToF_StartContinuousAll();
+    started = 1;
+  }
+
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+  int status = ToF_ReadAll(m);
+
+  Telemetry_CaptureToF(m, status);
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(20);
+}
+
 void TestHarness_RunCycle(void)
 {
 #if   (ACTIVE_TEST == TEST_MOTORS_OPEN_LOOP)
@@ -442,6 +555,14 @@ void TestHarness_RunCycle(void)
 
 #elif (ACTIVE_TEST == TEST_GYRO_BIAS)
   Test_GyroBias();
+
+#elif (ACTIVE_TEST == TEST_TOF_SINGLE)
+  Test_ToFSingle();
+  return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_TOF_CONTINUOUS)
+  Test_ToFContinuous();
+  return;   /* poll continuously, no cycle pause */
 
 #else
   #error "ACTIVE_TEST is not set to a valid test id"

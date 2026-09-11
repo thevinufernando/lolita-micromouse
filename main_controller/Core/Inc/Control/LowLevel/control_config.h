@@ -343,6 +343,120 @@
 #define EKF_INNOVATION_GATE         3.0f
 
 
+/* ==================== VL53L0X ToF ranging sensors ======================== */
+
+/* Which TCA9548A channel each sensor hangs off. The mux has 8 channels and
+ * the PCB breaks out five ToF footprints; only three are populated for wall
+ * detection. Verify against the Main PCB schematic before trusting a reading
+ * -- a swapped pair here produces perfectly valid distances attributed to the
+ * wrong direction, which is far harder to spot than a dead sensor. */
+#define TOF_CHANNEL_FRONT           0U
+#define TOF_CHANNEL_LEFT            3U
+#define TOF_CHANNEL_RIGHT           4U
+
+/* Factory default 7-bit address, shifted to the 8-bit form both the ST API
+ * and the HAL expect. Every sensor keeps this address; the mux is what makes
+ * them individually addressable. */
+#define TOF_I2C_ADDR_DEFAULT        0x52
+
+/* Measurement timing budget, microseconds. This is the master speed/accuracy
+ * knob: longer budget = less noise and more range, at a lower sample rate.
+ *
+ *   20000  (20 ms) - ST's fastest preset, noticeably noisier
+ *   33000  (33 ms) - ST's default, ~30 Hz
+ *   200000 (200 ms) - high accuracy preset
+ *
+ * 33 ms is the starting point here. For a moving micromouse the sample rate
+ * matters more than the last millimetre, so if wall following turns out to
+ * lag, drop this before touching anything else. */
+#define TOF_TIMING_BUDGET_US        33000U
+
+/* Inter-measurement period for CONTINUOUS mode, milliseconds. Must be >= the
+ * timing budget in ms, otherwise the sensor cannot keep up and simply runs
+ * back-to-back. The margin over the budget covers the sensor's own overhead. */
+#define TOF_INTER_MEASUREMENT_MS    40U
+
+/* VCSEL pulse periods, in PCLKs. These set the range/ambient-immunity
+ * trade-off and only accept specific values: pre-range 12/14/16/18,
+ * final-range 8/10/12/14. ST's default profile is 14/10.
+ *
+ * Longer periods extend range (the long-range profile uses 18/14) at the cost
+ * of ambient light immunity. Maze walls are close -- under 20 cm -- so the
+ * default is kept; there is no reason to reach for range the robot will never
+ * use and pay for it in noise. */
+#define TOF_VCSEL_PERIOD_PRE_RANGE  14U
+#define TOF_VCSEL_PERIOD_FINAL_RANGE 10U
+
+/* Signal rate limit, MCPS, as a float converted to the API's 16.16 fixed
+ * point at the call site. Readings weaker than this are rejected as noise.
+ * ST's default is 0.25; the long-range profile lowers it to 0.1.
+ * RAISE to reject more marginal readings, LOWER to see darker/further walls. */
+#define TOF_SIGNAL_RATE_LIMIT_MCPS  0.25f
+
+/* Sigma (standard deviation) limit, millimetres. Rejects readings the sensor
+ * itself considers imprecise. ST's default is 18 mm. */
+#define TOF_SIGMA_LIMIT_MM          18.0f
+
+/* How long to wait for a measurement to complete before giving up, ms.
+ * Must comfortably exceed the timing budget -- this is a stuck-sensor
+ * detector, not a pacing mechanism. */
+#define TOF_DATA_READY_TIMEOUT_MS   100U
+
+/* ---------------------- Noise filtering (tof_filter.c) ------------------- */
+
+/* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:
+ *
+ *   1.0  = filter disabled, output follows the median stage exactly
+ *   0.3  = light smoothing, fast response
+ *   0.2  = the default here
+ *   0.05 = very smooth but sluggish
+ *
+ * Roughly, the output reaches ~63% of a step after 1/alpha samples, so 0.2 is
+ * about 5 samples -- at TOF_INTER_MEASUREMENT_MS = 40 ms that is ~200 ms to
+ * settle. Note the jump detector below bypasses this entirely for large steps,
+ * so this constant governs how hard SMALL jitter is smoothed, not how fast the
+ * robot notices a wall appearing or disappearing.
+ *
+ * LOWER if readings are still too noisy to steer on.
+ * RAISE if wall-following feels laggy or starts to oscillate. */
+#define TOF_FILTER_EMA_ALPHA        0.2f
+
+/* A median-stage change at least this large (mm) is treated as a real step
+ * and the filter snaps to it instead of easing across it.
+ *
+ * Must sit ABOVE the noise spread and BELOW the smallest genuine transition.
+ * Measured spread on this robot is ~7 mm; a side wall ending changes the
+ * reading by 100 mm or more, so 30 mm sits comfortably between the two.
+ *
+ * LOWER and ordinary jitter starts tripping it, defeating the smoothing
+ * (watch tm_tof_jumps climbing while the robot sits still -- it should not
+ * move at all when nothing is moving).
+ * RAISE and real wall transitions get smoothed into a slow ramp. */
+#define TOF_FILTER_JUMP_THRESHOLD_MM 30U
+
+/* ------------------------- Per-sensor offsets ---------------------------- */
+
+/* Signed millimetres ADDED to each sensor's raw reading before filtering.
+ *
+ * This corrects BIAS -- a constant over- or under-read -- which no amount of
+ * filtering can fix: averaging biased samples just produces a stable wrong
+ * number. Bias comes from cover glass, mounting depth and the module's own
+ * calibration, so it is per-sensor and must be measured per-sensor.
+ *
+ * HOW TO MEASURE: run TEST_TOF_SINGLE, put a flat target at a known distance
+ * (80-100 mm is representative for maze walls), read the FILTERED value once
+ * it settles, and set the offset to (true - measured). If the sensor reads
+ * 86 mm at a true 80 mm, the offset is -6.
+ *
+ * Measure at a distance you actually care about. VL53L0X error is not
+ * perfectly constant with range, so a single offset is a linear fix to a
+ * mildly nonlinear problem -- calibrating at 80 mm and driving at 80 mm is
+ * accurate, calibrating at 500 mm and driving at 80 mm is not. */
+#define TOF_OFFSET_FRONT_MM         0
+#define TOF_OFFSET_LEFT_MM          0
+#define TOF_OFFSET_RIGHT_MM         0
+
+
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */
