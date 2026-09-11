@@ -155,15 +155,15 @@ static void Telemetry_CaptureYaw(float target_deg, uint8_t ok)
 
   tm_yaw_deg        = TurnController_GetYawDeg();
   tm_yaw_error_deg  = target_deg - tm_yaw_deg;
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
+  tm_enc_yaw_deg    = yaw_encoder_deg;
+  tm_fusion_gap_deg = tm_yaw_deg - yaw_encoder_deg;
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_ekf_rejects    = turn_reject_count;
+  tm_ekf_rejects    = yaw_reject_count;
 
   /* Both survive a timeout untouched: the controller brakes and returns
    * without writing either, so they hold the last commanded state. */
   History_Record(target_deg, tm_yaw_deg, tm_yaw_error_deg,
-                 turn_gyro_rate_dps, turn_basespeed,
+                 yaw_gyro_rate_dps, turn_basespeed,
                  tm_drift_cnt, tm_final_left_cnt, tm_final_right_cnt, ok);
 }
 
@@ -399,10 +399,10 @@ TEST_FN void Test_YawEstimate(void)
   TurnController_ObserveYaw(TEST_YAW_OBSERVE_MS);
 
   tm_yaw_deg        = TurnController_GetYawDeg();
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
+  tm_enc_yaw_deg    = yaw_encoder_deg;
+  tm_fusion_gap_deg = tm_yaw_deg - yaw_encoder_deg;
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_ekf_rejects    = turn_reject_count;
+  tm_ekf_rejects    = yaw_reject_count;
 }
 
 /* ---------------------------------------------------------------------------
@@ -430,8 +430,8 @@ TEST_FN void Test_GyroBias(void)
 
   tm_bias_drift_deg = TurnController_GetYawDeg();
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_ekf_rejects    = turn_reject_count;
+  tm_enc_yaw_deg    = yaw_encoder_deg;
+  tm_ekf_rejects    = yaw_reject_count;
 }
 
 /* Publish one full sweep to the live-watch globals.

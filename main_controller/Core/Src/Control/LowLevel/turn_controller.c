@@ -6,9 +6,6 @@
 //Turning PID structure variable
 static PIDController turn_pid;
 
-//Yaw estimator
-static EKF_t yaw_ekf;
-
 //Initialise turn state variable
 static TurnState_t state;
 
@@ -21,12 +18,6 @@ static uint16_t settle_counter;
  * Gates the integrator's stall-recovery authority; see TURN_INT_LIMIT_MOVING. */
 static uint16_t stall_counter;
 
-//DWT cycle stamp of the last EKF prediction
-static uint32_t last_predict_cycles;
-
-//Set once at init; drives the encoder-only fallback
-static uint8_t imu_ok = 0U;
-
 /* Debugging / live-watch.
  *
  * These exist only to be observed from outside the firmware (ST-Link live
@@ -34,16 +25,8 @@ static uint8_t imu_ok = 0U;
  * compiler is entitled to keep them in registers and elide the stores, which
  * costs nothing at Debug -O0 but can hand back stale values in Release. */
 volatile float turn_target_yaw_deg;
-volatile float turn_fused_yaw_deg;
-volatile float turn_encoder_yaw_deg;
 volatile float turn_yaw_error_deg;   /* control error: target - fused, deg   */
-volatile float turn_fusion_gap_deg;  /* fused - encoder, deg (ObserveYaw)    */
-volatile float turn_gyro_rate_dps;
-volatile float turn_gyro_bias_dps;
 volatile float turn_basespeed;
-volatile uint32_t turn_predict_count;
-volatile uint32_t turn_update_count;
-volatile uint32_t turn_reject_count;
 
 /* Integrator state, exposed so a stalled or overshooting move can be told
  * apart from the outside. turn_int_limit shows which of the two clamps is
@@ -53,173 +36,20 @@ volatile float    turn_integrator;
 volatile float    turn_int_limit;
 volatile uint32_t turn_stall_boosts;
 
-/* Gyro reads that failed mid-flight. Each one silently costs the prediction
- * step an integration interval, so a non-zero value here means fused yaw is
- * under-integrating -- which looks exactly like encoder over-read from wheel
- * slip. Check this before blaming slip for a fused/encoder disagreement. */
-volatile uint32_t turn_imu_fail_count;
 
-/* Outcome of the startup gyro bias calibration. See TurnBiasCalStatus_t. */
-volatile TurnBiasCalStatus_t turn_bias_cal_status = TURN_BIAS_NOT_RUN;
-
-/* How many sweeps the calibration needed (1 = clean first try) and the worst
- * single sample seen on the last sweep. If peak sits just above
- * IMU_GYRO_BIAS_MAX_DPS the threshold is too tight; if it is far above, the
- * robot really was moving. */
-volatile uint32_t turn_bias_cal_attempts;
-volatile float    turn_bias_cal_peak_dps;
-
-
-/* ------------------------------------------------------------------------
- * Yaw from wheel odometry.
- *
- * For a pivot, the wheels counter-rotate: the right wheel sweeps +d and the
- * left -d, so the differential travel is (right - left) and the rotation is
- * that divided by the wheel base. Units cancel, giving radians.
- * Positive = anticlockwise = left turn, matching the gyro sign convention.
- * ---------------------------------------------------------------------- */
-static float encoderYawRad(void)
-{
-    return (Encoder_getRightDistance() - Encoder_getLeftDistance()) / ROBOT_WHEEL_BASE_CM;
-}
-
-
-/* Read the gyro and run one EKF prediction step, using the true elapsed time
- * measured from the DWT cycle counter rather than an assumed period. */
-static void predictStep(void)
-{
-    if (!imu_ok) return;
-
-    /* Only consume a new sample once per gyro output period. Polling faster
-     * would integrate the same reading twice and inflate the rotation. */
-    if (DWT_ElapsedUs(last_predict_cycles) < IMU_PREDICT_PERIOD_US) {
-        return;
-    }
-
-    float dt = (float)DWT_ElapsedUs(last_predict_cycles) * 1.0e-6f;
-    last_predict_cycles = DWT_GetCycles();
-
-    float gz_dps = 0.0f;
-
-    if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
-        /* NOTE: last_predict_cycles was already advanced above, so this
-         * interval's rotation is dropped rather than carried into the next
-         * prediction. Counted here so the loss is at least visible; if this
-         * ever reads non-zero, fix the ordering (read the gyro before closing
-         * the interval) rather than just watching the counter grow. */
-        turn_imu_fail_count++;
-        return;
-    }
-
-    /* Apply the mounting sign, then convert to rad/s for the filter. */
-    float gz_rads = gz_dps * IMU_GYRO_Z_SIGN * DEG_TO_RAD_F;
-
-    EKF_Predict(&yaw_ekf, gz_rads, dt);
-
-    turn_gyro_rate_dps = yaw_ekf.last_rate * RAD_TO_DEG_F;
-}
-
-
-/* Read the encoders and apply the EKF correction step. */
-static void correctStep(void)
-{
-    Encoders_Update();
-
-    float yaw_enc = encoderYawRad();
-
-    turn_encoder_yaw_deg = yaw_enc * RAD_TO_DEG_F;
-
-    EKF_UpdateEncoderYaw(&yaw_ekf, yaw_enc);
-}
-
-
-/* Copy filter diagnostics out for the live-watch panel. */
-static void publishTelemetry(void)
-{
-    turn_fused_yaw_deg  = EKF_GetYawDeg(&yaw_ekf);
-    turn_gyro_bias_dps  = EKF_GetGyroBiasDps(&yaw_ekf);
-    turn_predict_count  = yaw_ekf.predict_count;
-    turn_update_count   = yaw_ekf.update_count;
-    turn_reject_count   = yaw_ekf.reject_count;
-}
-
+/* ---- Estimator forwarders ----
+ * Kept so existing callers (main.c, the test harness) do not have to care that
+ * the estimator moved out. New code should call YawEstimator_* directly. */
 
 uint8_t TurnController_CalibrateGyroBias(void)
 {
-    if (!imu_ok) {
-        turn_bias_cal_status = TURN_BIAS_IMU_ERROR;
-        return 0U;
-    }
-
-    /* Retry a motion-rejected sweep rather than giving up on the first one.
-     * A single leftover wobble (from setting the robot down, or from the
-     * reset button being pressed on the chassis itself) is enough to trip the
-     * worst-sample test, and silently falling back to an unestimated bias is
-     * worse than spending a few more seconds at boot. */
-    for (uint32_t attempt = 0U; attempt < IMU_GYRO_BIAS_MAX_ATTEMPTS; attempt++)
-    {
-        turn_bias_cal_attempts = attempt + 1U;
-
-        /* Let the chassis stop vibrating before sampling. */
-        HAL_Delay(IMU_GYRO_BIAS_SETTLE_MS);
-
-        float sum = 0.0f;
-        float max_abs = 0.0f;
-
-        for (uint32_t i = 0U; i < IMU_GYRO_BIAS_SAMPLES; i++)
-        {
-            float gz_dps = 0.0f;
-
-            if (ICM42688_ReadGyroZ(&gz_dps) != IMU_OK) {
-                /* A dead bus will not fix itself, so do not burn the
-                 * remaining attempts on it. */
-                turn_imu_fail_count++;
-                turn_bias_cal_status = TURN_BIAS_IMU_ERROR;
-                return 0U;
-            }
-
-            sum += gz_dps;
-
-            float abs_dps = fabsf(gz_dps);
-            if (abs_dps > max_abs) max_abs = abs_dps;
-
-            /* Pace the sampling to the gyro output rate so we average distinct
-             * samples rather than re-reading one value many times. */
-            DWT_DelayUs(IMU_PREDICT_PERIOD_US);
-        }
-
-        /* If anything moved during calibration the average is meaningless. */
-        if (max_abs > IMU_GYRO_BIAS_MAX_DPS) {
-            turn_bias_cal_peak_dps = max_abs;   /* what tripped it, for tuning */
-            continue;                           /* settle longer and try again */
-        }
-
-        float mean_dps = sum / (float)IMU_GYRO_BIAS_SAMPLES;
-
-        /* Store in the same sign convention the prediction step uses. */
-        float bias_rads = mean_dps * IMU_GYRO_Z_SIGN * DEG_TO_RAD_F;
-
-        /* A 1000-sample average is a confident estimate, so seed a small
-         * variance and let the filter refine it from there. */
-        EKF_SetGyroBias(&yaw_ekf, bias_rads, 1.0e-6f);
-
-        turn_gyro_bias_dps     = EKF_GetGyroBiasDps(&yaw_ekf);
-        turn_bias_cal_peak_dps = max_abs;
-        turn_bias_cal_status   = TURN_BIAS_OK;
-
-        return 1U;
-    }
-
-    /* Every attempt saw motion. */
-    turn_bias_cal_status = TURN_BIAS_MOVING;
-
-    return 0U;
+    return YawEstimator_CalibrateGyroBias();
 }
 
 
 uint8_t TurnController_IsBiasCalibrated(void)
 {
-    return (turn_bias_cal_status == TURN_BIAS_OK) ? 1U : 0U;
+    return YawEstimator_IsBiasCalibrated();
 }
 
 
@@ -247,26 +77,10 @@ uint8_t TurnController_Init(void)
 
     PIDController_Init(&turn_pid);
 
-    //Yaw estimator
-    EKF_Config_t ekf_cfg;
-    EKF_GetDefaultConfig(&ekf_cfg);
-    EKF_Init(&yaw_ekf, &ekf_cfg);
-
-    //Bring up the IMU. Failure is not fatal: fall back to encoder-only.
-    imu_ok = (ICM42688_Init() == IMU_OK) ? 1U : 0U;
-
-    if (imu_ok) {
-        /* A rejected calibration is NOT fatal but is also not harmless: the
-         * EKF keeps running with gyro_bias = 0, which quietly degrades every
-         * subsequent turn. The outcome lands in turn_bias_cal_status so the
-         * caller (and live-watch) can tell the difference between "IMU up and
-         * calibrated" and "IMU up but flying blind on bias". */
-        (void)TurnController_CalibrateGyroBias();
-    }
-
-    last_predict_cycles = DWT_GetCycles();
-
-    publishTelemetry();
+    /* Bring up the shared yaw estimator. This is where the IMU comes up and
+     * the stationary bias calibration runs, so THE ROBOT MUST BE STILL.
+     * Failure is not fatal: it falls back to encoder-only. */
+    uint8_t imu_ok = YawEstimator_Init();
 
     state = TURN_IDLE;
 
@@ -276,30 +90,29 @@ uint8_t TurnController_Init(void)
 
 uint8_t TurnController_IsImuOk(void)
 {
-    return imu_ok;
+    return YawEstimator_IsImuOk();
 }
 
 
 float TurnController_GetYawDeg(void)
 {
-    return EKF_GetYawDeg(&yaw_ekf);
+    return YawEstimator_GetYawDeg();
 }
 
 
 float TurnController_GetGyroBiasDps(void)
 {
-    return EKF_GetGyroBiasDps(&yaw_ekf);
+    return YawEstimator_GetGyroBiasDps();
 }
 
 
 void TurnController_ResetYaw(void)
 {
+    /* Encoders FIRST, then the filter. The estimator's measurement is absolute
+     * differential travel since the encoder reset, so the two must move
+     * together -- see the pairing rule in yaw_estimator.h. */
     Encoders_Reset();
-    EKF_Reset(&yaw_ekf, 0.0f);
-
-    last_predict_cycles = DWT_GetCycles();
-
-    publishTelemetry();
+    YawEstimator_Reset();
 }
 
 
@@ -344,7 +157,7 @@ static void updateControl(float target_yaw_deg)
     }
 
     /* --- fast path: EKF prediction from the gyro, ~1 kHz --- */
-    predictStep();
+    YawEstimator_Predict();
 
     uint32_t current_time = HAL_GetTick();
 
@@ -363,10 +176,10 @@ static void updateControl(float target_yaw_deg)
 
     pid_last_time = current_time;
 
-    correctStep();
-    publishTelemetry();
+    YawEstimator_Correct();
+    YawEstimator_PublishTelemetry();
 
-    float fused_yaw_deg = EKF_GetYawDeg(&yaw_ekf);
+    float fused_yaw_deg = YawEstimator_GetYawDeg();
     float error_deg = target_yaw_deg - fused_yaw_deg;
 
     turn_target_yaw_deg = target_yaw_deg;
@@ -376,7 +189,8 @@ static void updateControl(float target_yaw_deg)
      * controller cannot declare success while coasting through the target.
      * Without an IMU there is no rate signal, so fall back to position only. */
     uint8_t within_tolerance = (fabsf(error_deg) < TURN_TOLERANCE_DEG);
-    uint8_t settled = imu_ok ? (fabsf(turn_gyro_rate_dps) < TURN_SETTLE_RATE_DPS) : 1U;
+    uint8_t settled = YawEstimator_IsImuOk()
+                    ? (fabsf(yaw_gyro_rate_dps) < TURN_SETTLE_RATE_DPS) : 1U;
 
     if (within_tolerance && settled) {
 
@@ -408,8 +222,8 @@ static void updateControl(float target_yaw_deg)
      * PIDController_Update clamps after integrating. Recovery authority
      * therefore evaporates the moment the wheel starts turning, which is the
      * property that stops this from reintroducing the overshoot. */
-    if (!within_tolerance && imu_ok &&
-        fabsf(turn_gyro_rate_dps) < TURN_STALL_RATE_DPS) {
+    if (!within_tolerance && YawEstimator_IsImuOk() &&
+        fabsf(yaw_gyro_rate_dps) < TURN_STALL_RATE_DPS) {
 
         if (stall_counter < TURN_STALL_CYCLES) stall_counter++;
     }
@@ -476,11 +290,10 @@ static void resetTurnState(void)
 {
     //Reset encoders and PID controllers. The EKF's yaw is zeroed but the
     //learned gyro bias is deliberately carried over from previous moves.
+    //Encoders FIRST, then the filter -- see yaw_estimator.h.
     Encoders_Reset();
-    EKF_Reset(&yaw_ekf, 0.0f);
+    YawEstimator_Reset();
     resetPID();
-
-    last_predict_cycles = DWT_GetCycles();
 
     turn_start_time = HAL_GetTick();
 
@@ -546,7 +359,7 @@ void TurnController_ObserveYaw(uint32_t duration_ms)
 
     while ((HAL_GetTick() - start) < duration_ms)
     {
-        predictStep();
+        YawEstimator_Predict();
 
         uint32_t now = HAL_GetTick();
 
@@ -554,14 +367,12 @@ void TurnController_ObserveYaw(uint32_t duration_ms)
         {
             last_correct = now;
 
-            correctStep();
-            publishTelemetry();
+            YawEstimator_Correct();
 
-            /* Deliberately NOT turn_yaw_error_deg: that one means "target -
-             * fused" during a commanded turn. Overloading it here made the
-             * same live-watch variable mean two different things depending on
-             * which routine last wrote it. */
-            turn_fusion_gap_deg = turn_fused_yaw_deg - turn_encoder_yaw_deg;
+            /* PublishTelemetry() now computes yaw_fusion_gap_deg itself, so
+             * this loop no longer has to. That gap is the slip measurement and
+             * it is wanted on every move, not just this observation routine. */
+            YawEstimator_PublishTelemetry();
         }
     }
 }

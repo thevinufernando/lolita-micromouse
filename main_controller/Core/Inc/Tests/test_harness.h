@@ -35,7 +35,7 @@
 #define TEST_TOF_MODE_CYCLE 13   /* No motion. Mode switching + stop path. */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_TOF_MODE_CYCLE
+#define ACTIVE_TEST TEST_TURN_LEFT_90
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */
@@ -63,7 +63,7 @@
  * which end roughly where they began.
  *
  * Set to 1 for a single move, then reposition and power-cycle to repeat. */
-#define TEST_CYCLE_LIMIT 1U
+#define TEST_CYCLE_LIMIT 5U
 
 /* How long TEST_YAW_ESTIMATE observes the filter per cycle, in ms. */
 #define TEST_YAW_OBSERVE_MS 10000U
