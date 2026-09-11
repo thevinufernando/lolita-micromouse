@@ -34,10 +34,10 @@
 #define TEST_TOF_CONTINUOUS 12   /* No motion. Continuous ToF ranging.    */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_TOF_SINGLE 
+#define ACTIVE_TEST TEST_STRAIGHT_FORWARD
 
 /* ---- Test parameters ---- */
-#define TEST_DISTANCE_CM 100.0f    /* Straightline test distance (15 cm) */
+#define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */
 #define TEST_ANGLE_DEG 90.0f      /* Turn test angle                   */
 #define TEST_SQUARE_SIDE_CM 50.0f /* Square test side length           */
 #define TEST_OPEN_LOOP_SPEED 120  /* Open loop test speed (0-255)      */
@@ -50,10 +50,19 @@
  * before the next move starts. */
 #define TEST_CYCLE_PAUSE_MS 2500U
 
-/* Number of test cycles to execute before stopping.
- * 5 = Runs 5 moves in sequence, records each into tm_history, then halts with
- * motors braked. 0 = Continuous mode. */
-#define TEST_CYCLE_LIMIT 5U
+/* Number of test cycles to execute before stopping. Each cycle records into
+ * tm_history; on reaching the limit the robot halts with motors braked.
+ *
+ * !! 0 MEANS RUN FOREVER, AND THAT IS DANGEROUS FOR THE CUMULATIVE TESTS !!
+ * TEST_STRAIGHT_FORWARD, TEST_TURN_LEFT_90 and TEST_TURN_RIGHT_90 do not
+ * return to where they started, so every cycle moves the robot further from
+ * its starting point. Five forward cycles at TEST_DISTANCE_CM = 30 is 150 cm
+ * of travel, which is more maze than you have. Use 0 only for the stationary
+ * tests (IMU, gyro bias, ToF), or for TEST_STRAIGHT_FWD_BACK and TEST_SQUARE,
+ * which end roughly where they began.
+ *
+ * Set to 1 for a single move, then reposition and power-cycle to repeat. */
+#define TEST_CYCLE_LIMIT 1U
 
 /* How long TEST_YAW_ESTIMATE observes the filter per cycle, in ms. */
 #define TEST_YAW_OBSERVE_MS 10000U
@@ -87,19 +96,20 @@ typedef struct {
    * test. The two failures want opposite fixes, and without this the only
    * way to tell them apart was to catch a failure as the last move of a run
    * and read the live registers before they were overwritten. */
-  float rate_dps;        /* fused rotation rate, deg/s (turns only) */
-  float basespeed;       /* last commanded speed, motor units */
+  float rate_dps;  /* fused rotation rate, deg/s (turns only) */
+  float basespeed; /* last commanded speed, motor units */
 
-  int32_t drift_cnt;     /* left - right ticks (skew for straight runs) */
-  int32_t left_cnt;      /* left encoder count */
-  int32_t right_cnt;     /* right encoder count */
-  uint8_t ok;            /* 1 = success, 0 = timeout */
+  int32_t drift_cnt; /* left - right ticks (skew for straight runs) */
+  int32_t left_cnt;  /* left encoder count */
+  int32_t right_cnt; /* right encoder count */
+  uint8_t ok;        /* 1 = success, 0 = timeout */
 } MoveRecord_t;
 
 /* The offline reader walks tm_history by raw byte stride over SWD, so a
  * layout change here silently turns every decoded field into garbage rather
  * than failing. Fail the build instead. */
-_Static_assert(sizeof(MoveRecord_t) == 40, "MoveRecord_t stride changed: update the SWD telemetry reader");
+_Static_assert(sizeof(MoveRecord_t) == 40,
+               "MoveRecord_t stride changed: update the SWD telemetry reader");
 
 extern volatile MoveRecord_t tm_history[TM_HISTORY_CAPACITY];
 extern volatile uint32_t tm_history_count;
@@ -141,8 +151,8 @@ extern volatile uint32_t tm_ekf_rejects; /* gated-out encoder updates   */
  * by the motion controllers. TOF_DISTANCE_INVALID (0xFFFF = 65535) means the
  * reading is not usable -- check the matching status/valid field to find out
  * why before assuming the sensor is broken. */
-extern volatile uint8_t tm_tof_ready;         /* bit0 front, bit1 left, bit2 right */
-extern volatile uint16_t tm_tof_front_mm;     /* filtered (what code should use) */
+extern volatile uint8_t tm_tof_ready; /* bit0 front, bit1 left, bit2 right */
+extern volatile uint16_t tm_tof_front_mm; /* filtered (what code should use) */
 extern volatile uint16_t tm_tof_left_mm;
 extern volatile uint16_t tm_tof_right_mm;
 
@@ -161,11 +171,49 @@ extern volatile uint16_t tm_tof_right_raw_mm;
 extern volatile uint32_t tm_tof_front_jumps;
 extern volatile uint32_t tm_tof_left_jumps;
 extern volatile uint32_t tm_tof_right_jumps;
-extern volatile uint8_t tm_tof_front_status;  /* raw ST RangeStatus, 0 = good */
+extern volatile uint8_t tm_tof_front_status; /* raw ST RangeStatus, 0 = good */
 extern volatile uint8_t tm_tof_left_status;
 extern volatile uint8_t tm_tof_right_status;
 extern volatile uint32_t tm_tof_sample_count; /* successful full sweeps      */
 extern volatile uint32_t tm_tof_error_count;  /* sweeps with any bad reading */
+
+/* ---- ToF flight recorder ----
+ *
+ * The tm_tof_* scalars above hold only the MOST RECENT sweep, which is fine
+ * for watching a live value but useless for characterising a sensor: noise,
+ * bias and filter behaviour are all properties of a SERIES, and reading one
+ * scalar over SWD gives one aliased sample per second at best.
+ *
+ * This buffer records every sweep so a whole run can be pulled off the target
+ * afterwards and analysed as a population, exactly as tm_history does for
+ * moves. Filling it halts the test with the motors braked so the samples are
+ * still there when you go to read them.
+ *
+ * Both filtered and raw are stored per sensor. Comparing their spreads is the
+ * only direct way to see whether the filter is earning its place. */
+#define TOF_HISTORY_CAPACITY 200U
+
+typedef struct {
+  uint32_t timestamp_ms; /* HAL_GetTick() at capture                  */
+  uint16_t front_mm;     /* filtered, TOF_DISTANCE_INVALID if unusable */
+  uint16_t left_mm;
+  uint16_t right_mm;
+  uint16_t front_raw_mm; /* offset-corrected, unfiltered               */
+  uint16_t left_raw_mm;
+  uint16_t right_raw_mm;
+  uint8_t front_status; /* raw ST RangeStatus, 0 = good               */
+  uint8_t left_status;
+  uint8_t right_status;
+  uint8_t ok; /* 1 = all three sensors gave a valid reading */
+} ToFRecord_t;
+
+/* Same stride contract as MoveRecord_t: the offline reader walks this by raw
+ * byte offset, so a layout change must fail the build, not the analysis. */
+_Static_assert(sizeof(ToFRecord_t) == 20,
+               "ToFRecord_t stride changed: update the SWD telemetry reader");
+
+extern volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
+extern volatile uint32_t tm_tof_history_count;
 
 /* Blink the on-board LED n times to signal progress without a serial port.
  * Shared by the test routines and main()'s own startup indicator. */

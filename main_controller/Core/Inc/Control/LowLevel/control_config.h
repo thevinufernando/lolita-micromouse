@@ -452,9 +452,53 @@
  * perfectly constant with range, so a single offset is a linear fix to a
  * mildly nonlinear problem -- calibrating at 80 mm and driving at 80 mm is
  * accurate, calibrating at 500 mm and driving at 80 mm is not. */
-#define TOF_OFFSET_FRONT_MM         0
-#define TOF_OFFSET_LEFT_MM          0
-#define TOF_OFFSET_RIGHT_MM         0
+/* MEASURED 2026-09-11 against a ruler, robot stationary, 200 samples each.
+ *
+ *   sensor   true    reads   error
+ *   front    60 mm   86.4    +26.4
+ *   left     36 mm   62.7    +26.7
+ *   right    35 mm   64.2    +29.2
+ *
+ * Three independent sensors agreeing to within 3 mm at the distances the
+ * robot actually operates at.
+ *
+ * !! LEFT AT 0 ON PURPOSE -- the measurement is recorded here, not applied. !!
+ * The values that would cancel the error are front -26, left -27, right -29.
+ * They are held back until the rest of the robot needs them, so that ToF
+ * readings stay raw while other subsystems are being brought up and there is
+ * one less transform between sensor and number when something looks wrong.
+ *
+ * TWO HYPOTHESES WERE TESTED AND KILLED before landing here, both cheaper to
+ * re-read than to re-derive:
+ *
+ *   ANGLED MOUNTING was proposed because the side sensors read 1.8x the ruler
+ *   distance at 35 mm, implying a ~55 deg tilt. Dead: a 55 deg tilt predicts
+ *   523 mm where the left sensor actually read 319 mm at a true 300 mm. The
+ *   sensors are perpendicular.
+ *
+ *   A PERFECTLY CONSTANT OFFSET is close but not exact. At longer range the
+ *   over-read shrinks (left +19.0 at 300 mm, right +8.4 at 150 mm), which is
+ *   the VL53L0X's known near-field behaviour rather than a fault.
+ *
+ * WHEN THEY ARE APPLIED, they will be tuned for SHORT RANGE and will make
+ * mid-range WORSE -- the right sensor's 150 mm reading goes from +8 to about
+ * -21. That is the correct trade for a micromouse: side walls sit ~35 mm away
+ * and a front wall matters at 60-90 mm when deciding to stop. Nothing needs
+ * accuracy at 150 mm. Detecting a wall two cells ahead is a binary call with
+ * hundreds of mm of margin, so a 20 mm error there changes nothing.
+ *
+ * NOTE the left/right pair also carries the differential trim. Centring
+ * between walls steers on (left - right), so the common-mode over-read
+ * cancels and only the 2.5 mm mismatch between the two sensors matters. The
+ * -27/-29 split removes it: at the measured maze position they correct to
+ * 35.7 and 35.2 against a true 36 and 35.
+ *
+ * If absolute short-range accuracy is ever genuinely needed, the real fix is
+ * ST's VL53L0X_PerformOffsetCalibration() and XTalk calibration, which
+ * ToF_InitSensor() does not currently call. */
+#define TOF_OFFSET_FRONT_MM         0   /* measured: -26 */
+#define TOF_OFFSET_LEFT_MM          0   /* measured: -27 */
+#define TOF_OFFSET_RIGHT_MM         0   /* measured: -29 */
 
 
 /* ========================= Completion criteria =========================== */

@@ -60,6 +60,11 @@ volatile uint8_t  tm_tof_right_status  = 255;
 volatile uint32_t tm_tof_sample_count  = 0;
 volatile uint32_t tm_tof_error_count   = 0;
 
+/* Flight recorder for ToF sweeps. See test_harness.h for why the scalars
+ * above are not enough to characterise a sensor. */
+volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
+volatile uint32_t    tm_tof_history_count = 0;
+
 /* Only the test selected by ACTIVE_TEST is called, so the others would each
  * raise -Wunused-function. Mark them so real warnings stay visible. */
 #define TEST_FN __attribute__((unused)) static
@@ -454,6 +459,52 @@ static void Telemetry_CaptureToF(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
   {
     tm_tof_error_count++;
   }
+
+  /* Append to the flight recorder. Stops at capacity rather than wrapping:
+   * a wrapped buffer read afterwards would silently mix the start and end of
+   * the run, and for a stationary noise measurement the first samples are the
+   * interesting ones (they include the filter priming). */
+  if (tm_tof_history_count < TOF_HISTORY_CAPACITY)
+  {
+    volatile ToFRecord_t *r = &tm_tof_history[tm_tof_history_count];
+
+    r->timestamp_ms  = HAL_GetTick();
+    r->front_mm      = m[TOF_FRONT].distance_mm;
+    r->left_mm       = m[TOF_LEFT].distance_mm;
+    r->right_mm      = m[TOF_RIGHT].distance_mm;
+    r->front_raw_mm  = m[TOF_FRONT].raw_mm;
+    r->left_raw_mm   = m[TOF_LEFT].raw_mm;
+    r->right_raw_mm  = m[TOF_RIGHT].raw_mm;
+    r->front_status  = m[TOF_FRONT].range_status;
+    r->left_status   = m[TOF_LEFT].range_status;
+    r->right_status  = m[TOF_RIGHT].range_status;
+    r->ok            = (sweep_status == TOF_OK) ? 1U : 0U;
+
+    tm_tof_history_count++;
+  }
+}
+
+/* Park the robot once the recorder is full so the samples survive until they
+ * are read. Mirrors what TEST_CYCLE_LIMIT does for the motion tests: the ToF
+ * tests loop forever by design, and without this the run would keep sampling
+ * into a full buffer while the LED kept blinking as if it were still working.
+ * Heartbeat blink (100 ms on, 900 ms off) means "done, go read it". */
+static void ToF_HaltIfBufferFull(void)
+{
+  if (tm_tof_history_count < TOF_HISTORY_CAPACITY)
+  {
+    return;
+  }
+
+  Motor_Brake();
+
+  while (1)
+  {
+    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_RESET);
+    HAL_Delay(900);
+  }
 }
 
 /* Which sensors survived init, as a bitmask. Read this FIRST: an all-zero
@@ -485,6 +536,7 @@ TEST_FN void Test_ToFSingle(void)
   int status = ToF_ReadAll(m);
 
   Telemetry_CaptureToF(m, status);
+  ToF_HaltIfBufferFull();
 
   HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
   HAL_Delay(100);
@@ -514,6 +566,7 @@ TEST_FN void Test_ToFContinuous(void)
   int status = ToF_ReadAll(m);
 
   Telemetry_CaptureToF(m, status);
+  ToF_HaltIfBufferFull();
 
   HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
   HAL_Delay(20);

@@ -112,7 +112,10 @@ static void updatePID(float target_distance, float direction) {
 
         //Check whether target distance is reached, and stay there a few
         //cycles so we do not declare success while coasting through it
-        if (fabsf(measured - signed_target) < DISTANCE_TOLERANCE_CM) {
+        uint8_t within_tolerance =
+            (fabsf(measured - signed_target) < DISTANCE_TOLERANCE_CM);
+
+        if (within_tolerance) {
 
             settle_counter++;
 
@@ -147,6 +150,34 @@ static void updatePID(float target_distance, float direction) {
 
         //Straightline PID update
         steering = PIDController_Update(&controller.straight_pid, 0.0f, straightline_measurement);
+
+        /* ---------------- terminal deadband ----------------
+         * Once inside the tolerance band, stop driving and brake instead.
+         *
+         * Without this, applyMinSpeed() below floors the command to
+         * +/-CONTROL_MIN_MOVE_SPEED, so the controller kept shoving the robot
+         * at full stiction-breaking torque for the whole CONTROL_SETTLE_CYCLES
+         * window it was supposed to be settling in. That impulse is far
+         * coarser than STRAIGHT_TOLERANCE_CM, so it routinely knocked the
+         * robot straight back out of the band it had just reached -- a limit
+         * cycle that ends in CONTROL_MOVE_TIMEOUT_MS rather than a completed
+         * move.
+         *
+         * This is the same defect that was removed from turn_controller.c,
+         * where it was the single biggest cause of failed moves. The ratio is
+         * worse here: 45 speed units against a 0.7 cm band.
+         *
+         * Both PIDs are still evaluated above, deliberately, so the
+         * integrator and the derivative filter stay in step with the real
+         * error instead of seeing a discontinuity when driving resumes. */
+        if (within_tolerance) {
+
+            basespeed = 0.0f;
+            steering  = 0.0f;
+            Motor_Brake();
+
+            return;
+        }
 
         //Overcome gearbox stiction near the target
         float commanded = applyMinSpeed(basespeed);
