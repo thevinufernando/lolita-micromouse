@@ -89,6 +89,16 @@ extern volatile float turn_ff_cmd;
 extern volatile float turn_fb_cmd;
 extern volatile float turn_profile_duration_s;
 
+/* Absolute heading bookkeeping. turn_heading_target_deg is an exact multiple
+ * of 90 for the whole run; the gap between it and yaw_fused_deg is the
+ * accumulated heading error that the next move inherits and corrects. */
+extern volatile float turn_heading_target_deg;
+extern volatile float turn_heading_error_deg;
+
+/* Current absolute heading target, for the straight-line controller to hold. */
+float TurnController_GetHeadingTargetDeg(void);
+void  TurnController_SetHeadingTargetDeg(float deg);
+
 //Function prototypes
 
 uint8_t TurnController_Init(void);

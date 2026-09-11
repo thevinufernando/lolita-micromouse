@@ -20,6 +20,17 @@ static uint32_t last_predict_cycles;
 /* Set once at init; drives the encoder-only fallback. */
 static uint8_t imu_ok = 0U;
 
+/* Yaw at the moment the encoders were last zeroed.
+ *
+ * The odometry measurement is absolute travel since Encoders_Reset(), so on
+ * its own it can only ever express "how far have I turned since the reset".
+ * Continuous heading needs the filter's yaw to survive a move boundary while
+ * the encoders do not, and this offset is what bridges the two: the encoders
+ * restart from zero, and their contribution is re-based onto wherever yaw had
+ * actually reached. Without it, resetting the encoders alone would make the
+ * measurement disagree with the state by the whole accumulated heading. */
+static float encoder_origin_rad = 0.0f;
+
 volatile float yaw_fused_deg;
 volatile float yaw_encoder_deg;
 volatile float yaw_fusion_gap_deg;
@@ -48,7 +59,10 @@ volatile float    yaw_bias_cal_peak_dps;
  * ---------------------------------------------------------------------- */
 static float encoderYawRad(void)
 {
-    return (Encoder_getRightDistance() - Encoder_getLeftDistance()) / ROBOT_WHEEL_BASE_CM;
+    float since_reset = (Encoder_getRightDistance() - Encoder_getLeftDistance())
+                        / ROBOT_WHEEL_BASE_CM;
+
+    return encoder_origin_rad + since_reset;
 }
 
 
@@ -232,9 +246,21 @@ void YawEstimator_Reset(void)
      * yaw_estimator.h. The caller resets them, first. */
     EKF_Reset(&yaw_ekf, 0.0f);
 
+    /* Yaw is now zero, so the encoder measurement must start from zero too. */
+    encoder_origin_rad = 0.0f;
+
     last_predict_cycles = DWT_GetCycles();
 
     YawEstimator_PublishTelemetry();
+}
+
+
+void YawEstimator_RebaseEncoders(void)
+{
+    /* Call IMMEDIATELY after Encoders_Reset() when yaw must stay continuous.
+     * Pins the encoder measurement to wherever the estimate currently is, so
+     * zeroing the wheels does not move the measurement out from under it. */
+    encoder_origin_rad = EKF_GetYaw(&yaw_ekf);
 }
 
 

@@ -22,6 +22,9 @@ static uint16_t stall_counter;
 /* Reference trajectory for the move in progress. */
 static MotionProfile_t turn_profile;
 
+/* Yaw the current profile was built from; the profile is relative to it. */
+static float turn_profile_start_deg;
+
 /* Debugging / live-watch.
  *
  * These exist only to be observed from outside the firmware (ST-Link live
@@ -53,6 +56,17 @@ volatile float turn_profile_err_deg;
 volatile float turn_ff_cmd;
 volatile float turn_fb_cmd;
 volatile float turn_profile_duration_s;
+
+/* Where the robot is SUPPOSED to be pointing, accumulated across the whole
+ * run. Moves by exactly +/-90 per turn and is never reset, so it stays an
+ * exact multiple of 90 forever while the estimate drifts around it.
+ *
+ * The difference between this and yaw is the accumulated heading error, and
+ * making it visible is the entire reason yaw is no longer zeroed per move.
+ * A turn that finishes 2 degrees short leaves that 2 degrees here, where the
+ * next move inherits it as an ordinary setpoint error instead of losing it. */
+volatile float turn_heading_target_deg;
+volatile float turn_heading_error_deg;
 
 
 /* ---- Estimator forwarders ----
@@ -128,9 +142,16 @@ void TurnController_ResetYaw(void)
 {
     /* Encoders FIRST, then the filter. The estimator's measurement is absolute
      * differential travel since the encoder reset, so the two must move
-     * together -- see the pairing rule in yaw_estimator.h. */
+     * together -- see the pairing rule in yaw_estimator.h.
+     *
+     * This is the START-FRESH entry point and it discards accumulated heading
+     * on purpose. Per-move boundaries must NOT come through here; they use
+     * YawEstimator_RebaseEncoders() instead, which keeps the heading. */
     Encoders_Reset();
     YawEstimator_Reset();
+
+    turn_heading_target_deg = 0.0f;
+    turn_heading_error_deg  = 0.0f;
 }
 
 
@@ -210,8 +231,10 @@ static void updateControl(float target_yaw_deg)
 
     /* The setpoint the robot is chased toward right now, and the rate the
      * profile says it should be turning at. */
-    float ref_pos = MotionProfile_Position(&turn_profile, elapsed_s);
+    float ref_pos = turn_profile_start_deg
+                    + MotionProfile_Position(&turn_profile, elapsed_s);
     float ref_vel = MotionProfile_Velocity(&turn_profile, elapsed_s);
+    float ref_acc = MotionProfile_Acceleration(&turn_profile, elapsed_s);
 
     float track_error = ref_pos - fused_yaw_deg;
     float final_error = target_yaw_deg - fused_yaw_deg;
@@ -278,7 +301,7 @@ static void updateControl(float target_yaw_deg)
     /* Feedforward supplies the command the move needs; feedback only corrects
      * the difference. Without the feedforward this is just a PID chasing a
      * moving target, which is strictly worse than chasing a fixed one. */
-    float ff = TURN_FF_GAIN * ref_vel;
+    float ff = TURN_FF_GAIN * ref_vel + TURN_FF_ACCEL_GAIN * ref_acc;
     float fb = PIDController_Update(&turn_pid, ref_pos, fused_yaw_deg);
 
     turn_integrator = turn_pid.integrator;
@@ -320,11 +343,14 @@ static void updateControl(float target_yaw_deg)
 //Helper to reset the state
 static void resetTurnState(void)
 {
-    //Reset encoders and PID controllers. The EKF's yaw is zeroed but the
-    //learned gyro bias is deliberately carried over from previous moves.
-    //Encoders FIRST, then the filter -- see yaw_estimator.h.
+    /* Encoders FIRST, then re-base -- see the pairing rule in yaw_estimator.h.
+     *
+     * REBASE, NOT RESET. Zeroing yaw here would throw away the heading error
+     * this move inherited, which is precisely the information the next move
+     * needs in order to correct it. The wheels restart from zero; the heading
+     * estimate does not. */
     Encoders_Reset();
-    YawEstimator_Reset();
+    YawEstimator_RebaseEncoders();
     resetPID();
 
     turn_start_time = HAL_GetTick();
@@ -343,12 +369,25 @@ static uint8_t runTurn(float angle_deg, float direction)
         return 0;
     }
 
-    float target_yaw_deg = angle_deg * direction;
+    /* Absolute heading bookkeeping. The commanded rotation moves the target by
+     * exactly the requested amount; what the robot must actually turn is the
+     * distance from where it currently believes it is to there, which folds in
+     * any error left over from the last move. */
+    float start_yaw_deg = YawEstimator_GetYawDeg();
+
+    turn_heading_target_deg += angle_deg * direction;
+
+    float target_yaw_deg = turn_heading_target_deg;
+    float sweep_deg      = target_yaw_deg - start_yaw_deg;
+
+    turn_heading_error_deg = sweep_deg - (angle_deg * direction);
 
     /* Build the trajectory BEFORE resetting the clock, so elapsed time and the
      * profile share an origin. */
-    MotionProfile_Init(&turn_profile, target_yaw_deg,
+    MotionProfile_Init(&turn_profile, sweep_deg,
                        TURN_PROFILE_MAX_DPS, TURN_PROFILE_ACCEL_DPS2);
+
+    turn_profile_start_deg = start_yaw_deg;
 
     turn_profile_duration_s = MotionProfile_Duration(&turn_profile);
 
@@ -372,6 +411,18 @@ static uint8_t runTurn(float angle_deg, float direction)
 
         updateControl(target_yaw_deg);
     }
+}
+
+
+float TurnController_GetHeadingTargetDeg(void)
+{
+    return turn_heading_target_deg;
+}
+
+
+void TurnController_SetHeadingTargetDeg(float deg)
+{
+    turn_heading_target_deg = deg;
 }
 
 

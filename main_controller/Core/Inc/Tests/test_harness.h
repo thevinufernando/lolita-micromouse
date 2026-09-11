@@ -35,7 +35,7 @@
 #define TEST_TOF_MODE_CYCLE 13   /* No motion. Mode switching + stop path. */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_TURN_LEFT_90
+#define ACTIVE_TEST TEST_TURN_360
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */

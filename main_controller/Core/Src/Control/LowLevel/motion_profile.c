@@ -98,6 +98,20 @@ float MotionProfile_Velocity(const MotionProfile_t *p, float t)
 }
 
 
+float MotionProfile_Acceleration(const MotionProfile_t *p, float t)
+{
+    if (p == 0) return 0.0f;
+
+    if (!(p->t_total > 0.0f)) return 0.0f;
+    if (t <= 0.0f || t >= p->t_total) return 0.0f;
+
+    if (t < p->t_ramp)                    return p->sign * p->accel;
+    if (t < p->t_ramp + p->t_cruise)      return 0.0f;
+
+    return -p->sign * p->accel;
+}
+
+
 float MotionProfile_Duration(const MotionProfile_t *p)
 {
     return (p != 0) ? p->t_total : 0.0f;

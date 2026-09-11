@@ -137,6 +137,15 @@ void YawEstimator_Correct(void);
 /* Copy filter diagnostics into the live-watch globals above. */
 void YawEstimator_PublishTelemetry(void);
 
+/* Re-base the odometry measurement onto the CURRENT yaw estimate, without
+ * disturbing that estimate. Call it immediately after Encoders_Reset() any
+ * time yaw must stay continuous across a move boundary -- which is every move
+ * once heading is tracked across a whole run rather than per-move.
+ *
+ * Use this INSTEAD of YawEstimator_Reset() when continuity matters. Reset
+ * throws the accumulated heading away; rebase keeps it. */
+void YawEstimator_RebaseEncoders(void);
+
 /* Zero the yaw estimate, keeping the learned gyro bias -- the bias belongs to
  * the sensor and stays valid across moves.
  * DOES NOT reset the encoders; see the reset pairing rule above. */

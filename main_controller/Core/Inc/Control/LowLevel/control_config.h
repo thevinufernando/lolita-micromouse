@@ -231,7 +231,7 @@
  * breakaway pulse (full scale for ~30 ms, then hand back to the PID) is the
  * right consumer for it. Static friction is broken by amplitude, not by an
  * integrator patiently ramping through a range where the wheel cannot move. */
-#define TURN_INT_LIMIT_MOVING       60.0f
+#define TURN_INT_LIMIT_MOVING       20.0f
 
 /* Stall detector: rotation below this rate (deg/s) while still outside
  * TURN_TOLERANCE_DEG counts as "not moving".
@@ -278,6 +278,18 @@
  * the feedback is doing work it should not have to. 1.0 is a starting
  * estimate from a 90 deg turn taking ~750 ms at a command near 200. */
 #define TURN_FF_GAIN                1.0f
+
+/* Acceleration feedforward: motor speed units per deg/s^2.
+ *
+ * Velocity feedforward alone cannot accelerate the robot, only hold a rate.
+ * Without this term the integrator covers both ramps and is still wound
+ * POSITIVE when the move ends, which pushes the robot past the target and
+ * then keeps pushing the wrong way -- observed as 2 failures in a 20-turn
+ * run, both with the command pointing away from the target.
+ *
+ * 0.03 x the 1200 deg/s^2 ramp is ~36 speed units, which is about what the
+ * integrator was winding to. Trim it from turn_fb_cmd during the ramps. */
+#define TURN_FF_ACCEL_GAIN          0.03f
 
 /* Grace period after the profile ends, in ms, to close whatever small error
  * is left. BOUNDED ON PURPOSE: this is the whole difference between a move

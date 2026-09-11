@@ -77,6 +77,16 @@ float MotionProfile_Position(const MotionProfile_t *p, float t);
  * small instead of doing all the work. */
 float MotionProfile_Velocity(const MotionProfile_t *p, float t);
 
+/* Reference acceleration at time t: +accel, 0, or -accel by segment.
+ *
+ * The SECOND feedforward term, and the one that was missing. A velocity
+ * feedforward supplies the command needed to HOLD a rate but nothing to
+ * CHANGE one, so with velocity alone the robot lags through both ramps and
+ * the integrator winds up covering for it. On this robot that windup was
+ * still positive when the move ended, which drove it past the target and then
+ * kept driving the wrong way. */
+float MotionProfile_Acceleration(const MotionProfile_t *p, float t);
+
 /* Total duration in seconds. Known before the move starts, which is the
  * whole point. */
 float MotionProfile_Duration(const MotionProfile_t *p);
