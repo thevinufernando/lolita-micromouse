@@ -402,6 +402,10 @@
  * detector, not a pacing mechanism. */
 #define TOF_DATA_READY_TIMEOUT_MS   100U
 
+/* How long ToF_StopContinuous() waits for the sensor to finish stopping, ms.
+ * Only a runaway escape: the stop completes in a millisecond or two. */
+#define TOF_STOP_TIMEOUT_MS         100U
+
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 
 /* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:

@@ -24,7 +24,7 @@ static uint16_t ToF_Filter_Median(const ToF_Filter_t *filter, uint8_t count)
 
     for (uint8_t i = 1; i < count; i++) {
         uint16_t key = sorted[i];
-        int8_t j = (int8_t)(i - 1);
+        int j = (int)i - 1;
 
         while (j >= 0 && sorted[j] > key) {
             sorted[j + 1] = sorted[j];
@@ -75,7 +75,6 @@ void ToF_Filter_Invalidate(ToF_Filter_t *filter)
 uint16_t ToF_Filter_Update(ToF_Filter_t *filter, uint16_t raw_mm)
 {
     uint16_t median;
-    uint8_t effective_count;
     float delta;
 
     if (filter == NULL) {
@@ -96,8 +95,7 @@ uint16_t ToF_Filter_Update(ToF_Filter_t *filter, uint16_t raw_mm)
     /* While priming, take the median of only what has actually arrived. The
      * alternative -- medianing zero-filled slots -- would drag the output
      * toward 0 mm, which a wall-follower reads as an imminent collision. */
-    effective_count = filter->sample_count;
-    median = ToF_Filter_Median(filter, effective_count);
+    median = ToF_Filter_Median(filter, filter->sample_count);
 
     /* --- Stage 2: EMA, with a step detector ---
      *

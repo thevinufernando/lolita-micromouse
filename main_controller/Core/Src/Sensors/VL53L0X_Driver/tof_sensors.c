@@ -492,6 +492,42 @@ int ToF_StopContinuous(ToF_Sensor_t sensor)
         return TOF_ERROR;
     }
 
+    /* ---------------- wait for the stop to actually complete ----------------
+     * VL53L0X_StopMeasurement() only requests the stop; the sensor finishes a
+     * measurement already in flight before it takes effect. Reconfiguring the
+     * device mode during that window leaves it in an undefined state and later
+     * single-shot reads fail.
+     *
+     * Polarity is the opposite of what the name suggests: the status reads
+     * NON-ZERO while still stopping and ZERO once done, so this polls until it
+     * reaches zero. That zero-read is not just an observation -- look at
+     * VL53L0X_GetStopCompletedStatus() in the ST API and you will see it also
+     * rewrites StopVariable to re-arm the device. Skipping the poll therefore
+     * skips a required device write, not merely a wait. */
+    uint32_t stop_status = 1U;
+    uint32_t start_ms = HAL_GetTick();
+
+    while (stop_status != 0U) {
+
+        if (VL53L0X_GetStopCompletedStatus(&s_dev[sensor], &stop_status)
+                != VL53L0X_ERROR_NONE) {
+            return TOF_ERROR;
+        }
+
+        if (stop_status == 0U) {
+            break;
+        }
+
+        if ((HAL_GetTick() - start_ms) > TOF_STOP_TIMEOUT_MS) {
+            /* Never seen in practice -- the stop takes a millisecond or two.
+             * Reaching here means the re-arm write above never happened, so
+             * the sensor is left in single-shot but unverified. */
+            return TOF_ERROR_TIMEOUT;
+        }
+
+        HAL_Delay(1);
+    }
+
     /* Return to single-shot so a later ToF_ReadSingle() behaves. */
     (void)VL53L0X_SetDeviceMode(&s_dev[sensor],
                                 VL53L0X_DEVICEMODE_SINGLE_RANGING);

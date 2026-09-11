@@ -8,7 +8,7 @@
  * TCA9548A 8-channel I2C multiplexer.
  *
  * All five VL53L0X footprints on the Main PCB share the same factory I2C
- * address (0x29). Rather than reassigning addresses at boot — which needs one
+ * address (0x29) -- three are currently populated and used. Rather than reassigning addresses at boot — which needs one
  * XSHUT GPIO per sensor and has to be redone after every power cycle — each
  * sensor hangs off its own mux channel and the MCU opens exactly one channel
  * at a time.

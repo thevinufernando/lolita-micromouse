@@ -15,8 +15,9 @@
  * ---------------------------------------------------------------------------
  * MUX NOTE
  * ---------------------------------------------------------------------------
- * All three ToF sensors sit behind a TCA9548A and therefore share the same
- * I2C address. This layer does NOT touch the mux — it just transacts on
+ * The board carries five VL53L0X footprints, of which three are populated
+ * and used (front, left, right). All of them sit behind a TCA9548A and
+ * therefore share the same I2C address. This layer does NOT touch the mux — it just transacts on
  * whichever channel is currently open. Selecting the channel is the caller's
  * job (see tof_sensors.c, which wraps every API call in a channel select).
  *
