@@ -129,56 +129,35 @@ static uint8_t faceOpening(uint8_t action)
             afterTurn();
             return 1U;
 
+        case NAV_ACT_AROUND:
+            /* Two 90s rather than one 180. Every gain, the profile and the
+             * settle window were tuned and measured at 90, the continuous
+             * heading target means the second absorbs whatever the first left
+             * behind, and a failure says which half failed.
+             *
+             * BACKING OUT INSTEAD WAS TRIED AND REMOVED. The idea was to buy a
+             * cell of lateral correction before pivoting, but the side sensors
+             * are at the very front of the chassis and cannot steer the robot
+             * sideways in reverse -- see the REVERSE note in control_config.h.
+             * Without that correction the reverse bought nothing: the pivot
+             * happened at exactly the lateral offset it would have anyway, one
+             * cell further back. Turning first is strictly better, because the
+             * forward move that follows DOES correct laterally. */
+            if (!turnRightAngle(90.0f)) return 0U;
+            MazeMap_TurnRight();
+            afterTurn();
+
+            Motor_Brake();
+            HAL_Delay(NAV_SETTLE_MS);
+
+            if (!turnRightAngle(90.0f)) return 0U;
+            MazeMap_TurnRight();
+            afterTurn();
+            return 1U;
+
         default:
             return 1U;          /* NAV_ACT_FORWARD: already facing right */
     }
-}
-
-
-/* Leave a dead end. BACK OUT FIRST, THEN TURN -- the order is the whole point.
- *
- * It is the same two moves as turning on the spot and driving out, and it ends
- * in the same place facing the same way, so it costs nothing. What changes is
- * that the pivot happens AFTER a full cell of travel with the lateral loop
- * running, instead of the instant the robot arrives carrying whatever error it
- * picked up driving into the wall. One cell removes about 80% of that error at
- * the gain now configured.
- *
- * Measured across one run: every cell that pivoted successfully was within
- * 8.5 mm of centre, and the one that jammed on a wall was 24 mm out. The
- * chassis is large for the cell, so that margin is the whole game.
- *
- * The reverse is also the best-referenced move the robot ever makes. The wall
- * it just faced stays in view the entire way, so the move is measured against
- * the wall rather than counted in encoder ticks -- and that corrects the error
- * the robot ARRIVED with, which no amount of odometry can.
- *
- * Returns 0 on any failure, leaving the pose consistent with reality. */
-static uint8_t backOutAndTurn(void)
-{
-    if (!runReverseFused(NAV_CELL_CM)) return 0U;
-    if (!MazeMap_Retreat())            return 0U;
-
-    afterTurn();   /* the reverse changed what every sensor is looking at */
-
-    Motor_Brake();
-    HAL_Delay(NAV_SETTLE_MS);
-
-    /* Two 90s rather than one 180. Every gain, the profile and the settle
-     * window were tuned and measured at 90, the continuous heading target
-     * means the second absorbs whatever the first left behind, and a failure
-     * says which half failed. */
-    for (uint8_t i = 0; i < 2U; i++) {
-        if (i > 0U) {
-            Motor_Brake();
-            HAL_Delay(NAV_SETTLE_MS);
-        }
-        if (!turnRightAngle(90.0f)) return 0U;
-        MazeMap_TurnRight();
-        afterTurn();
-    }
-
-    return 1U;
 }
 
 
@@ -253,30 +232,7 @@ void Navigator_Run(void)
 
         /* Act. Pose bookkeeping happens only after each move actually reports
          * success, so a timeout leaves the map consistent with reality. */
-        uint8_t ok;
-
-        if (action == NAV_ACT_AROUND) {
-            /* Dead end: back out of it and turn in the corridor. This is a
-             * COMPLETE action -- the cell of travel is the reverse itself, so
-             * no forward move follows and the residual carry is dropped
-             * because the axis has been reversed and then flipped. */
-            ok = backOutAndTurn();
-
-            tm_maze_residual_cm = 0.0f;
-            arrival_err_cm      = 0.0f;
-            arrival_ok          = ok;
-            tm_maze_moves++;
-
-            if (!ok) {
-                observe(&w, 0U);
-                recordCell(0.0f, 0U, &w, NAV_ACT_STOP);
-                tm_maze_abort_reason = NAV_END_MOVE_FAILED;
-                break;
-            }
-            continue;
-        }
-
-        ok = faceOpening(action);
+        uint8_t ok = faceOpening(action);
 
         if (ok) {
             /* Settle ONLY after a pivot. On a straight-through cell the robot

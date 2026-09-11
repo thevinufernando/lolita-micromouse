@@ -72,17 +72,15 @@ void WallFollow_Reset(void);
 /* Feed one ToF sweep. Returns the heading offset in degrees to ADD to the
  * heading target: positive tilts the robot anticlockwise.
  *
- * `dir` is +1 driving forwards and -1 in reverse. It selects the gains and
- * applies the sign flip, so callers pass their direction and use the result
- * as-is -- the flip belongs here because it is a property of the lateral loop,
- * not of whoever is running it. Backwards the loop is non-minimum-phase (the
- * sensors sit ahead of the wheel axis and swing the wrong way first), so it
- * runs a much smaller gain and clamp.
+ * FORWARD TRAVEL ONLY. The side sensors are at the very front of the chassis,
+ * so in reverse they trail the body on a long arm and report the opposite of
+ * what a correction is doing until long after the fact. There is no reverse
+ * form of this and there should not be one; see control_config.h.
  *
  * Returns 0 when no wall is usable, which is the correct behaviour rather
  * than a failure -- the robot then holds its heading target open-loop until a
  * wall comes back. */
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir);
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT]);
 
 /* Drift accumulated so far, in degrees, to be applied to the heading target.
  * See the drift corrector note above. */

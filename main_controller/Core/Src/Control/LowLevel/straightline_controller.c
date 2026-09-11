@@ -310,11 +310,6 @@ static void allocate(float base, float steer, float *left, float *right)
 
 /* Shared implementation of every fused straight move.
  *
- * `distance_cm` is SIGNED: negative drives backwards. The motion profile
- * already carries a sign, the encoders already go negative, and applyMinSpeed
- * already handles both, so reverse needs no separate copy of this loop --
- * only the two places marked !! DIRECTION !! below.
- *
  * `front_target_mm` is the front-sensor reading the move should END at, or 0
  * to run on odometry alone. See the FRONT-WALL ALIGNMENT block in
  * control_config.h for what it is for. */
@@ -356,11 +351,6 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     MotionProfile_t dist_profile;
     MotionProfile_Init(&dist_profile, distance_cm,
                        STRAIGHT_PROFILE_MAX_CMS, STRAIGHT_PROFILE_ACCEL_CMS2);
-
-    /* !! DIRECTION !! -1 when reversing. Handed to the wall follower, which
-     * owns the sign flip and the reverse gains, and used below to keep the
-     * stiction floor off during braking in either direction. */
-    const float dir = (distance_cm < 0.0f) ? -1.0f : 1.0f;
 
     /* The endpoint, which front-wall alignment may move once. align_offset_cm
      * translates the profile by the same amount so its ramps still land on the
@@ -437,9 +427,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             ToF_Measurement_t m[TOF_SENSOR_COUNT];
             (void)ToF_ReadAll(m);
 
-            /* The flip and the reverse gains live inside the follower now;
-             * it only needs telling which way the robot is going. */
-            tilt_deg = WallFollow_Update(m, dir);
+            tilt_deg = WallFollow_Update(m);
 
             /* FRONT-WALL ALIGNMENT, attempted only in the first quarter of the
              * move and applied at most once.
@@ -515,13 +503,11 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * the same gate. */
         float ref_acc = MotionProfile_Acceleration(&dist_profile, elapsed_s);
 
-        /* !! DIRECTION !! `ref_acc >= 0` meant "not braking" only while driving
-         * forwards. Reversing, the robot speeds up with a NEGATIVE reference
-         * acceleration, so that test would have suppressed the floor through
-         * the whole launch and left the move unable to break stiction, then
-         * applied it through the braking ramp and driven the robot past the
-         * target. The sign-free statement of the same rule is that reference
-         * velocity and acceleration agree unless the profile is braking. */
+        /* The rule is "floor the command unless the profile is braking", and
+         * braking is exactly when reference velocity and acceleration disagree
+         * in sign. Written that way rather than as `ref_acc >= 0` because the
+         * two are equivalent going forwards and only one of them stays true if
+         * this ever has to run a move in the other direction. */
         if (fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
             base = 0.0f;
         }
@@ -592,21 +578,4 @@ uint8_t runForwardFused(float distance_cm)
      * With no wall in range the alignment never fires and the move is exactly
      * what it was before: odometry against a trapezoidal profile. */
     return runFused(distance_cm, WALL_FRONT_ALIGN_MM);
-}
-
-
-uint8_t runReverseFused(float distance_cm)
-{
-    /* Backing out of a dead end, the wall the robot just faced stays in view
-     * the whole way, so the move can be referenced against it rather than
-     * counted in encoder ticks -- and unlike the encoders it corrects the
-     * error the robot ARRIVED with, not just the error this move makes.
-     *
-     * One cell back from a proper stop the sensor should read the alignment
-     * gap plus a cell. Overshoot the approach and the reverse comes up short
-     * by the same amount, which is the point: the robot ends where the wall
-     * says it should be, not where the wheels think it went. */
-    const float target_mm = WALL_FRONT_ALIGN_MM + distance_cm * 10.0f;
-
-    return runFused(-distance_cm, target_mm);
 }

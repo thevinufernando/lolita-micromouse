@@ -102,17 +102,11 @@ int main(void)
     unsigned char act = Maze_Decide(&w);
     printf("%3d  (%d,%d)  %s   %d %d %d  %s\n",
            step, mouse_x, mouse_y, DN[mouse_dir], w.front,w.left,w.right, AN[act]);
-    /* A dead end REVERSES one cell and then turns; everything else turns
-       (maybe) and then advances. Both end in the same cell facing the same
-       way -- the test asserts that below. */
-    if (act==NAV_ACT_AROUND){
-        MazeMap_Retreat();
-        MazeMap_TurnRight(); MazeMap_TurnRight();
-    } else {
-        if (act==NAV_ACT_RIGHT){ MazeMap_TurnRight(); }
-        else if (act==NAV_ACT_LEFT){ MazeMap_TurnLeft(); }
-        MazeMap_Advance();
-    }
+    /* Every action turns (maybe) and THEN advances one cell. */
+    if (act==NAV_ACT_RIGHT){ MazeMap_TurnRight(); }
+    else if (act==NAV_ACT_LEFT){ MazeMap_TurnLeft(); }
+    else if (act==NAV_ACT_AROUND){ MazeMap_TurnRight(); MazeMap_TurnRight(); }
+    MazeMap_Advance();
   }
   CHECK(reached_1_2, "right-hand rule reaches (1,2)");
 
@@ -121,19 +115,6 @@ int main(void)
   CHECK(MazeMap_WallEast(0,2)==0,  "opening east of (0,2) left clear");
   CHECK(MazeMap_WallEast(0,0)==1,  "wall east of (0,0) recorded");
   CHECK(MazeMap_WallEast(1,2)==1,  "dead end east of (1,2) recorded");
-
-  /* Back-out-then-turn must land exactly where turn-then-drive would have.
-     If these ever diverge the dead-end change has altered the route, not just
-     the order of two moves. */
-  MazeMap_Init();
-  MazeMap_SetPose(5, 5, NORTH);
-  MazeMap_Retreat(); MazeMap_TurnRight(); MazeMap_TurnRight();
-  int bx = mouse_x, by = mouse_y; Direction bd = mouse_dir;
-  MazeMap_Init();
-  MazeMap_SetPose(5, 5, NORTH);
-  MazeMap_TurnRight(); MazeMap_TurnRight(); MazeMap_Advance();
-  CHECK(bx==mouse_x && by==mouse_y && bd==mouse_dir,
-        "reverse-then-turn lands where turn-then-drive does");
 
   printf("\n%s (%d failures)\n", fails? "FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0;

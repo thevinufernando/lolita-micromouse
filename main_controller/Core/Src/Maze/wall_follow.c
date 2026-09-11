@@ -28,7 +28,7 @@ static uint8_t usable(const ToF_Measurement_t *m)
 }
 
 
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir)
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
 {
     uint8_t left_ok  = usable(&m[TOF_LEFT]);
     uint8_t right_ok = usable(&m[TOF_RIGHT]);
@@ -109,6 +109,10 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir)
     const float left_mm  = (float)m[TOF_LEFT].distance_mm;
     const float right_mm = (float)m[TOF_RIGHT].distance_mm;
 
+    /* Set when running on ONE wall and that wall reads further than its
+     * setpoint -- the ambiguous direction. See the tilt selection below. */
+    uint8_t single_far = 0U;
+
     /* Error is POSITIVE when the robot must move LEFT, whichever reference is
      * in use, so everything downstream is direction-agnostic. */
     if (active_side == WALL_FOLLOW_BOTH) {
@@ -122,41 +126,29 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT], float dir)
         /* Reading above setpoint means too far from the LEFT wall, so move
          * left, which is positive (anticlockwise) yaw. */
         wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM;
-
-#if WALL_FOLLOW_SINGLE_ONE_SIDED
-        /* Only push AWAY from a wall that is too close. A single reading
-         * longer than the setpoint cannot tell an off-centre robot from a wall
-         * that has ended, and at a junction it is usually the latter. See
-         * control_config.h. */
-        if (wf_error_mm > 0.0f) wf_error_mm = 0.0f;
-#endif
+        single_far  = (wf_error_mm > 0.0f) ? 1U : 0U;
     }
     else {
         /* Mirrored: too far from the RIGHT wall means move right. */
         wf_error_mm = -(right_mm - WALL_FOLLOW_SETPOINT_RIGHT_MM);
-
-#if WALL_FOLLOW_SINGLE_ONE_SIDED
-        if (wf_error_mm < 0.0f) wf_error_mm = 0.0f;
-#endif
+        single_far  = (wf_error_mm < 0.0f) ? 1U : 0U;
     }
 
-    /* !! DIRECTION !! Backwards the loop is non-minimum-phase, because the
-     * sensors sit ahead of the wheel axis and swing the wrong way first. It
-     * gets its own, much smaller gain and clamp. See control_config.h. */
-    const uint8_t reverse   = (dir < 0.0f) ? 1U : 0U;
-    const float   kp        = reverse ? WALL_FOLLOW_KP_REVERSE_DEG_PER_MM
-                                      : WALL_FOLLOW_KP_DEG_PER_MM;
-    const float   max_tilt  = reverse ? WALL_FOLLOW_MAX_TILT_REVERSE_DEG
-                                      : WALL_FOLLOW_MAX_TILT_DEG;
+    /* ASYMMETRIC ON A SINGLE WALL. Pushing away from a wall that is too close
+     * is unambiguous and keeps full authority. Pulling towards one that reads
+     * far is the direction that cannot tell an off-centre robot from a wall
+     * that has ended, so it runs a smaller gain and a much tighter cap -- weak
+     * enough never to lunge, strong enough to bleed off drift. With two walls
+     * the difference resolves the ambiguity and neither applies. */
+    const float kp  = single_far ? WALL_FOLLOW_SINGLE_FAR_KP
+                                 : WALL_FOLLOW_KP_DEG_PER_MM;
+    const float cap = single_far ? WALL_FOLLOW_SINGLE_FAR_TILT_DEG
+                                 : WALL_FOLLOW_MAX_TILT_DEG;
 
-    /* The tilt that corrects this error, expressed in the TRAVEL direction.
-     * Reversing, a given tilt walks the robot the opposite way, so the demand
-     * is negated -- this is the one place that flip belongs, rather than in
-     * every caller. */
-    float tilt = dir * kp * wf_error_mm;
+    float tilt = kp * wf_error_mm;
 
-    if (tilt >  max_tilt) tilt =  max_tilt;
-    if (tilt < -max_tilt) tilt = -max_tilt;
+    if (tilt >  cap) tilt =  cap;
+    if (tilt < -cap) tilt = -cap;
 
     /* SLEW LIMIT. The value above is where the heading target should go; this
      * decides how fast it is allowed to get there.

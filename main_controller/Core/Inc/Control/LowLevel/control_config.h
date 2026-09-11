@@ -642,12 +642,21 @@
  *   have ended and the beam is catching an edge or a surface beyond it. Acting
  *   on it steers the robot hard TOWARDS something that may not be there.
  *
- * A run showed both in consecutive cells: 35 mm, a real wall much too close,
- * and 90 mm, which produced a full-scale tilt toward a wall that the open
- * opposite side says was not where the follower thought. Set to 1 to correct
- * only in the trustworthy direction when running on a single wall; the
- * two-wall path is always bidirectional and is unaffected. */
-#define WALL_FOLLOW_SINGLE_ONE_SIDED 1
+ * SO IT IS ASYMMETRIC, NOT ONE-SIDED. A hard one-sided rule was tried first
+ * and it over-corrected the problem: across five consecutive junction cells it
+ * zeroed four of the five available corrections, and the robot drifted about
+ * 4 mm per cell with nothing pushing back. It entered that stretch 5.5 mm off
+ * centre and left it 18.5 mm off, then reached 28 mm two cells later.
+ *
+ * The fix is to keep the asymmetry but make the weak direction weak rather
+ * than absent. Pushing AWAY from a close wall keeps full authority. Pulling
+ * TOWARDS a distant one runs a smaller gain and a much tighter tilt cap, so it
+ * bleeds off drift without ever lunging at something that might not be there.
+ *
+ * At the cap, one cell of travel still buys 192*sin(2.5) = 8.4 mm of
+ * correction, comfortably more than the 4 mm per cell the robot was losing. */
+#define WALL_FOLLOW_SINGLE_FAR_KP 0.20f
+#define WALL_FOLLOW_SINGLE_FAR_TILT_DEG 2.5f
 
 /* Lateral error (mm) -> commanded heading offset (deg).
  *
@@ -722,34 +731,40 @@
  * a ramp it can track. */
 #define WALL_FOLLOW_TILT_SLEW_DPS 30.0f
 
-/* ---- REVERSE. The lateral loop is a different, harder problem backwards. ----
+/* ---- WHY THERE IS NO REVERSE MOVE. Not a tuning choice. ----
  *
- * WHY IT NEEDS ITS OWN NUMBERS, and it is not just "be gentler".
+ * The side sensors are mounted at the VERY FRONT of the chassis. That makes
+ * them a long way from the wheel axis, and it decides which direction of
+ * travel they can be used for:
  *
- * The side sensors sit AHEAD of the wheel axis. Rotating the robot therefore
- * swings them sideways, and which way that helps depends on the direction of
- * travel:
+ *   FORWARDS  to move right you tilt the nose right, and the sensors -- being
+ *             at the leading end -- swing right with it. The reading improves
+ *             immediately and keeps improving. The measurement LEADS the body,
+ *             which is free phase lead and it is what makes the cascade work.
  *
- *   FORWARDS  to move right, tilt the nose right. The sensors lead the body,
- *             so the reading improves immediately and keeps improving. That
- *             is phase LEAD, and it is free stabilisation.
+ *   BACKWARDS to move right you tilt the nose LEFT, and the sensors swing LEFT,
+ *             hard, because of that same long arm. The reading says the error
+ *             got worse, so the loop tilts further, and the body only catches
+ *             up later. It is non-minimum-phase, and with the sensors this far
+ *             forward the wrong-way excursion is large enough that one cell of
+ *             travel is not long enough to recover inside.
  *
- *   BACKWARDS to move right, tilt the nose LEFT. The sensors swing LEFT, so
- *             the reading gets WORSE first and only recovers once the body
- *             has travelled far enough to catch up. The loop is
- *             non-minimum-phase, and a gain that is comfortable forwards
- *             winds itself into the wall backwards.
+ * Reducing the gain does not fix this, it only makes the loop too slow to do
+ * anything useful before the move ends. Measured: backing out of a dead end
+ * 15 mm off centre, the robot came out 26 mm off. The correction moved it the
+ * wrong way and the move finished inside that window.
  *
- * Observed: backing out of a dead end 15 mm off centre, the robot came out
- * 26 mm off -- the correction moved it the wrong way before it moved it the
- * right way, and the move ended inside that window.
+ * SO THE ROBOT DOES NOT REVERSE AT ALL, and there is no reverse move in the
+ * firmware. Backing out of a dead end was built and then removed. The whole
+ * point of it was to buy a cell of lateral correction before pivoting, and
+ * without a usable lateral loop it bought nothing: the pivot would have
+ * happened at exactly the offset it would have had anyway, one cell further
+ * back. Turning in place first is strictly better, because the forward move
+ * that follows DOES correct laterally.
  *
- * There is a geometric limit too. A tilt in a tight cell swings the corners,
- * and the chassis is large for the cell, so a correction big enough to matter
- * is also big enough to catch a wall. Backwards the useful move is a small
- * one held steadily, not a big one. */
-#define WALL_FOLLOW_KP_REVERSE_DEG_PER_MM 0.20f
-#define WALL_FOLLOW_MAX_TILT_REVERSE_DEG 3.0f
+ * If side sensors are ever added further back on the chassis, or a rear-facing
+ * pair appears, this is the note to revisit -- the objection is entirely about
+ * where the sensors are, not about reversing. */
 
 /* Slowly bleed the steady-state tilt back into the heading estimate.
  *
@@ -793,8 +808,8 @@
  * rates -- so they need the interval they are actually integrated over. The
  * bleed had been using the control period and was therefore running
  * STRAIGHT_TOF_DIVIDER times slower than its constant claimed. */
-#define WALL_FOLLOW_UPDATE_S (CONTROL_SAMPLE_TIME_S * (float)STRAIGHT_TOF_DIVIDER)
-
+#define WALL_FOLLOW_UPDATE_S                                                   \
+  (CONTROL_SAMPLE_TIME_S * (float)STRAIGHT_TOF_DIVIDER)
 
 /* =================== STRAIGHTLINE MOTION PROFILE ======================== */
 /* Same reasoning as the turn profile, and the same generator.             */
@@ -877,8 +892,9 @@
  * 87 is the mean of the ten walled stops in that run, which is a reasonable
  * starting point because the robot was aiming at cell centres. RE-MEASURE IT
  * PROPERLY: put the robot at a cell centre by hand with a wall ahead and read
- * tm_tof_front_mm. It is worth getting right; everything above depends on it. */
-#define WALL_FRONT_ALIGN_MM 87.0f
+ * tm_tof_front_mm. It is worth getting right; everything above depends on it.
+ */
+#define WALL_FRONT_ALIGN_MM 75.0f
 
 /* Only align when the front reading is at or below this.
  *
@@ -1041,26 +1057,34 @@
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */
-/* Widened again 1.5 -> 2.5, on the same architectural grounds as
- * TURN_TOLERANCE_DEG: the mechanism that absorbs the leftover exists and is
- * proven. A straight move that stops short hands the gap to the next one
- * through tm_maze_residual_cm, so position does not accumulate -- and a
- * failing move hands over nothing at all, because it aborts the run.
+/* HELD AT 1.5. It was briefly taken to 2.5 alongside the breakaway pulse and
+ * put back deliberately, and the reasoning is worth keeping.
  *
- * Kept below NAV_RESIDUAL_LIMIT_CM (3.0) on purpose: an error the carry would
- * refuse to carry is one the next move cannot absorb, and accepting it would
- * quietly break that contract.
+ * Widening the band would have made the last failure pass. It stopped 1.80 cm
+ * short, so at 2.5 it simply completes. But it completes because the band was
+ * moved to fit the failure, not because anything got better -- the robot is
+ * still stuck, and the pulse that exists to unstick it never fires, because
+ * being outside tolerance is precisely what arms it. A wider band does not
+ * solve the problem, it hides the evidence that the problem is still there.
  *
- * This is belt and braces, not the fix. The real answer to a move that stops
- * short is the breakaway pulse above; this only widens the band so a move that
- * lands near the edge is not thrown away. */
-/* Previous note: widened 0.7 -> 1.5.
+ * TURN_TOLERANCE_DEG was widened on the opposite reasoning and that difference
+ * matters. There the robot had ALREADY finished the move under control and
+ * simply stopped a few degrees out, with proven machinery downstream to absorb
+ * it. Here the robot has stopped dead and cannot restart. One is a landing
+ * slightly off the mark; the other is a failure to move at all.
+ *
+ * So this stays tight enough that a stuck robot is reported as stuck. If the
+ * pulse works, these moves complete on their own; if it does not, that shows
+ * up as a timeout with sl_breakaway_count at its limit, which is the honest
+ * answer and the one that says what to fix next.
+ *
+ * Previous note, from when it went 0.7 -> 1.5:
  *
  * There is NO SECOND CHANCE on a straight move: the profile brings the robot
  * to rest, and from rest it cannot restart at the command a sub-centimetre
  * error produces. So the move has to land inside the band first time, and a
  * band narrower than the landing scatter just guarantees a timeout. */
-#define STRAIGHT_TOLERANCE_CM 2.5f
+#define STRAIGHT_TOLERANCE_CM 1.5f
 
 /* How close (degrees of fused yaw) counts as "arrived" for turns. */
 /* WIDENED AGAIN, 2.0 -> 5.0, and this time on the architecture rather than on
