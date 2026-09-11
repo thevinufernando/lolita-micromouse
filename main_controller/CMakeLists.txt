@@ -56,6 +56,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/PID.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/EKF.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/straightline_controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/motion_profile.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/yaw_estimator.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Control/LowLevel/turn_controller.c
 
