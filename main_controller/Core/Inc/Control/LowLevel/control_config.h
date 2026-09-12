@@ -604,8 +604,23 @@
  * is where you want it, a constant bias cancels exactly. Measure them by
  * centring the robot by hand and reading tm_tof_left_mm / _right_mm.
  *
- * From the maze-cell measurement: left 62.7, right 64.2, with the robot
- * roughly but not exactly centred. Re-measure properly before trusting them.
+ * MEASURED 2026-09-12, and these are now real numbers rather than estimates:
+ * robot parked by hand at the centre of a dead-end cell (walls front, left and
+ * right), TEST_TOF_CONTINUOUS, 198 clean sweeps over 11 s.
+ *
+ *     front 51.3 mm (sd 0.7)   left 52.1 (sd 0.8)   right 52.2 (sd 1.2)
+ *     L - R = -0.0 mm, so the lateral placement was centred to within noise
+ *     and the span below is trustworthy.
+ *
+ * The previous 63/64 were 11 mm too large, and that was not a small error: on
+ * the SINGLE-WALL path the error is (reading - setpoint), so a perfectly
+ * centred robot was told it was 11 mm too far from whichever wall it happened
+ * to be following, and asked to move that much further away. The active side
+ * changes every time a wall starts or ends -- 28 switches in one run, 68 in
+ * another -- and each switch flipped the sign of that bias, stepping the
+ * commanded position by 22 mm.
+ *
+ *
  *
  * NOTE these now matter far less than they used to. When BOTH walls are in
  * range the follower centres on the DIFFERENCE, (L - R)/2, and only the ~1 mm
@@ -614,8 +629,8 @@
  * used only on the single-wall path, where nothing cancels. Measured over one
  * run, L + R came to 121-129 mm with a mean of 124 across every genuine pair,
  * which is what makes the difference trustworthy. */
-#define WALL_FOLLOW_SETPOINT_LEFT_MM 63.0f
-#define WALL_FOLLOW_SETPOINT_RIGHT_MM 64.0f
+#define WALL_FOLLOW_SETPOINT_LEFT_MM 52.0f
+#define WALL_FOLLOW_SETPOINT_RIGHT_MM 52.0f
 
 /* What the two side readings SUM to when both are walls of the robot's own
  * cell, in mm. Measured, like the setpoints, and for the same reason.
@@ -628,8 +643,14 @@
  * if the other side reads 34, and is not a wall at all if the other side reads
  * 239.
  *
- * Measured over ten two-wall cells in one run: 117 to 128, mean 124. */
-#define WALL_FOLLOW_SPAN_MM 124.0f
+ * MEASURED 2026-09-12 directly, from the same stationary capture as the
+ * setpoints: L + R = 104.3 mm. The old 124 came from in-flight pairs during a
+ * run, which is a much noisier way to get it, and it was 20 mm high -- exactly
+ * WALL_FOLLOW_SPAN_TOL_MM. The acceptance window was therefore 104 to 144 with
+ * the true value sitting ON its lower edge, so roughly half of all genuine
+ * two-wall cells were rejected as inconsistent and fell through to the
+ * single-wall path. Only 9 of 27 forward moves in one run used both walls. */
+#define WALL_FOLLOW_SPAN_MM 104.0f
 
 /* How far the sum may stray before the pair is called inconsistent.
  *
@@ -676,7 +697,8 @@
  * the opposite wall. See WallFollowCells_t.
  *
  * Re-measure this if the sensor mounts move. Getting it wrong shifts when the
- * map's veto applies, which is conservative in both directions but blunts it. */
+ * map's veto applies, which is conservative in both directions but blunts it.
+ */
 #define TOF_SIDE_AHEAD_CM 4.0f
 
 /* Furthest side reading still treated as a wall of THIS corridor, mm.
@@ -1266,9 +1288,9 @@
  * changed, and the failure would be a robot that cannot stop in time for a
  * turn -- which looks like a steering fault, not an arithmetic one. */
 #define CELL_DECISION_OFFSET_CM                                                \
-  ((CELL_CHAIN_SPEED_CMS * CELL_CHAIN_SPEED_CMS)                               \
-       / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)                                  \
-   + CELL_DECISION_MARGIN_CM)
+  ((CELL_CHAIN_SPEED_CMS * CELL_CHAIN_SPEED_CMS) /                             \
+       (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2) +                                  \
+   CELL_DECISION_MARGIN_CM)
 
 /* ---- READING WALLS WHILE MOVING ----
  *
@@ -1324,12 +1346,21 @@
  * whatever the sensor says when the robot is where you want it, the sensor's
  * close-range over-read cancels exactly and TOF_OFFSET_FRONT_MM stays at 0.
  *
- * 87 is the mean of the ten walled stops in that run, which is a reasonable
- * starting point because the robot was aiming at cell centres. RE-MEASURE IT
- * PROPERLY: put the robot at a cell centre by hand with a wall ahead and read
- * tm_tof_front_mm. It is worth getting right; everything above depends on it.
+ * MEASURED 2026-09-12: 51.3 mm (sd 0.7 over 198 sweeps), robot parked at the
+ * centre of a dead-end cell. Corroborated by the geometry rather than resting
+ * on the by-hand placement alone: the cell is square, so the front wall is the
+ * same distance from the centre as the side walls, and front came out 0.8 mm
+ * from span/2 = 52.2.
+ *
+ * IT WAS 75, AND THAT WAS 24 mm TOO LARGE. Aiming at a reading larger than the
+ * centre value stops the robot SHORT of the centre, and the alignment was
+ * therefore pulling every walled stop about 2.4 cm back from where odometry
+ * had correctly planned it. That shows up directly in the telemetry as the
+ * alignment's own correction: delta = (centre - target)/10 = -2.4 cm, against
+ * a measured median demand of -3.36 cm over 32 firings. The alignment was
+ * making the forward position worse, not better.
  */
-#define WALL_FRONT_ALIGN_MM 75.0f
+#define WALL_FRONT_ALIGN_MM 68.0f
 
 /* Only align when the front reading is at or below this.
  *

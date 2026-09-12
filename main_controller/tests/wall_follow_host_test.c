@@ -42,7 +42,17 @@ int main(void){
   /* positive error must always mean "the robot needs to move LEFT" */
   CHECK(err_both(80,50)>0, "both: closer to the right wall -> move left");
   CHECK(err_both(50,80)<0, "both: closer to the left wall  -> move right");
-  CHECK(fabsf(err_both(62,62)-0.5f)<0.01f, "both: equal readings -> ~the sensor trim");
+  /* Equal readings leave exactly the trim between the two sensors, whatever
+     that trim happens to measure. Pinned to the constants rather than to a
+     literal: the setpoints are measured values and they move. */
+  CHECK(fabsf(err_both(62,62)
+              - (WALL_FOLLOW_SETPOINT_RIGHT_MM - WALL_FOLLOW_SETPOINT_LEFT_MM)*0.5f)
+        < 0.01f, "both: equal readings -> ~the sensor trim");
+  /* The setpoints and the span are two views of the SAME measurement, so a
+     robot centred by the setpoints must be accepted by the pair test. Guards
+     against one being re-measured and the other left behind. */
+  CHECK(pair_ok(WALL_FOLLOW_SETPOINT_LEFT_MM, WALL_FOLLOW_SETPOINT_RIGHT_MM),
+        "setpoints and span must describe the same cell");
   /* Single wall corrects only AWAY from a wall that is too close; a long
      reading is ambiguous at a junction and must produce no command. */
   CHECK(err_left(40)<0,  "left only: too close to left -> move right");
