@@ -53,6 +53,51 @@ static void recordCell(float move_error_cm, uint8_t move_ok,
 }
 
 
+/* Hand the wall follower what the map knows about the two cells this move
+ * touches, so it can tell a reference that has ended from a robot that has
+ * drifted.
+ *
+ * Called immediately before each forward move, from the pose the move starts
+ * at -- which is why it reads mouse_x/y/dir directly rather than taking them:
+ * any disagreement between the pose used here and the pose the move actually
+ * begins from would silently veto the wrong cell's walls.
+ *
+ * An unknown next cell leaves next_known at 0, which contributes no opinion
+ * and leaves the follower exactly as it behaves without any of this. That is
+ * the common case on a first pass and it is meant to be. */
+static void setCellContext(void)
+{
+    WallFollowCells_t c;
+    uint8_t f;
+
+    c.this_known = MazeMap_IsKnown(mouse_x, mouse_y);
+    MazeMap_CellWalls(mouse_x, mouse_y, mouse_dir, &f, &c.left_this, &c.right_this);
+
+    int16_t nx = 0, ny = 0;
+
+    c.left_next  = 0U;
+    c.right_next = 0U;
+    c.next_known = 0U;
+
+    if (MazeMap_NextCell(mouse_x, mouse_y, mouse_dir, &nx, &ny)
+        && MazeMap_IsKnown(nx, ny)) {
+
+        /* Same heading: the robot does not turn during a forward move, so the
+         * next cell's left and right are the same sides its own are. */
+        MazeMap_CellWalls(nx, ny, mouse_dir, &f, &c.left_next, &c.right_next);
+        c.next_known = 1U;
+    }
+
+    /* The sensors lead the axle, so they cross into the next cell well before
+     * the robot does. Derived rather than configured: it is a consequence of
+     * the cell pitch and where the sensors are bolted, and two constants that
+     * can disagree about the same fact is one too many. */
+    c.cross_cm = NAV_CELL_CM * 0.5f - TOF_SIDE_AHEAD_CM;
+
+    WallFollow_SetCells(&c);
+}
+
+
 /* Come to rest, read the walls, and write them into the map.
  *
  * Deliberately does NOT log. The record has to carry the action chosen from
@@ -262,6 +307,8 @@ void Navigator_Run(void)
             /* Aim at one cell pitch PLUS whatever the last move left short,
              * so the shortfall is corrected instead of accumulating. */
             const float target_cm = NAV_CELL_CM + tm_maze_residual_cm;
+
+            setCellContext();
 
             ok = runForwardFused(target_cm);
 

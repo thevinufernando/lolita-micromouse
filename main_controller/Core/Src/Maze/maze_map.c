@@ -3,6 +3,21 @@
 uint8_t v_walls[MAZE_SIZE][MAZE_SIZE + 1];
 uint8_t h_walls[MAZE_SIZE + 1][MAZE_SIZE];
 
+/* Cells whose walls have actually been read, one bit each.
+ *
+ * WITHOUT THIS THE MAP CANNOT SAY "I DO NOT KNOW". MazeMap_UpdateWalls() only
+ * ever SETS a wall to 1, so a zero means "no wall has been seen here" -- which
+ * is indistinguishable from "this side is open". That is harmless while the
+ * map is only ever asked about cells the robot has stood in, and wrong the
+ * moment anything reasons about a cell ahead: every unexplored cell would read
+ * as wide open on all four sides.
+ *
+ * 16x16 bits is 32 bytes, which is cheaper than the confusion. */
+static uint8_t s_known[(MAZE_SIZE * MAZE_SIZE + 7) / 8];
+
+/* Defined further down, with the wall accessors it was written for. */
+static uint8_t inBounds(int16_t x, int16_t y);
+
 int16_t   mouse_x;
 int16_t   mouse_y;
 Direction mouse_dir;
@@ -34,9 +49,23 @@ void MazeMap_Init(void)
         h_walls[MAZE_SIZE][x] = 1U;   /* north edge */
     }
 
+    for (uint16_t i = 0; i < sizeof s_known; i++) {
+        s_known[i] = 0U;
+    }
+
     mouse_x = 0;
     mouse_y = 0;
     mouse_dir = NORTH;
+}
+
+
+uint8_t MazeMap_IsKnown(int16_t x, int16_t y)
+{
+    if (!inBounds(x, y)) return 0U;
+
+    const uint16_t bit = (uint16_t)(y * MAZE_SIZE + x);
+
+    return (s_known[bit >> 3] >> (bit & 7U)) & 1U;
 }
 
 
@@ -46,6 +75,16 @@ void MazeMap_Init(void)
  * a silent-divergence risk for no benefit. */
 void MazeMap_UpdateWalls(uint8_t front, uint8_t left, uint8_t right)
 {
+    /* Marked here rather than on arrival because THIS is the call that means
+     * the cell has been looked at. A pose can be set or advanced without any
+     * walls being read -- after a failed move, for instance -- and a cell
+     * counted as known on that basis would hand out wall data nobody measured.
+     */
+    if (inBounds(mouse_x, mouse_y)) {
+        const uint16_t bit = (uint16_t)(mouse_y * MAZE_SIZE + mouse_x);
+        s_known[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
+    }
+
     if (front) {
         if (mouse_dir == NORTH)      h_walls[mouse_y + 1][mouse_x] = 1U;
         else if (mouse_dir == EAST)  v_walls[mouse_y][mouse_x + 1] = 1U;
@@ -78,16 +117,27 @@ void MazeMap_SetPose(int16_t x, int16_t y, Direction dir)
 }
 
 
-uint8_t MazeMap_Advance(void)
+uint8_t MazeMap_NextCell(int16_t x, int16_t y, Direction dir,
+                         int16_t *nx, int16_t *ny)
 {
-    switch (mouse_dir) {
-        case NORTH: if (mouse_y >= MAZE_SIZE - 1) return 0U; mouse_y++; break;
-        case EAST:  if (mouse_x >= MAZE_SIZE - 1) return 0U; mouse_x++; break;
-        case SOUTH: if (mouse_y <= 0)             return 0U; mouse_y--; break;
-        case WEST:  if (mouse_x <= 0)             return 0U; mouse_x--; break;
+    switch (dir) {
+        case NORTH: if (y >= MAZE_SIZE - 1) return 0U; y++; break;
+        case EAST:  if (x >= MAZE_SIZE - 1) return 0U; x++; break;
+        case SOUTH: if (y <= 0)             return 0U; y--; break;
+        case WEST:  if (x <= 0)             return 0U; x--; break;
         default: return 0U;
     }
+
+    if (nx) *nx = x;
+    if (ny) *ny = y;
+
     return 1U;
+}
+
+
+uint8_t MazeMap_Advance(void)
+{
+    return MazeMap_NextCell(mouse_x, mouse_y, mouse_dir, &mouse_x, &mouse_y);
 }
 
 
@@ -119,3 +169,36 @@ uint8_t MazeMap_WallSouth(int16_t x, int16_t y)
 
 uint8_t MazeMap_WallWest(int16_t x, int16_t y)
 { return inBounds(x, y) ? v_walls[y][x] : 1U; }
+
+
+/* The read counterpart of MazeMap_UpdateWalls(), and deliberately its mirror
+ * image: same cell, same heading, same three robot-relative answers.
+ *
+ * It lives here rather than in the navigator because the direction-to-compass
+ * arithmetic is the one thing in this module that is easy to get subtly wrong
+ * and impossible to notice -- a left/right swap produces a map that is
+ * plausible, self-consistent and mirrored. One copy, next to the one that
+ * writes it, is the whole point.
+ *
+ * Outside the maze every side reads as walled, matching the accessors above. */
+void MazeMap_CellWalls(int16_t x, int16_t y, Direction dir,
+                       uint8_t *front, uint8_t *left, uint8_t *right)
+{
+    uint8_t n = MazeMap_WallNorth(x, y);
+    uint8_t e = MazeMap_WallEast(x, y);
+    uint8_t s = MazeMap_WallSouth(x, y);
+    uint8_t w = MazeMap_WallWest(x, y);
+
+    uint8_t f_v, l_v, r_v;
+
+    switch (dir) {
+        case NORTH: f_v = n; l_v = w; r_v = e; break;
+        case EAST:  f_v = e; l_v = n; r_v = s; break;
+        case SOUTH: f_v = s; l_v = e; r_v = w; break;
+        default:    f_v = w; l_v = s; r_v = n; break;   /* WEST */
+    }
+
+    if (front) *front = f_v;
+    if (left)  *left  = l_v;
+    if (right) *right = r_v;
+}

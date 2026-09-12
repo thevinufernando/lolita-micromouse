@@ -659,6 +659,26 @@
  * everything beyond. A refused reading is not a failure; the follower simply
  * holds heading open-loop, which is the right answer when it cannot see a wall
  * it trusts. */
+/* How far AHEAD OF THE AXLE the side sensors sit, cm. Measured, not chosen.
+ *
+ * This is the number that decides when the side sensors stop looking at the
+ * cell the robot is leaving and start looking at the one it is entering. They
+ * lead the axle, so they cross the boundary at
+ *
+ *     NAV_CELL_CM / 2 - TOF_SIDE_AHEAD_CM
+ *
+ * which at the current pitch is 5.6 cm of a 19.2 cm move. The side sensors
+ * therefore spend more than two thirds of every move reporting on the NEXT
+ * cell, and until this was written down nothing in the firmware knew it.
+ *
+ * The consequence was a run where the wall follower tracked a wall that had
+ * already ended, read its recession as the robot drifting, and steered into
+ * the opposite wall. See WallFollowCells_t.
+ *
+ * Re-measure this if the sensor mounts move. Getting it wrong shifts when the
+ * map's veto applies, which is conservative in both directions but blunts it. */
+#define TOF_SIDE_AHEAD_CM 4.0f
+
 #define WALL_FOLLOW_USABLE_MAX_MM 95U
 
 /* ONE-SIDED SINGLE-WALL CORRECTION.
@@ -1103,6 +1123,35 @@
  * side, so no extra logic is needed to decide whether the wall is in the cell
  * the robot is entering. */
 #define WALL_FRONT_ALIGN_RANGE_MM 350U
+
+/* Wall distance the alignment would PREFER to fire at, mm.
+ *
+ * THE OLD WINDOW FIRED AT THE WORST POSSIBLE MOMENT. It looked only during the
+ * first quarter of the move, which is exactly when the front wall is furthest
+ * away and its reading least accurate. Five percent of 350 mm is 17 mm, and
+ * that error goes straight into the endpoint.
+ *
+ * Worse, the two conditions fought: the window is at the start of the move and
+ * the wall comes into range at the end of it. One measured move began with the
+ * wall at 407 mm and the window shut at 5.1 cm of travel with the wall still
+ * 356 mm off -- it missed by six millimetres of sensor reach. About half the
+ * forward moves in that run could never align at all.
+ *
+ * So the alignment now waits for a reading worth using, and falls back on a
+ * distant one only when it is running out of room. 200 mm is comfortably
+ * inside the sensor's accurate band and is reached about halfway through a
+ * cell. */
+#define WALL_FRONT_ALIGN_BEST_MM 200U
+
+/* Margin on top of the braking distance before the alignment gives up, cm.
+ *
+ * The real limit on firing late is physical, not a fraction of the move: the
+ * robot must still be able to decelerate to the new endpoint from the speed it
+ * is currently doing. That distance is v^2 / (2 * accel), which the code
+ * computes from the live reference velocity rather than assuming cruise. This
+ * is the cushion on top of it, so the retarget never lands on a profile with
+ * nothing left but a maximum-effort stop. */
+#define WALL_FRONT_ALIGN_ROOM_CM 1.5f
 
 /* Largest retarget the alignment may apply, in cm.
  *

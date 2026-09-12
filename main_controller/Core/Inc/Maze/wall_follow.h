@@ -74,9 +74,46 @@ extern volatile uint32_t wf_switches; /* times the active side changed */
  * mechanical and wants fixing rather than trimming out. */
 extern volatile float wf_integral;
 
+/* WHAT THE MAP KNOWS ABOUT THE TWO CELLS THIS MOVE TOUCHES.
+ *
+ * The side sensors sit at the very FRONT of the chassis, about TOF_SIDE_AHEAD_CM
+ * ahead of the axle, so they cross the cell boundary well before the robot
+ * does -- at cross_cm into the move, which on the current geometry is under a
+ * third of it. For the rest of every move they are looking at the cell being
+ * ENTERED, not the one being left.
+ *
+ * Nothing in this module knew that, and it cost a run. The loop tracked the
+ * right wall of the cell it was leaving for 3.4 cm past the boundary, read that
+ * wall's recession as the robot drifting, and leaned into the opposite wall to
+ * correct something that was not happening.
+ *
+ * THE MAP MAY ONLY WITHHOLD TRUST, NEVER ADD IT. A reference is dropped when
+ * the applicable cell is known and records no wall on that side. It is never
+ * invented: a wall the map believes in but the sensor cannot see is still not
+ * followed. That direction is the whole safety argument -- a wrong pose then
+ * makes this loop more cautious rather than more confident, and this robot has
+ * driven off the edge of its own map before.
+ *
+ * An unknown cell contributes no opinion, so a cleared context vetoes nothing
+ * and behaves exactly as this module did before it existed. */
+typedef struct {
+  uint8_t left_this,  right_this;  /* walls of the cell being left    */
+  uint8_t left_next,  right_next;  /* walls of the cell being entered */
+  uint8_t this_known, next_known;  /* 0 = that cell has no opinion    */
+  float   cross_cm;                /* travel at which the sensors cross */
+} WallFollowCells_t;
+
+/* Set the context for the move about to start, or clear it with NULL.
+ *
+ * The NAVIGATOR calls this, because the navigator is what owns the map. The
+ * straight-line controller stays ignorant of the maze, which matters because
+ * the test harness drives it directly. */
+void WallFollow_SetCells(const WallFollowCells_t *cells);
+
 /* Per-move reset: forgets the active side and the current tilt, and KEEPS what
  * the loop has learned about the robot. Call at the start of a move and any
- * time continuity is broken. */
+ * time continuity is broken. Also clears the cell context, so a move that
+ * never sets one cannot inherit the previous move's. */
 void WallFollow_Reset(void);
 
 /* Full reset, including the learned lateral bias and drift. Call ONCE at the
@@ -93,6 +130,9 @@ void WallFollow_ResetBias(void);
  * constants claim. The constant survives as the nominal value the host test
  * and the notes reason about, and as the floor this is clamped to.
  *
+ * `travelled_cm` is how far into the move the robot is, and decides which of
+ * the two cells in the context the side sensors are currently looking at.
+ *
  * Returns the heading offset in degrees to ADD to the heading target:
  * positive tilts the robot anticlockwise.
  *
@@ -105,7 +145,7 @@ void WallFollow_ResetBias(void);
  * than a failure -- the robot then holds its heading target open-loop until a
  * wall comes back. */
 float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
-                        float dt_s);
+                        float dt_s, float travelled_cm);
 
 /* The integral, in degrees, to be ADDED TO THE HEADING TARGET by the caller.
  *

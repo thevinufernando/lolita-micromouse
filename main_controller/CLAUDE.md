@@ -528,6 +528,64 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (newest) - Align late, and tell the follower where it is
+
+Two faults from one move in the last run.
+
+**The alignment never fired, and never could have.** It looked only during the
+first quarter of the move -- exactly when the front wall is furthest and its
+reading worst. That move began with the wall at 407 mm and the window shut at
+5.1 cm of travel with the wall still 356 mm off, six millimetres outside range.
+About half the forward moves in that run could never align at all.
+
+The real limit on firing late is physical, not a fraction: there must be room
+to decelerate to the new endpoint from the speed the reference is doing. So the
+window is gone and the gate is now `remaining >= v^2/(2a) + WALL_FRONT_ALIGN_ROOM_CM`,
+with the alignment preferring to wait until the wall is inside
+`WALL_FRONT_ALIGN_BEST_MM` and falling back on a distant reading only when it
+is running out of room.
+
+That needs a profile that starts at the reference's current velocity, so
+`MotionProfile_InitFrom()` was added and `MotionProfile_Init()` became a
+`v0 = 0` wrapper over it -- deliberately, so an error in the general form shows
+up in the existing rest-to-rest tests rather than only in the arena. It returns
+0 when the move is shorter than the braking distance and builds the hardest
+stop instead, because a reference that reverses to make the arithmetic work
+would drive the robot backwards.
+
+**The side sensors are 4 cm ahead of the axle (measured), so they cross the
+cell boundary at 5.6 cm of a 19.2 cm move.** They spend more than two thirds of
+every move looking at the cell being ENTERED, and nothing in the firmware knew
+it. In the failing move the follower tracked the right wall of the cell it was
+leaving for 3.4 cm past the boundary, read that wall's recession as the robot
+drifting, and leaned 4.68 degrees into the opposite wall. The left sensor
+touched it. Lateral error sat between -21 and -26 mm for all 200 cycles and
+never improved, even with the tilt pinned at the clamp for 63 of them.
+
+`WallFollowCells_t` now carries what the map knows about both cells plus the
+crossing distance, set by the navigator before each forward move and cleared by
+`WallFollow_Reset()`.
+
+**THE MAP MAY ONLY WITHHOLD TRUST, NEVER ADD IT.** A reference is dropped when
+the applicable cell is surveyed and records no wall there. A wall the map
+believes in but the sensor cannot see is never conjured into one. That
+direction is the whole safety argument: a wrong pose makes the loop more
+cautious rather than more confident, and this robot has driven off the edge of
+its own map before. The host test asserts no combination of inputs can create a
+reference.
+
+This needed the map to be able to say "I do not know". `MazeMap_UpdateWalls()`
+only ever sets a wall to 1, so a zero meant "no wall seen here", which reads
+identically to open -- every unexplored cell would have reported as wide open
+and vetoed everything. A 32-byte visited bitmap and `MazeMap_IsKnown()` close
+that. `MazeMap_CellWalls()` is the read mirror of `UpdateWalls`, kept beside it
+because a left/right swap in that arithmetic produces a map that is plausible,
+self-consistent and mirrored. `MazeMap_Advance()` is now written in terms of a
+new `MazeMap_NextCell()` so the two cannot disagree about where the edge is.
+
+An unsurveyed next cell contributes no opinion, which is the common case on a
+first pass and leaves the follower exactly as it behaved before.
+
 ### 2026-09-12 (head) - The alignment was commanding the robot backwards
 
 The round-robin poll did what it was meant to: every cycle 10-13 ms, nothing

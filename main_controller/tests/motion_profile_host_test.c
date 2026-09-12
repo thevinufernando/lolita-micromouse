@@ -159,6 +159,107 @@ int main(void)
               longer, 1e-3f);
     }
 
+    /* ---- STARTING AT SPEED ----
+     *
+     * The retarget case. A move already at cruise gets a new endpoint, and the
+     * new profile has to pick up the velocity the old reference actually has.
+     * Rebuilding from rest instead drops the feedforward to zero mid-move,
+     * which commands a brake and a fresh start. */
+    {
+        const float V = 10.0f, A = 20.0f, v0 = 10.0f, D = 9.6f;
+        MotionProfile_t q;
+
+        check_true("a move that fits reports that it fits",
+                   MotionProfile_InitFrom(&q, D, v0, V, A) == 1U, "feasible");
+        check("it starts at v0, not at rest",
+              MotionProfile_Velocity(&q, 0.0f), v0, 1e-4f);
+        check("it still ends at rest",
+              MotionProfile_Velocity(&q, q.t_total), 0.0f, 1e-4f);
+        check("and lands exactly on target",
+              MotionProfile_Position(&q, q.t_total), D, 1e-4f);
+        check("velocity integrates to position",
+              integrate(&q, q.t_total, 1e-6f), D, 0.01f);
+
+        /* Never faster than asked, whatever shape it came out. */
+        int over = 0;
+        for (float t = 0.0f; t <= q.t_total; t += q.t_total / 500.0f)
+            if (MotionProfile_Velocity(&q, t) > V + 1e-3f) over = 1;
+        check_true("never exceeds v_max", !over, "within limit");
+
+        /* Starting at speed must be QUICKER than starting from rest. If it is
+           not, the v_start term is not reaching the position maths. */
+        MotionProfile_t r;
+        MotionProfile_Init(&r, D, V, A);
+        check_true("and beats the same move started from rest",
+                   q.t_total < r.t_total, "faster");
+    }
+
+    /* ---- THE RETARGET IS CONTINUOUS IN BOTH POSITION AND VELOCITY ----
+     *
+     * This is the property the whole thing exists for. A retarget at the
+     * halfway point of a cell must not show up as a step in either. */
+    {
+        const float V = 10.0f, A = 20.0f;
+        MotionProfile_t a_p;
+        MotionProfile_Init(&a_p, 19.2f, V, A);
+
+        const float t_cut  = a_p.t_total * 0.5f;
+        const float pos_at = MotionProfile_Position(&a_p, t_cut);
+        const float vel_at = MotionProfile_Velocity(&a_p, t_cut);
+        const float new_end = 19.2f - 2.70f;      /* the measured correction */
+
+        MotionProfile_t b_p;
+        check_true("a halfway retarget fits",
+                   MotionProfile_InitFrom(&b_p, new_end - pos_at, vel_at, V, A)
+                   == 1U, "feasible");
+        check("position is continuous across the retarget",
+              pos_at + MotionProfile_Position(&b_p, 0.0f), pos_at, 1e-5f);
+        check("velocity is continuous across the retarget",
+              MotionProfile_Velocity(&b_p, 0.0f), vel_at, 1e-4f);
+        check("and it lands on the corrected endpoint",
+              pos_at + MotionProfile_Position(&b_p, b_p.t_total), new_end, 1e-3f);
+
+        /* Rebuilding from rest is what this replaced: same endpoint, but the
+           feedforward collapses. Asserted so the old behaviour cannot return
+           quietly. */
+        MotionProfile_t c_p;
+        MotionProfile_Init(&c_p, new_end - pos_at, V, A);
+        check_true("rebuilding from rest does drop the feedforward",
+                   MotionProfile_Velocity(&c_p, 0.0f) < 0.5f * vel_at,
+                   "reproduces the defect");
+    }
+
+    /* ---- NO ROOM TO STOP ----
+     *
+     * Asked to finish nearer than the braking distance. It must say so, and
+     * what it builds must still be sane -- a reference that reverses to make
+     * the arithmetic work would drive the robot backwards. */
+    {
+        const float V = 10.0f, A = 20.0f, v0 = 10.0f;
+        const float d_stop = (v0 * v0) / (2.0f * A);      /* 2.5 cm */
+        MotionProfile_t q;
+
+        check_true("a move shorter than the braking distance is refused",
+                   MotionProfile_InitFrom(&q, 0.5f * d_stop, v0, V, A) == 0U,
+                   "reported");
+        check("and the profile built instead is the hardest stop",
+              MotionProfile_Position(&q, q.t_total), d_stop, 1e-3f);
+        check_true("which never runs backwards",
+                   MotionProfile_Position(&q, q.t_total * 0.5f) > 0.0f,
+                   "monotonic");
+        check("starting, as it must, at v0",
+              MotionProfile_Velocity(&q, 0.0f), v0, 1e-4f);
+    }
+
+    /* A v0 pointing the wrong way cannot be modelled and must be read as rest,
+       not as a profile whose velocity contradicts the caller's. */
+    {
+        MotionProfile_t q;
+        (void)MotionProfile_InitFrom(&q, 10.0f, -5.0f, 10.0f, 20.0f);
+        check("a v0 opposing the move is treated as rest",
+              MotionProfile_Velocity(&q, 0.0f), 0.0f, 1e-6f);
+    }
+
     printf("\n===== %s (%d failures) =====\n\n",
            failures ? "FAILURES" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;

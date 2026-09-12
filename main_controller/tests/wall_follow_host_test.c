@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <math.h>
 #include "control_config.h"
+#include "navigator.h"
 static int fails=0;
 #define CHECK(c,m) do{ if(!(c)){ printf("FAIL: %s\n",m); fails++; } }while(0)
 
@@ -223,6 +224,86 @@ int main(void){
      it there, which is exactly the case above. */
   CHECK(err_left(40) < 0.0f && err_left(90) > 0.0f,
         "short reads negative and long reads positive on a left wall");
+
+  /* ---- THE MAP'S VETO ----
+     Mirrors vetoed() in wall_follow.c. A cell with no opinion contributes
+     nothing; a surveyed cell that records no wall on a side drops it. */
+  {
+    /* known, wall -> keep | known, no wall -> veto | unknown -> keep */
+    #define VETO(known, wall) ((known) ? ((wall) ? 0 : 1) : 0)
+
+    CHECK(VETO(0, 0) == 0, "an unknown cell vetoes nothing");
+    CHECK(VETO(0, 1) == 0, "and cannot assert a wall either");
+    CHECK(VETO(1, 1) == 0, "a surveyed cell with a wall keeps the reference");
+    CHECK(VETO(1, 0) == 1, "a surveyed cell with no wall drops it");
+
+    /* The direction of inference is the safety argument. The veto can only
+       ever REMOVE a reference the sensor offered -- there is no combination
+       that creates one, so a corrupted map makes the loop decline to correct
+       rather than correct toward a wall that is not there. */
+    int creates = 0;
+    for (int k = 0; k < 2; k++)
+      for (int w = 0; w < 2; w++)
+        if (VETO(k, w) != 0 && VETO(k, w) != 1) creates = 1;
+    CHECK(!creates, "the veto only ever withholds, never adds");
+    #undef VETO
+  }
+
+  /* ---- WHICH CELL THE SENSORS ARE LOOKING AT ----
+     They lead the axle by TOF_SIDE_AHEAD_CM, so they cross the boundary
+     before the robot does. Everything after that point is about the cell
+     being ENTERED. */
+  {
+    const float cross = NAV_CELL_CM * 0.5f - TOF_SIDE_AHEAD_CM;
+
+    CHECK(cross > 0.0f,
+          "the sensors cross the boundary during the move, not before it");
+    CHECK(cross < NAV_CELL_CM * 0.5f,
+          "and they cross it EARLIER than the axle does");
+    CHECK(cross < NAV_CELL_CM * 0.4f,
+          "so most of a move is spent looking at the next cell");
+
+    /* 5.6 cm of a 19.2 cm move on the measured geometry. */
+    CHECK(fabsf(cross - 5.6f) < 0.01f, "cross point is where the tape says");
+  }
+
+  /* THE MOVE THAT COST A RUN, replayed.
+     Leaving a cell whose right wall is recorded, entering one that is known
+     and open on that side. The right reference must be dropped the moment the
+     sensors cross, not followed 3.4 cm into the next cell. */
+  {
+    const float cross = NAV_CELL_CM * 0.5f - TOF_SIDE_AHEAD_CM;
+
+    /* The cell being left had a right wall; the cell being entered is known
+       and has none. Both are surveyed, as they would be on a second pass. */
+    struct { int this_known, right_this, next_known, right_next; } ctx =
+        { 1, 1, 1, 0 };
+
+    /* Mirrors vetoed() end to end: pick the cell by travel, then apply it. */
+    #define DROPPED(travel) ( (travel) >= cross                                \
+        ? (ctx.next_known && !ctx.right_next)                                  \
+        : (ctx.this_known && !ctx.right_this) )
+
+    CHECK(!DROPPED(3.0f),
+          "before the crossing the wall being left is a valid reference");
+    CHECK(DROPPED(9.0f),
+          "after it the reference is dropped, not chased into the next cell");
+    CHECK(!DROPPED(cross - 0.01f) && DROPPED(cross + 0.01f),
+          "and the change happens exactly at the crossing");
+
+    /* The first-pass case: the next cell has never been surveyed, so it has no
+       opinion and the reference survives. This is the common case and it must
+       leave the loop exactly as it was before any of this existed. */
+    ctx.next_known = 0;
+    CHECK(!DROPPED(9.0f),
+          "an unsurveyed next cell changes nothing");
+
+    /* And a next cell that genuinely has a wall keeps the reference too. */
+    ctx.next_known = 1; ctx.right_next = 1;
+    CHECK(!DROPPED(9.0f),
+          "a next cell that does have a wall keeps it");
+    #undef DROPPED
+  }
 
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

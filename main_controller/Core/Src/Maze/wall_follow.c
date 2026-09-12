@@ -11,6 +11,10 @@ volatile float    wf_integral;
 
 static uint8_t active_side = WALL_FOLLOW_NONE;
 
+/* What the map knows about the two cells this move touches. Zeroed means
+ * neither cell has an opinion, which vetoes nothing. */
+static WallFollowCells_t s_cells;
+
 /* Integral of the lateral error, in degrees. It is NOT part of the tilt: it is
  * added to the heading TARGET, outside the tilt clamp, and reaches the
  * controller through WallFollow_GetDriftDeg(). wf_drift_deg holds it.
@@ -32,6 +36,53 @@ void WallFollow_Reset(void)
     wf_side      = WALL_FOLLOW_NONE;
     wf_error_mm  = 0.0f;
     wf_tilt_deg  = 0.0f;
+
+    /* The context belongs to a move. Keeping it would let a move that never
+     * set one inherit the previous move's cells, and after a pivot those
+     * describe walls that are no longer on the sides they used to be. */
+    WallFollow_SetCells(0);
+}
+
+
+void WallFollow_SetCells(const WallFollowCells_t *cells)
+{
+    if (cells) {
+        s_cells = *cells;
+    } else {
+        s_cells.left_this  = 0U; s_cells.right_this = 0U;
+        s_cells.left_next  = 0U; s_cells.right_next = 0U;
+        s_cells.this_known = 0U; s_cells.next_known = 0U;
+        s_cells.cross_cm   = 0.0f;
+    }
+}
+
+
+/* Does the map contradict a reading on this side, right now?
+ *
+ * Only ever WITHHOLDS. A cell the map has not read has no opinion, and a wall
+ * the map believes in but the sensor cannot see is not conjured into one --
+ * this returns 1 only when the applicable cell has genuinely been surveyed and
+ * genuinely recorded no wall there. Everything else is 0.
+ *
+ * Which cell is "applicable" is decided by how far into the move the robot is,
+ * because the sensors lead the axle by TOF_SIDE_AHEAD_CM and cross into the
+ * next cell long before the body does. */
+static uint8_t vetoed(uint8_t want_left, float travelled_cm)
+{
+    const uint8_t looking_ahead = (travelled_cm >= s_cells.cross_cm) ? 1U : 0U;
+
+    const uint8_t known = looking_ahead ? s_cells.next_known
+                                        : s_cells.this_known;
+
+    if (!known) {
+        return 0U;
+    }
+
+    const uint8_t wall = want_left
+        ? (looking_ahead ? s_cells.left_next  : s_cells.left_this)
+        : (looking_ahead ? s_cells.right_next : s_cells.right_this);
+
+    return wall ? 0U : 1U;
 }
 
 
@@ -84,10 +135,10 @@ static uint8_t usable(const ToF_Measurement_t *m)
 
 
 float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
-                        float dt_s)
+                        float dt_s, float travelled_cm)
 {
-    uint8_t left_ok  = usable(&m[TOF_LEFT]);
-    uint8_t right_ok = usable(&m[TOF_RIGHT]);
+    uint8_t left_ok  = usable(&m[TOF_LEFT])  && !vetoed(1U, travelled_cm);
+    uint8_t right_ok = usable(&m[TOF_RIGHT]) && !vetoed(0U, travelled_cm);
 
     /* BOTH WALLS BEAT EITHER ONE, and it is not a small difference.
      *

@@ -87,6 +87,14 @@ void MazeMap_SetPose(int16_t x, int16_t y, Direction dir);
  * ignores this is not tracking the robot, it is tracking a fiction. */
 uint8_t MazeMap_Advance(void);
 
+/* The cell one step in `dir` from (x, y), without moving the mouse.
+ *
+ * Returns 0 when that step would leave the maze, in which case the outputs are
+ * untouched -- the same contract as MazeMap_Advance(), which is now written in
+ * terms of this so the two can never disagree about where the edge is. */
+uint8_t MazeMap_NextCell(int16_t x, int16_t y, Direction dir,
+                         int16_t *nx, int16_t *ny);
+
 void MazeMap_TurnLeft(void);
 void MazeMap_TurnRight(void);
 
@@ -95,5 +103,26 @@ uint8_t MazeMap_WallNorth(int16_t x, int16_t y);
 uint8_t MazeMap_WallEast(int16_t x, int16_t y);
 uint8_t MazeMap_WallSouth(int16_t x, int16_t y);
 uint8_t MazeMap_WallWest(int16_t x, int16_t y);
+
+/* Has this cell's walls actually been READ?
+ *
+ * MazeMap_UpdateWalls() only ever sets a wall to 1, so a zero from the
+ * accessors above means "no wall seen here", which reads identically to "this
+ * side is open". That is fine for a cell the robot has stood in and wrong for
+ * any cell ahead of it: an unexplored cell otherwise reports as wide open on
+ * all four sides. Anything reasoning about a cell it has not visited must ask
+ * this first. */
+uint8_t MazeMap_IsKnown(int16_t x, int16_t y);
+
+/* The three robot-relative walls of any cell, for a robot facing `dir`.
+ *
+ * The exact mirror of MazeMap_UpdateWalls(), and kept beside it so the
+ * direction-to-compass arithmetic exists once. Getting a left/right swap wrong
+ * here would produce a map that is plausible, self-consistent and mirrored,
+ * which is the kind of bug that survives a long time.
+ *
+ * Any pointer may be NULL. Outside the maze every side reads as walled. */
+void MazeMap_CellWalls(int16_t x, int16_t y, Direction dir,
+                       uint8_t *front, uint8_t *left, uint8_t *right);
 
 #endif /* MAZE_MAP_H */

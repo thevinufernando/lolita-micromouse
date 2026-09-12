@@ -57,17 +57,40 @@ typedef struct {
   float sign;     /* +1 or -1; the profile itself is computed on |total| */
   float distance; /* |total|                                            */
   float accel;    /* units/s^2, positive                                */
+  float v_start;  /* speed at t = 0; zero for a move that starts at rest */
   float v_peak;   /* actually reached; < v_max when the move is short   */
-  float t_ramp;   /* per ramp, both ends the same                       */
+  float t_ramp;   /* ACCELERATION phase only -- zero when already fast  */
   float t_cruise; /* zero for a triangular profile                      */
+  float t_decel;  /* DECELERATION phase; equals t_ramp only when v_start
+                   * is zero, which is why the two are separate fields  */
   float t_total;
 } MotionProfile_t;
 
-/* Build a profile. `total` is signed; `v_max` and `accel` must be positive.
- * A zero or degenerate request yields a profile of zero duration that reports
- * position `total` and velocity 0 at every time, so callers do not need a
- * special case for it. */
+/* Build a profile that starts from REST. `total` is signed; `v_max` and
+ * `accel` must be positive. A zero or degenerate request yields a profile of
+ * zero duration that reports position `total` and velocity 0 at every time, so
+ * callers do not need a special case for it. */
 void MotionProfile_Init(MotionProfile_t *p, float total, float v_max, float accel);
+
+/* Build a profile that starts at speed `v0`, and say whether it fits.
+ *
+ * THIS EXISTS FOR RETARGETING MID-MOVE. The front-wall alignment changes a
+ * move's endpoint once it can see the wall, and the new profile has to pick up
+ * where the old reference actually is -- at cruise, not at rest. Rebuilding
+ * from rest instead drops the velocity feedforward to zero, which commands a
+ * brake and a fresh start in the middle of a move the robot is already making.
+ *
+ * `v0` is signed and is taken in the direction of travel; a `v0` that opposes
+ * `total` is treated as zero, because a profile cannot model reversing first.
+ *
+ * RETURNS 0 WHEN THE MOVE DOES NOT FIT -- when `total` is shorter than
+ * v0^2 / (2 * accel), the distance needed just to stop. The profile is then
+ * built as the hardest stop available, which overshoots `total` and is
+ * self-consistent, so a caller that ignores the return value gets a sane
+ * reference rather than a reversal. The right response is usually to decline
+ * the retarget. */
+uint8_t MotionProfile_InitFrom(MotionProfile_t *p, float total, float v0,
+                               float v_max, float accel);
 
 /* Reference position at time t, clamped to [0, total] outside the move. */
 float MotionProfile_Position(const MotionProfile_t *p, float t);

@@ -12,8 +12,8 @@ RULE rather than the plumbing.
 | `ekf_host_test.c` | Yaw EKF (gyro + encoder fusion) | `EKF.c` |
 | `tof_filter_host_test.c` | VL53L0X noise filter | `tof_filter.c` |
 | `tof_cache_host_test.c` | Held-reading age gate | `tof_sensors.c`, `TOF_MAX_SAMPLE_AGE_MS` |
-| `motion_profile_host_test.c` | Trapezoidal profiles | `motion_profile.c` |
-| `maze_map_host_test.c` | Pose and wall bookkeeping | `maze_map.c` |
+| `motion_profile_host_test.c` | Trapezoidal profiles, mid-move retargeting | `motion_profile.c` |
+| `maze_map_host_test.c` | Pose, wall bookkeeping, known-vs-open | `maze_map.c` |
 | `navigator_host_test.c` | Reactive wall-following rule | `navigator.c` |
 | `wall_follow_host_test.c` | Lateral loop and the cascade rule | `wall_follow.c`, the `WALL_FOLLOW_*` constants |
 

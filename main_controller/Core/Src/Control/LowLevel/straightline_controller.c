@@ -516,20 +516,31 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             if (tof_dt_s < WALL_FOLLOW_UPDATE_S)
                 tof_dt_s = WALL_FOLLOW_UPDATE_S;
 
-            tilt_deg = WallFollow_Update(m, tof_dt_s);
+            /* `measured` is how far into the move the robot is, which is what
+             * tells the follower whether its side sensors are still looking at
+             * the cell being left or already at the one being entered. This
+             * module supplies the distance and nothing else -- which cells
+             * those are, and what the map knows about them, is the navigator's
+             * business. */
+            tilt_deg = WallFollow_Update(m, tof_dt_s, measured);
             last_tof = now;
 
-            /* FRONT-WALL ALIGNMENT, attempted only in the first quarter of the
-             * move and applied at most once.
+            /* FRONT-WALL ALIGNMENT, applied at most once per move.
              *
-             * Early on purpose. The correction translates the profile, so the
-             * reference steps by up to WALL_FRONT_ALIGN_MAX_CM the moment it
-             * lands. During the opening ramp the command is large and clipped
-             * anyway and the step vanishes into it; applied near the end it
-             * would arrive after the robot has already braked, and closing a
-             * few cm from rest is exactly what this drivetrain cannot do. */
-            if (!align_tried
-                && fabsf(measured) < 0.25f * fabsf(target_cm)) {
+             * FIRED AS LATE AS IT SAFELY CAN, which is the opposite of what it
+             * used to do. The old rule looked only during the first quarter of
+             * the move -- precisely when the wall is furthest and its reading
+             * worst -- and the two conditions fought each other: the window is
+             * at the start, the wall arrives at the end. Half the moves in a
+             * measured run never aligned at all, one of them missing by six
+             * millimetres of sensor reach.
+             *
+             * The limit on firing late is physical rather than a fraction of
+             * the move: there must be room to decelerate to the new endpoint
+             * from the speed the reference is actually doing. Below that, it
+             * fires on the best reading available; above it, it waits for a
+             * better one. */
+            if (!align_tried) {
 
                 uint16_t f = m[TOF_FRONT].distance_mm;
 
@@ -553,32 +564,61 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
                      * size. */
                     float remaining = new_target - ref_pos;
 
+                    /* Distance the reference needs just to come to rest from
+                     * the speed it is doing now, plus a cushion. Computed from
+                     * the live velocity rather than assumed to be cruise,
+                     * because early in a move it is much less and the
+                     * alignment should be allowed to fire there too. */
+                    const float braking_cm =
+                        (ref_vel * ref_vel)
+                        / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)
+                        + WALL_FRONT_ALIGN_ROOM_CM;
+
+                    const uint8_t has_room  = (fabsf(remaining) >= braking_cm);
+                    const uint8_t good_read = (f <= WALL_FRONT_ALIGN_BEST_MM);
+
+                    /* Running out of room: this is the last sweep that can
+                     * still retarget, so take whatever reading is in range
+                     * rather than waiting for a better one that will arrive
+                     * too late to use. */
+                    const uint8_t last_chance =
+                        (fabsf(remaining) < braking_cm + WALL_FRONT_ALIGN_ROOM_CM);
+
                     /* Refuse a correction that would make the rest of the move
-                     * run backwards. It cannot happen from the first quarter
-                     * of a move with a 4 cm limit, but a reference that has
-                     * already passed the new endpoint has nothing useful to
-                     * do with this and reversing is never the answer. */
-                    if (fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM
+                     * run backwards. A reference that has already passed the
+                     * new endpoint has nothing useful to do with this, and
+                     * reversing is never the answer. */
+                    if ((good_read || last_chance)
+                        && has_room
+                        && fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM
                         && remaining * distance_cm > 0.0f) {
 
-                        target_cm = new_target;
+                        /* New profile from here, at the speed the reference is
+                         * already doing, and a clock to match. Continuous in
+                         * position AND velocity -- rebuilding from rest would
+                         * drop the feedforward to zero and command a brake and
+                         * a fresh start in the middle of a move the robot is
+                         * already making. */
+                        MotionProfile_t rebuilt;
 
-                        /* New profile from here, and a clock to match. Its
-                         * velocity restarts from zero, which is why the
-                         * alignment is confined to the opening of the move --
-                         * there the reference is barely moving and the
-                         * discontinuity is in a term the position loop covers
-                         * easily. Position itself never jumps. */
-                        align_base_cm = ref_pos;
-                        align_t0_s    = elapsed_s;
+                        if (MotionProfile_InitFrom(&rebuilt, remaining, ref_vel,
+                                                   STRAIGHT_PROFILE_MAX_CMS,
+                                                   STRAIGHT_PROFILE_ACCEL_CMS2)) {
 
-                        MotionProfile_Init(&dist_profile, remaining,
-                                           STRAIGHT_PROFILE_MAX_CMS,
-                                           STRAIGHT_PROFILE_ACCEL_CMS2);
+                            dist_profile  = rebuilt;
+                            target_cm     = new_target;
+                            align_base_cm = ref_pos;
+                            align_t0_s    = elapsed_s;
 
-                        sl_align_delta_cm = delta;
-                        sl_align_applied  = 1U;
-                        align_tried       = 1U;
+                            sl_align_delta_cm = delta;
+                            sl_align_applied  = 1U;
+                            align_tried       = 1U;
+                        }
+                        /* Infeasible after all: leave the move alone. The
+                         * has_room test should have caught it, so this is the
+                         * profile generator having the last word on its own
+                         * arithmetic rather than a condition worth duplicating
+                         * here. */
                     }
                     /* Out of range: leave align_tried clear and look again on
                      * the next sweep. The wall may simply not be the one this
