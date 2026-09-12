@@ -568,6 +568,39 @@ structure rather than gains.
   heading the loop already knew was wrong, and the next straight spent its
   first stretch turning out of it.
 
+**Then the clamp itself went up, 6 -> 10, with its two companions.** The log
+justified it: five consecutive cells asked for more tilt than the clamp could
+give, two of them for more than twice it (13.5 and 12.8 degrees against a 6
+degree clamp). The robot spent the stretch pinned at the limit, drifted into
+the wall anyway, and wedged -- the next straight held ~180 of 200 command units
+for a second and a half while making 2.9 cm/s against a profile asking 10.
+
+Raising the clamp alone would have re-created the bang-bang failure the note at
+`WALL_FOLLOW_MAX_TILT_DEG` describes, so all three moved together:
+
+| constant | was | now | why |
+|---|---|---|---|
+| `WALL_FOLLOW_MAX_TILT_DEG` | 6 | 10 | covers the 27 mm worst case actually recorded |
+| `STRAIGHT_YAW_LIMIT` | 60 | 80 | widens the inner loop's linear range to 80/8 = 10 first |
+| `WALL_FOLLOW_TILT_SLEW_DPS` | 30 | 15 | see below |
+
+The slew limit was the quiet one. The inner loop buys `STRAIGHT_YAW_KP /
+TURN_FF_GAIN` = 4 deg/s of turn rate per degree of heading error, so following a
+setpoint that ramps at R deg/s costs R/4 degrees of standing error. At 30 that
+was 7.5 degrees -- the whole linear range, spent on the ramp before the tilt
+asked for anything. A slew limit reads like a safety measure; it is also a
+load, and it was saturating the loop it exists to protect.
+
+`wall_follow_host_test.c` now asserts the cascade rule symbolically
+(`WALL_FOLLOW_MAX_TILT_DEG <= STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP`) and the
+ramp cost separately, so these cannot drift apart again.
+
+**Watch for corner swing.** The cost of 10 degrees is half a chassis length
+times sin(10) rather than sin(6), roughly 3.5 mm more on a 100 mm body in a
+124 mm corridor. If the robot starts clipping walls mid-corridor rather than at
+junctions, this is the first thing to look at. The clamp is only reached at
+20 mm of error; a well-centred robot never sees it.
+
 Instrumentation, since the complaint was about a heading that no log showed:
 
 - `StraightTrace_t` is 40 bytes and carries `yaw_deg`, `tilt_deg`, `drift_deg`

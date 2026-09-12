@@ -60,7 +60,11 @@ int main(void){
   CHECK(tilt(err_left(40))<0, "too close to the left -> nose right");
   CHECK(tilt(err_right(40))>0, "too close to the right -> nose left");
   CHECK(tilt(err_both(90,34))>0, "closer to the right wall -> nose left");
-  CHECK(WALL_FOLLOW_MAX_TILT_DEG <= 60.0f/8.0f,
+  /* THE CASCADE RULE, in symbols rather than in numbers, so the two constants
+     can never drift apart again. The outer loop's output is the inner loop's
+     setpoint, so it must stay inside the range the inner loop can answer
+     linearly -- past that the cascade is bang-bang. */
+  CHECK(WALL_FOLLOW_MAX_TILT_DEG <= STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP,
         "tilt clamp stays inside the heading loop's linear range");
 
   /* The integral must actually null a standing error the P term only balances.
@@ -82,14 +86,28 @@ int main(void){
           "and takes seconds, not milliseconds, to do it");
   }
 
+  /* THE SLEW COSTS LINEAR RANGE TOO, which is easy to miss because a slew
+     limit reads like a safety measure rather than a load. The inner loop buys
+     STRAIGHT_YAW_KP / TURN_FF_GAIN degrees per second of turn rate for each
+     degree of heading error, so tracking a setpoint that ramps at R deg/s
+     costs R/that many degrees of standing error -- and that error is spent
+     before the tilt itself asks for anything. */
+  {
+    const float dps_per_deg = STRAIGHT_YAW_KP / TURN_FF_GAIN;
+    const float ramp_cost   = WALL_FOLLOW_TILT_SLEW_DPS / dps_per_deg;
+    CHECK(ramp_cost < 0.5f * (STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP),
+          "slewing the tilt costs less than half the linear range");
+  }
+
   /* THE RECOVERY CEILING. The integral goes to the heading target, not into
-     the tilt, so it must be allowed to exceed the tilt clamp -- otherwise a
-     yaw estimate that has drifted further than the clamp can never be
-     corrected, which is the observed "yawed left, wall in view, no
-     correction" failure. This check is the inverse of the one it replaced,
-     and deliberately so. */
-  CHECK(WALL_FOLLOW_KI_LIMIT_DEG > WALL_FOLLOW_MAX_TILT_DEG,
-        "the integral can out-reach the tilt clamp");
+     the tilt, so the total authority is the clamp PLUS the integral limit and
+     is not bounded by the clamp at all. That is the fix for the observed
+     "yawed left, wall in view, no correction" failure, where the clamp alone
+     had to answer a demand of 13.5 degrees. */
+  CHECK(WALL_FOLLOW_MAX_TILT_DEG + WALL_FOLLOW_KI_LIMIT_DEG > 13.5f,
+        "clamp plus integral out-reach the worst demand recorded");
+  CHECK(WALL_FOLLOW_KI_LIMIT_DEG > 5.5f,
+        "the integral alone covers the standing heading error recorded");
   /* The linear-range rule applies to the heading loop's ERROR, not to how far
      the setpoint has moved: a setpoint the robot is tracking produces no
      error at all. So what has to stay small is the integral's RATE, and the
@@ -112,7 +130,7 @@ int main(void){
      estimate reads REF_ERR degrees low, so the loop has to command +REF_ERR
      just to drive straight. */
   {
-    const float ref_err = WALL_FOLLOW_MAX_TILT_DEG + 2.0f;
+    const float ref_err = 5.5f;   /* the standing error the run actually showed */
     float integ = 0.0f;
     const float dt = WALL_FOLLOW_UPDATE_S;
     /* Drifting into the left wall: the reading falls below setpoint, so the
@@ -121,9 +139,8 @@ int main(void){
       integ += WALL_FOLLOW_KI_DEG_PER_MM_S * 6.0f * dt;
     CHECK(integ >= ref_err,
           "a reference error past the tilt clamp is still reachable");
-    /* The old arrangement, integral inside the clamp, could not: */
-    CHECK(WALL_FOLLOW_MAX_TILT_DEG < ref_err,
-          "and the tilt clamp alone provably could not reach it");
+    CHECK(integ <= WALL_FOLLOW_KI_LIMIT_DEG,
+          "and never past its own limit while doing so");
   }
 
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);

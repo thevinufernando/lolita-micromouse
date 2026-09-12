@@ -741,7 +741,7 @@
  * 0.50 brings a worst-case single-wall error back inside the budget in one
  * cell. 0.75 is tempting and is the next thing to try, but this is a cascade
  * whose inner heading loop has its own lag, so raise it one step at a time and
- * watch for weaving. At 0.50 a 24 mm error already asks for the full
+ * watch for weaving. At 0.50 a 20 mm error already asks for the full
  * WALL_FOLLOW_MAX_TILT_DEG, so beyond here the clamp is doing the limiting,
  * not the gain. */
 #define WALL_FOLLOW_KP_DEG_PER_MM 0.50f
@@ -752,10 +752,11 @@
  *
  * This is the outer half of a cascade, and its output is the inner loop's
  * SETPOINT. The inner loop here is STRAIGHT_YAW_*, which has gain 8 and clamps
- * its output at STRAIGHT_YAW_LIMIT = 60, so it saturates at 60/8 = 7.5 degrees
- * of heading error. Asking for 12 is therefore asking for something the inner
- * loop can only answer with a pinned output -- the cascade stops being a
- * cascade and becomes bang-bang.
+ * its output at STRAIGHT_YAW_LIMIT, so it saturates at LIMIT/KP degrees of
+ * heading error -- 80/8 = 10 as both stand now. Asking for more than that is
+ * asking for something the inner loop can only answer with a pinned output:
+ * the cascade stops being a cascade and becomes bang-bang. The host test
+ * asserts the relation symbolically so the two cannot drift apart.
  *
  * That is exactly how a reverse out of a dead end failed. The robot entered it
  * 10 deg off heading and 30 mm off centre, the lateral loop asked for a further
@@ -764,12 +765,35 @@
  * was asked for -- then slammed to -60 coming back and jammed against the wall
  * at 15.4 cm of a 19.9 cm move.
  *
- * 6 keeps the demand inside the inner loop's linear range with margin, and it
- * still buys 192*sin(6) = 20 mm of lateral correction per cell, which covers
- * the errors actually seen. Raising STRAIGHT_YAW_LIMIT would raise this
- * ceiling too, but steering authority is taken out of forward speed, so widen
- * the inner loop first and only then this. */
-#define WALL_FOLLOW_MAX_TILT_DEG 6.0f
+ * 6 -> 10, WITH THE INNER LOOP WIDENED FIRST, in the order the note above
+ * insisted on: STRAIGHT_YAW_LIMIT went 60 -> 80, so the linear range is now
+ * 80/8 = 10 degrees and the rule at the top of this note still holds exactly.
+ * Raising this alone would have re-created the bang-bang failure described
+ * above, which is why the two constants move together or not at all.
+ *
+ * 6 was not enough, and the log says so rather than the theory. Five
+ * consecutive cells asked for more than the clamp could give:
+ *
+ *     L=51        err -12.0 mm   wanted  -6.0 deg
+ *     R=83        err -19.0 mm   wanted  +9.5 deg
+ *     L=36        err -27.0 mm   wanted -13.5 deg
+ *     R=79        err -15.0 mm   wanted  +7.5 deg
+ *     L=34 R=86   err -25.5 mm   wanted -12.8 deg
+ *
+ * Two of those are past twice the clamp. The robot spent the stretch pinned
+ * at the limit, drifted into the wall anyway, and wedged: the straight move
+ * that followed held ~180 of 200 command units for a second and a half while
+ * making 2.9 cm/s against a profile asking for 10.
+ *
+ * 10 covers a 20 mm error at full WALL_FOLLOW_KP_DEG_PER_MM and buys
+ * 192*sin(10) = 33 mm of lateral correction per cell, against the 27 mm worst
+ * case actually recorded. The cost is corner swing: half a chassis length
+ * times sin(10) rather than sin(6), roughly 3.5 mm more on a 100 mm body. On
+ * a robot this large in a 124 mm corridor that is worth watching, and it is
+ * the thing to look at first if the robot starts clipping walls mid-corridor
+ * rather than at junctions. Note the clamp is only REACHED at 20 mm of error;
+ * a well-centred robot never sees it. */
+#define WALL_FOLLOW_MAX_TILT_DEG 10.0f
 
 /* Fastest the tilt demand may CHANGE, in degrees per second.
  *
@@ -779,10 +803,16 @@
  * arriving off-centre -- and a step in a heading setpoint asks the robot to
  * rotate as hard as it can, which is never what centring wants.
  *
- * 30 deg/s crosses the full clamp range in 0.4 s, comfortably inside a 2.4 s
- * cell, so the correction still completes while the inner loop only ever sees
- * a ramp it can track. */
-#define WALL_FOLLOW_TILT_SLEW_DPS 30.0f
+ * 30 -> 15, BECAUSE A RAMP COSTS TRACKING ERROR TOO. The inner loop buys
+ * STRAIGHT_YAW_KP / TURN_FF_GAIN = 4 deg/s of turn rate per degree of heading
+ * error, so following a setpoint that slews at R deg/s costs R/4 degrees of
+ * standing error. At 30 that was 7.5 degrees -- the entire linear range, spent
+ * on the ramp alone, leaving nothing for the tilt itself. The slew limit was
+ * quietly saturating the loop it exists to protect.
+ *
+ * 15 costs 3.75 degrees and crosses the wider 10 degree clamp in 0.67 s, still
+ * comfortably inside a 2.4 s cell. */
+#define WALL_FOLLOW_TILT_SLEW_DPS 15.0f
 
 /* ---- WHY THERE IS NO REVERSE MOVE. Not a tuning choice. ----
  *
@@ -852,7 +882,17 @@
  * to make room. Clipping each wheel independently instead turns a pure
  * steering command into a net speed change, which is how the existing
  * straight-line path loses steering authority exactly when it is fastest. */
-#define STRAIGHT_YAW_LIMIT 60.0f
+/* 60 -> 80 to widen the inner loop's linear range to 80/8 = 10 degrees, so
+ * WALL_FOLLOW_MAX_TILT_DEG could go to 10 without the cascade saturating.
+ * This is the "widen the inner loop first" step that note asks for.
+ *
+ * The cost is real but bounded: steering is taken out of forward speed, so at
+ * full steering the base is capped at CONTROL_MAX_SPEED - 80 = 120. Ordinary
+ * travel needs STRAIGHT_FF_GAIN * STRAIGHT_PROFILE_MAX_CMS = 80, which still
+ * fits alongside full steering. Only a robot already fighting something wants
+ * more than that at the same time as maximum steering, and in that case
+ * steering is the half worth keeping. */
+#define STRAIGHT_YAW_LIMIT 80.0f
 #define STRAIGHT_YAW_INT_LIMIT 20.0f
 
 /* Control cycles between ToF sweeps during a fused move.
