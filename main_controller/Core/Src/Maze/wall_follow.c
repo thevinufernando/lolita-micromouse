@@ -45,6 +45,37 @@ void WallFollow_ResetBias(void)
 }
 
 
+/* How much to trust a single-wall reading, 1.0 down to
+ * WALL_FOLLOW_FAR_CONF_FLOOR.
+ *
+ * A reading at or inside its setpoint is certain: only a wall returns a close
+ * signal, so there is nothing to doubt. Past the setpoint, confidence falls
+ * linearly and reaches the floor at WALL_FOLLOW_USABLE_MAX_MM, which is where
+ * the reading stops being used at all. The two ends of the ramp are therefore
+ * the two things already known to be true, and the middle is interpolation
+ * rather than invention. */
+static float far_confidence(float reading_mm, float setpoint_mm)
+{
+    const float far_mm = reading_mm - setpoint_mm;
+
+    if (far_mm <= 0.0f) {
+        return 1.0f;
+    }
+
+    const float span_mm = (float)WALL_FOLLOW_USABLE_MAX_MM - setpoint_mm;
+
+    if (span_mm <= 0.0f) {
+        return WALL_FOLLOW_FAR_CONF_FLOOR;   /* degenerate config */
+    }
+
+    float t = far_mm / span_mm;
+
+    if (t > 1.0f) t = 1.0f;
+
+    return 1.0f - t * (1.0f - WALL_FOLLOW_FAR_CONF_FLOOR);
+}
+
+
 static uint8_t usable(const ToF_Measurement_t *m)
 {
     return (m->valid && m->distance_mm != TOF_DISTANCE_INVALID &&
@@ -134,9 +165,15 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
     const float left_mm  = (float)m[TOF_LEFT].distance_mm;
     const float right_mm = (float)m[TOF_RIGHT].distance_mm;
 
-    /* Set when running on ONE wall and that wall reads further than its
-     * setpoint -- the ambiguous direction. See the tilt selection below. */
-    uint8_t single_far = 0U;
+    /* HOW MUCH THE REFERENCE IS WORTH, from 1.0 (certain) downwards.
+     *
+     * Two walls are always 1.0: the difference cancels the common-mode error
+     * and resolves the ambiguity outright. A single wall reading SHORT is also
+     * 1.0, because a close return can only be a wall. A single wall reading
+     * LONG is the one case that cannot tell an off-centre robot from a wall
+     * that has ended, and how suspicious it deserves to be depends on HOW
+     * long -- which is what the old rule got wrong. See below. */
+    float conf = 1.0f;
 
     /* Error is POSITIVE when the robot must move LEFT, whichever reference is
      * in use, so everything downstream is direction-agnostic. */
@@ -151,24 +188,30 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
         /* Reading above setpoint means too far from the LEFT wall, so move
          * left, which is positive (anticlockwise) yaw. */
         wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM;
-        single_far  = (wf_error_mm > 0.0f) ? 1U : 0U;
+        conf = far_confidence(left_mm, WALL_FOLLOW_SETPOINT_LEFT_MM);
     }
     else {
         /* Mirrored: too far from the RIGHT wall means move right. */
         wf_error_mm = -(right_mm - WALL_FOLLOW_SETPOINT_RIGHT_MM);
-        single_far  = (wf_error_mm < 0.0f) ? 1U : 0U;
+        conf = far_confidence(right_mm, WALL_FOLLOW_SETPOINT_RIGHT_MM);
     }
 
-    /* ASYMMETRIC ON A SINGLE WALL. Pushing away from a wall that is too close
-     * is unambiguous and keeps full authority. Pulling towards one that reads
-     * far is the direction that cannot tell an off-centre robot from a wall
-     * that has ended, so it runs a smaller gain and a much tighter cap -- weak
-     * enough never to lunge, strong enough to bleed off drift. With two walls
-     * the difference resolves the ambiguity and neither applies. */
-    const float kp  = single_far ? WALL_FOLLOW_SINGLE_FAR_KP
-                                 : WALL_FOLLOW_KP_DEG_PER_MM;
-    const float cap = single_far ? WALL_FOLLOW_SINGLE_FAR_TILT_DEG
-                                 : WALL_FOLLOW_MAX_TILT_DEG;
+    /* A TAPER, NOT A CLIFF. The gain and the clamp both scale with how much
+     * the reference is worth, so the loop acts on a reading in proportion to
+     * how likely it is to mean what it says.
+     *
+     * The old rule was binary on the SIGN of the error: any long reading got a
+     * fifth of the gain and a 2.5 degree cap. It cost a run. The robot carried
+     * a 14 mm error for a full second against a right wall reading 76 mm --
+     * twelve millimetres long, when an opening reads 240 and the usable gate
+     * already rejects anything past 95 -- and the rule throttled a correction
+     * that was entirely correct. The proof arrived a moment later: when the
+     * left wall came into range it said the same thing, too close on the left
+     * by 14 where the right had said too far by 12. The loop had declined for
+     * a second to act on a reading that was right, and ended the cell 28 mm
+     * off centre, from where the next turn jammed. */
+    const float kp  = WALL_FOLLOW_KP_DEG_PER_MM  * conf;
+    const float cap = WALL_FOLLOW_MAX_TILT_DEG   * conf;
 
     /* PROPORTIONAL ONLY. The integral is deliberately absent from this sum --
      * it goes to the heading target instead, so the clamp below bounds how
@@ -196,12 +239,14 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
      * bias, and while P is pinned there is no such evidence to be had -- the
      * loop is already doing everything it can.
      *
-     * The OTHER freeze, on single_far, is a different argument and both are
-     * needed. Two walls resolve the ambiguity outright and a single wall
-     * reading SHORT is unambiguous too, but a single wall reading FAR cannot
-     * tell an off-centre robot from a wall that has ended -- and winding an
-     * integrator on that would bake the guess in permanently. */
-    if (!single_far && !clamped) {
+     * The OTHER gate, on confidence, is a different argument and both are
+     * needed. The proportional term may act on a doubtful reference in
+     * proportion to how doubtful it is, because it forgets immediately if the
+     * reference turns out to be wrong. An integrator does not forget -- it
+     * would bake the guess in permanently -- so it gets a threshold rather
+     * than a taper, and stops learning entirely once the reference is not
+     * clearly worth trusting. */
+    if (conf >= WALL_FOLLOW_TRUST_CONF && !clamped) {
         wf_drift_deg += WALL_FOLLOW_KI_DEG_PER_MM_S
                         * wf_error_mm * dt_s;
 

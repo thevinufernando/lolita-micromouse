@@ -211,6 +211,21 @@ int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT]);
 int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
                       uint32_t max_age_ms);
 
+/* Poll ONE sensor, in rotation, and fill the other two from the cache.
+ * THIS IS WHAT A MOVING ROBOT SHOULD CALL EVERY CONTROL CYCLE.
+ *
+ * Talking to all three at once costs about 35 ms of I2C, and the control loop
+ * is stopped for every millisecond of it. Spread across three calls no single
+ * cycle blocks for more than about twelve, while each sensor is still
+ * refreshed every three cycles -- comfortably inside TOF_INTER_MEASUREMENT_MS,
+ * so nothing is sampled less often than before. It is the same work unbunched.
+ *
+ * The side pair stops being simultaneous, by two cycles at most. At cruise
+ * that is a couple of millimetres along the corridor and a fraction of one
+ * across it, well inside what the span check already tolerates. */
+int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+                      uint32_t max_age_ms);
+
 /* Read all three, WAITING for a genuinely new measurement from each.
  * THIS IS WHAT A STATIONARY ROBOT SHOULD CALL.
  *

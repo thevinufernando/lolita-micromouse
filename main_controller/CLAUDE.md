@@ -528,6 +528,50 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (current) - A taper instead of a cliff, and the poll unbunched
+
+The anti-windup worked: the integral stayed between +0.92 and -2.14 across 28
+cells against the previous run's pin at -8.00, and front-wall stops came in at
+74-89 mm, mean 83, against the 87 mm target. Neither of those is the problem any
+more.
+
+**The single-wall rule was keying on the sign of the error when it should have
+keyed on the size.** Any long reading got a fifth of the gain and a 2.5 degree
+cap. The robot then carried a 14 mm error for a full second against a right wall
+reading 76 mm -- twelve millimetres long, where an opening reads 240 and the
+95 mm usable gate already rejects one -- and the rule throttled a correction
+that was entirely correct. The proof arrived a moment later: when the left wall
+came into range it agreed, too close on the left by 14 where the right had said
+too far by 12. That cell ended 28 mm off centre and the turn out of it jammed
+44 degrees short.
+
+Confidence is now a ramp: 1.0 at the setpoint, falling to
+`WALL_FOLLOW_FAR_CONF_FLOOR` at the usable gate, multiplying both the gain and
+the tilt clamp. The ramp's two ends are the two things already known -- a close
+return can only be a wall, and a reading at the gate is about to be discarded --
+so only the middle is interpolated.
+
+The integral gets a threshold rather than a taper, at `WALL_FOLLOW_TRUST_CONF`.
+The proportional term may act on a doubtful reference in proportion to the
+doubt, because it forgets the moment the reference changes; an integrator does
+not forget, and a wrong guess accumulated into it is held until something else
+unwinds it.
+
+**The ToF poll went round-robin.** `ToF_PollOneLatest()` talks to one sensor per
+control cycle and serves the other two from the held-reading cache, replacing a
+sweep of all three every fourth cycle. Same I2C work, same per-sensor rate,
+unbunched: 35 ms of blocked loop becomes about 12. `STRAIGHT_TOF_DIVIDER` went
+4 -> 3 and now means one complete rotation, with a static assert tying it to
+`TOF_SENSOR_COUNT` -- if those disagree the wall follower either sees repeated
+samples or misses some, and neither failure announces itself in the arena.
+
+The side pair stops being simultaneous by at most two cycles, which at cruise is
+a couple of millimetres along the corridor and a fraction of one across it, well
+inside what the span check already tolerates.
+
+Expect the period histogram to read about 12 ms throughout with nothing above
+25. If it still shows 35s, the rotation is not happening.
+
 ### 2026-09-12 (newest) - The integral was the thing moving, not the alignment
 
 First run on continuous ranging. Mode switching worked: both failure flags read

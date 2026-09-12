@@ -56,6 +56,9 @@ static uint32_t          s_last_ms[TOF_SENSOR_COUNT];
  * than the reset, with no assumption about how long anything takes. */
 static uint8_t s_discard_next[TOF_SENSOR_COUNT];
 
+/* Which sensor ToF_PollOneLatest() talks to next. */
+static uint8_t s_poll_next;
+
 /* How the reads are going. tof_stale_drops is the one that matters: it counts
  * readings that aged out entirely, which means a sensor stopped producing
  * rather than merely not being ready yet. It should be zero. */
@@ -667,6 +670,59 @@ int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT])
 }
 
 
+/* Poll one sensor and fold the result into the cache. */
+static int ToF_PollInto(uint8_t i, ToF_Measurement_t *out, uint32_t now)
+{
+    ToF_Sensor_t sensor = (ToF_Sensor_t)i;
+    int status;
+
+    if (s_continuous[i]) {
+        status = ToF_ReadContinuous(sensor, out, 0U);
+    } else {
+        status = ToF_ReadSingle(sensor, out);
+    }
+
+    if (status == TOF_OK) {
+        s_last[i]    = *out;
+        s_last_ms[i] = now;
+        tof_fresh_count++;
+    }
+
+    return status;
+}
+
+
+/* Fill out[i] from the cache, deciding whether it is still worth having.
+ *
+ * The age limit is what keeps this honest. Without it a sensor that has died
+ * goes unnoticed: its last reading would be repeated forever and the wall
+ * follower would steer to a wall that is no longer there. Past the limit the
+ * measurement goes invalid, which every consumer already knows how to handle.
+ *
+ * Shared by both entry points below on purpose -- two copies of this decision
+ * would be two chances for them to disagree about what a stale reading is. */
+static int ToF_ServeCached(uint8_t i, ToF_Measurement_t *out,
+                           uint32_t now, uint32_t max_age_ms)
+{
+    if (s_last[i].valid && (now - s_last_ms[i]) <= max_age_ms) {
+        *out = s_last[i];
+        tof_cached_count++;
+        return TOF_OK;
+    }
+
+    ToF_InvalidateMeasurement(out);
+
+    if (s_last[i].valid) {
+        /* Had a reading, and it aged out. That is a sensor that stopped
+         * producing, not a poll that was merely early. */
+        ToF_InvalidateMeasurement(&s_last[i]);
+        tof_stale_drops++;
+    }
+
+    return TOF_ERROR;
+}
+
+
 int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
                       uint32_t max_age_ms)
 {
@@ -679,52 +735,78 @@ int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
     const uint32_t now = HAL_GetTick();
 
     for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
-        ToF_Sensor_t sensor = (ToF_Sensor_t)i;
-        int status;
-
         if (!s_ready[i]) {
             ToF_InvalidateMeasurement(&out[i]);
             result = TOF_ERROR;
             continue;
         }
 
-        if (s_continuous[i]) {
-            status = ToF_ReadContinuous(sensor, &out[i], 0U);
-        } else {
-            status = ToF_ReadSingle(sensor, &out[i]);
-        }
-
-        if (status == TOF_OK) {
-            s_last[i]    = out[i];
-            s_last_ms[i] = now;
-            tof_fresh_count++;
+        if (ToF_PollInto(i, &out[i], now) == TOF_OK) {
             continue;
         }
 
-        /* Nothing new. Serve the last good reading while it is young enough to
-         * still describe where the robot is.
-         *
-         * The age limit is what keeps this honest. Without it a sensor that
-         * has died goes unnoticed: its last reading would be repeated forever
-         * and the wall follower would steer to a wall that is no longer there.
-         * Past the limit the measurement goes invalid, which every consumer
-         * already knows how to handle. */
-        if (s_last[i].valid && (now - s_last_ms[i]) <= max_age_ms) {
-            out[i] = s_last[i];
-            tof_cached_count++;
+        if (ToF_ServeCached(i, &out[i], now, max_age_ms) != TOF_OK) {
+            result = TOF_ERROR;
+        }
+    }
+
+    return result;
+}
+
+
+int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+                      uint32_t max_age_ms)
+{
+    int result = TOF_OK;
+
+    if (out == NULL) {
+        return TOF_ERROR;
+    }
+
+    const uint32_t now = HAL_GetTick();
+
+    /* ONE SENSOR PER CALL, in rotation. The other two come from the cache.
+     *
+     * Talking to all three at once costs about 35 ms of I2C -- mux select,
+     * data-ready poll, the ranging block, and clearing the interrupt latch,
+     * three times over -- and the control loop is stopped for every
+     * millisecond of it. Spread across three calls no single cycle blocks for
+     * more than about twelve, and each sensor is still refreshed every three
+     * cycles, which at CONTROL_SAMPLE_TIME_S is comfortably inside
+     * TOF_INTER_MEASUREMENT_MS. Nothing is sampled less often; it is the same
+     * work, not bunched.
+     *
+     * The cost is that the side pair is no longer simultaneous. Two cycles
+     * apart at cruise is about 2 mm of travel along the corridor and a small
+     * fraction of a millimetre across it, which is well inside the noise the
+     * span check already tolerates. */
+    const uint8_t polled = s_poll_next;
+    uint8_t       got    = 0U;
+
+    s_poll_next = (uint8_t)((s_poll_next + 1U) % TOF_SENSOR_COUNT);
+
+    if (s_ready[polled]) {
+        got = (ToF_PollInto(polled, &out[polled], now) == TOF_OK) ? 1U : 0U;
+    }
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        if (!s_ready[i]) {
+            ToF_InvalidateMeasurement(&out[i]);
+            result = TOF_ERROR;
             continue;
         }
 
-        ToF_InvalidateMeasurement(&out[i]);
-
-        if (s_last[i].valid) {
-            /* Had a reading, and it aged out. That is a sensor that stopped
-             * producing, not a poll that was merely early. */
-            ToF_InvalidateMeasurement(&s_last[i]);
-            tof_stale_drops++;
+        /* The one just polled successfully is already in `out`, and counting
+         * it as a cache hit as well would make the fresh-to-held ratio -- the
+         * number that says whether the loop is outrunning the sensors -- read
+         * one in four when it is really one in one. */
+        if (i == polled && got) {
+            continue;
         }
 
-        result = TOF_ERROR;
+        if (ToF_ServeCached(i, &out[i], now, max_age_ms) != TOF_OK) {
+            result = TOF_ERROR;
+        }
     }
 
     return result;

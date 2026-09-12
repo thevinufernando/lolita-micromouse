@@ -10,10 +10,20 @@ static float err_both(float L,float R){
     return ((L-R)-(WALL_FOLLOW_SETPOINT_LEFT_MM-WALL_FOLLOW_SETPOINT_RIGHT_MM))*0.5f; }
 static float err_left(float L){ return L-WALL_FOLLOW_SETPOINT_LEFT_MM; }
 static float err_right(float R){ return -(R-WALL_FOLLOW_SETPOINT_RIGHT_MM); }
-/* asymmetric: `far` is the ambiguous direction on a single wall */
-static float tilt_single(float e,int far){
-    float kp  = far? WALL_FOLLOW_SINGLE_FAR_KP : WALL_FOLLOW_KP_DEG_PER_MM;
-    float cap = far? WALL_FOLLOW_SINGLE_FAR_TILT_DEG : WALL_FOLLOW_MAX_TILT_DEG;
+/* Mirrors far_confidence() in wall_follow.c: 1.0 at or inside the setpoint,
+   falling linearly to the floor at the usable gate. */
+static float conf_of(float reading,float setpoint){
+    float far = reading - setpoint;
+    if (far <= 0.0f) return 1.0f;
+    float span = (float)WALL_FOLLOW_USABLE_MAX_MM - setpoint;
+    float t = far/span;
+    if (t > 1.0f) t = 1.0f;
+    return 1.0f - t*(1.0f - WALL_FOLLOW_FAR_CONF_FLOOR); }
+
+/* Tilt from a single-wall reading, with gain and clamp both scaled by it. */
+static float tilt_single(float e,float conf){
+    float kp  = WALL_FOLLOW_KP_DEG_PER_MM * conf;
+    float cap = WALL_FOLLOW_MAX_TILT_DEG  * conf;
     float t = kp*e;
     if (t >  cap) t =  cap;
     if (t < -cap) t = -cap;
@@ -36,12 +46,41 @@ int main(void){
      reading is ambiguous at a junction and must produce no command. */
   CHECK(err_left(40)<0,  "left only: too close to left -> move right");
   CHECK(err_right(40)>0, "right only: too close to right -> move left");
-  /* the far direction still acts, but weakly and tightly capped */
-  CHECK(tilt_single(err_left(90),1) > 0.0f, "left only: a long reading still pulls");
-  CHECK(fabsf(tilt_single(err_left(90),1)) <= WALL_FOLLOW_SINGLE_FAR_TILT_DEG,
-        "far pull is capped");
-  CHECK(fabsf(tilt_single(err_left(90),1)) < fabsf(tilt_single(err_left(36),0)),
-        "far pull is weaker than the near push for a similar error");
+  /* CONFIDENCE IS A RAMP, and its two ends are the two things already known. */
+  CHECK(conf_of(63.0f, 63.0f) == 1.0f,
+        "a reading at the setpoint is certain");
+  CHECK(conf_of(40.0f, 63.0f) == 1.0f,
+        "and a reading inside it is too -- only a wall returns close");
+  CHECK(fabsf(conf_of((float)WALL_FOLLOW_USABLE_MAX_MM, 63.0f)
+              - WALL_FOLLOW_FAR_CONF_FLOOR) < 0.001f,
+        "a reading at the usable gate is worth the floor and no less");
+  CHECK(conf_of(80.0f, 63.0f) < conf_of(70.0f, 63.0f),
+        "and confidence falls monotonically between them");
+
+  /* THE CELL THAT COST A RUN: a right wall reading 76 against a 64 setpoint,
+     with the robot 14 mm off. The old binary rule capped this at 2.5 deg. */
+  {
+    const float c = conf_of(76.0f, WALL_FOLLOW_SETPOINT_RIGHT_MM);
+    const float t = tilt_single(-14.0f, c);
+    CHECK(fabsf(t) > 4.0f,
+          "the 76 mm reading now buys a real correction, not a token one");
+    CHECK(fabsf(t) < WALL_FOLLOW_MAX_TILT_DEG,
+          "but still less than a two-wall reference would get");
+  }
+
+  /* A reading at the edge of usable range must stay timid: that is the case
+     the caution was written for, and it has to survive the taper. */
+  {
+    const float c = conf_of(94.0f, WALL_FOLLOW_SETPOINT_LEFT_MM);
+    CHECK(fabsf(tilt_single(31.0f, c)) < 4.0f,
+          "a reading at the edge of range still cannot lunge");
+    CHECK(c < WALL_FOLLOW_TRUST_CONF,
+          "and is not trusted enough for the integral to learn from");
+  }
+
+  /* The integral's threshold has to admit the case it exists for. */
+  CHECK(conf_of(68.0f, 63.0f) >= WALL_FOLLOW_TRUST_CONF,
+        "a few mm long is an off-centre robot, and still teaches the integral");
 
   /* The span test is what separates a same-cell wall from something beyond an
      opening, which no absolute distance threshold can do. */

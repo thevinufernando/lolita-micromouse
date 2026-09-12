@@ -269,6 +269,14 @@ volatile float    sl_align_delta_cm;
 volatile uint8_t  sl_align_applied;
 volatile uint32_t sl_breakaway_count;
 
+/* The round-robin poll refreshes one sensor per control cycle, so a complete
+ * rotation is exactly TOF_SENSOR_COUNT cycles -- which is when the wall
+ * follower has new data on all three. If the two ever disagree the follower
+ * either sees repeated samples or misses some, and neither failure announces
+ * itself in the arena. */
+_Static_assert(STRAIGHT_TOF_DIVIDER == (uint32_t)TOF_SENSOR_COUNT,
+               "STRAIGHT_TOF_DIVIDER must equal TOF_SENSOR_COUNT");
+
 volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];
 volatile uint32_t        tm_sl_trace_count;
 
@@ -450,23 +458,34 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             settle_counter = 0;
         }
 
-        /* ToF at a fraction of the control rate. Sampling faster than the
-         * sensor produces just spends I2C time on a stale measurement, and
-         * that time is taken out of the 1 kHz gyro loop. */
+        /* ONE SENSOR EVERY CYCLE, rather than three every fourth.
+         *
+         * The same I2C work, unbunched. Three at once cost 35 ms and the loop
+         * was stopped for all of it -- measured at 10, 10, 10, 35 repeating,
+         * with 53% of a move spent not running. One at a time keeps every
+         * cycle near twelve, and each sensor is still refreshed every
+         * STRAIGHT_TOF_DIVIDER cycles, inside TOF_INTER_MEASUREMENT_MS, so
+         * nothing is actually sampled less often.
+         *
+         * Latest, not newest-only: on the cycles where a sensor has nothing
+         * new the held reading is served, because handing the wall follower an
+         * invalid measurement would make it drop and re-acquire its reference
+         * several times a second. */
+        ToF_Measurement_t m[TOF_SENSOR_COUNT];
+
+        (void)ToF_PollOneLatest(m, TOF_MAX_SAMPLE_AGE_MS);
+
+        /* The wall follower runs once per complete rotation, when every sensor
+         * has been refreshed exactly once since it last looked. Running it on
+         * every cycle would feed it two thirds repeated data and make its slew
+         * limit and integral -- both rates -- act on samples that had not
+         * changed. */
         if (++tof_div >= STRAIGHT_TOF_DIVIDER) {
             tof_div = 0;
-            ToF_Measurement_t m[TOF_SENSOR_COUNT];
-            /* Latest, not newest-only: free-running, three polls in four
-             * find nothing new, and handing the wall follower an invalid
-             * reading each time would make it drop and re-acquire its
-             * reference several times a second. */
-            (void)ToF_ReadAllLatest(m, TOF_MAX_SAMPLE_AGE_MS);
 
-            /* The wall follower's own interval, which is this cycle plus the
-             * STRAIGHT_TOF_DIVIDER - 1 short ones before it. Its slew limit
-             * and its integral are both rates, so handing it the nominal
-             * 40 ms while the true gap is 168 ran them at a quarter of the
-             * speed their constants claim. */
+            /* Its own interval, measured. The slew limit and the integral are
+             * rates, so they need the gap they are actually integrated over
+             * rather than the nominal one. */
             float tof_dt_s = (float)(now - last_tof) * 0.001f;
 
             if (tof_dt_s > WALL_FOLLOW_UPDATE_S * 10.0f)

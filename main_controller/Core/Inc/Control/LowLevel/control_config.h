@@ -762,8 +762,45 @@
  * run should ever produce, and still far short of a wrong turn. */
 #define WALL_FOLLOW_KI_LIMIT_DEG 8.0f
 
-#define WALL_FOLLOW_SINGLE_FAR_KP 0.20f
-#define WALL_FOLLOW_SINGLE_FAR_TILT_DEG 2.5f
+/* HOW MUCH A SINGLE-WALL READING IS WORTH WHEN IT READS LONG.
+ *
+ * Confidence is 1.0 at the setpoint and falls linearly to this floor at
+ * WALL_FOLLOW_USABLE_MAX_MM, where the reading stops being used at all. Both
+ * the gain and the tilt clamp are multiplied by it, so the loop acts on a
+ * reading in proportion to how likely it is to mean what it says.
+ *
+ * REPLACES A BINARY RULE THAT COST A RUN. The old version keyed on the SIGN of
+ * the error: any long reading got a fifth of the gain and a 2.5 degree cap.
+ * The robot then carried a 14 mm error for a full second against a right wall
+ * reading 76 mm -- twelve millimetres long, where an opening reads 240 and the
+ * usable gate already rejects anything past 95 -- and the rule throttled a
+ * correction that was entirely correct. When the left wall came into range it
+ * agreed: too close on the left by 14 where the right had said too far by 12.
+ * The cell ended 28 mm off centre and the next turn jammed.
+ *
+ * The ramp's two ends are the two things already known: a reading at the
+ * setpoint is certain, a reading at the gate is about to be discarded. Only
+ * the middle is interpolated, which is the honest shape for a quantity that
+ * degrades gradually.
+ *
+ * 0.25 keeps a quarter of the authority at the very edge of usable range --
+ * enough to bleed off drift, far too little to lunge at an opening. */
+#define WALL_FOLLOW_FAR_CONF_FLOOR 0.25f
+
+/* Confidence below which the INTEGRAL stops learning.
+ *
+ * The proportional term may act on a doubtful reference in proportion to the
+ * doubt, because it forgets the moment the reference changes. An integrator
+ * does not forget: a wrong guess accumulated into it is held until something
+ * else unwinds it, which is exactly how a term meant to learn a mechanical
+ * bias ends up holding the robot off the maze. So it gets a threshold rather
+ * than a taper.
+ *
+ * 0.80 corresponds to a reading about a quarter of the way from setpoint to
+ * the usable gate -- roughly 8 mm long on this geometry. Inside that, a long
+ * reading is an off-centre robot. Past it, it might be a wall ending, and
+ * guessing is not something an integrator should do. */
+#define WALL_FOLLOW_TRUST_CONF 0.80f
 
 /* Lateral error (mm) -> commanded heading offset (deg).
  *
@@ -949,17 +986,26 @@
 #define STRAIGHT_YAW_LIMIT 80.0f
 #define STRAIGHT_YAW_INT_LIMIT 20.0f
 
-/* Control cycles between ToF sweeps during a fused move.
- * 4 at CONTROL_SAMPLE_TIME_S is 25 Hz, which already outruns the sensors'
- * TOF_INTER_MEASUREMENT_MS. Polling every cycle would just spend I2C time
- * re-reading the same measurement. */
-#define STRAIGHT_TOF_DIVIDER 4U
+/* Control cycles per complete rotation of the round-robin ToF poll.
+ *
+ * MUST EQUAL TOF_SENSOR_COUNT, which straightline_controller.c asserts. One
+ * sensor is polled per control cycle, so this many cycles is exactly the
+ * period in which every sensor is refreshed once -- which is when the wall
+ * follower has genuinely new data on all three and not before.
+ *
+ * 4 -> 3 when the poll went round-robin. It used to mean "cycles between
+ * sweeps of all three", and a sweep of three cost 35 ms of I2C with the
+ * control loop stopped throughout: 10, 10, 10, 35 repeating, 53% of a move
+ * spent not running. Spread one per cycle it is the same work, the same
+ * per-sensor rate, and no cycle blocked for more than about twelve. */
+#define STRAIGHT_TOF_DIVIDER 3U
 
-/* Seconds between WallFollow_Update() calls. It runs once per ToF sweep, not
- * once per control cycle, and both the slew limit and the drift bleed are
- * rates -- so they need the interval they are actually integrated over. The
- * bleed had been using the control period and was therefore running
- * STRAIGHT_TOF_DIVIDER times slower than its constant claimed. */
+/* NOMINAL seconds between WallFollow_Update() calls -- one complete rotation
+ * of the ToF poll. The real interval is MEASURED and passed in, because the
+ * slew limit and the integral are both rates and a nominal figure that the
+ * loop does not actually keep makes them lie by whatever the difference is.
+ * This survives as the floor that measurement is clamped to, and as the number
+ * the host test and these notes reason about. */
 #define WALL_FOLLOW_UPDATE_S                                                   \
   (CONTROL_SAMPLE_TIME_S * (float)STRAIGHT_TOF_DIVIDER)
 
