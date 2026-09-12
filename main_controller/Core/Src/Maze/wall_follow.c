@@ -52,7 +52,8 @@ static uint8_t usable(const ToF_Measurement_t *m)
 }
 
 
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+                        float dt_s)
 {
     uint8_t left_ok  = usable(&m[TOF_LEFT]);
     uint8_t right_ok = usable(&m[TOF_RIGHT]);
@@ -119,7 +120,7 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
          * function exists to avoid, just in the other direction. Losing a wall
          * happens at every cell boundary, so it is the common case, not a
          * corner one. */
-        const float ease = WALL_FOLLOW_TILT_SLEW_DPS * WALL_FOLLOW_UPDATE_S;
+        const float ease = WALL_FOLLOW_TILT_SLEW_DPS * dt_s;
 
         wf_error_mm = 0.0f;
 
@@ -169,15 +170,40 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
     const float cap = single_far ? WALL_FOLLOW_SINGLE_FAR_TILT_DEG
                                  : WALL_FOLLOW_MAX_TILT_DEG;
 
-    /* INTEGRATE ONLY ON A REFERENCE WORTH TRUSTING. Two walls resolve the
-     * ambiguity outright, and a single wall reading SHORT is unambiguous too.
-     * The far direction on a single wall is exactly the case that cannot tell
-     * an off-centre robot from a wall that has ended, and winding an integrator
-     * on that would bake the guess in permanently. Freezing is the right
-     * answer: the term keeps what it has learned and stops learning. */
-    if (!single_far) {
+    /* PROPORTIONAL ONLY. The integral is deliberately absent from this sum --
+     * it goes to the heading target instead, so the clamp below bounds how
+     * hard the robot may lean to fix a POSITION error and nothing else. */
+    float tilt      = kp * wf_error_mm;
+    uint8_t clamped = 0U;
+
+    if (tilt >  cap) { tilt =  cap; clamped = 1U; }
+    if (tilt < -cap) { tilt = -cap; clamped = 1U; }
+
+    /* ANTI-WINDUP, and it is the ordinary kind: stop integrating while the
+     * proportional term is saturated.
+     *
+     * Without it this term stopped being a bias estimator. A single-wall cell
+     * with the robot 23 mm off centre asks the P term for 11.5 degrees against
+     * a 10 degree clamp, and the integral -- seeing that same 23 mm -- moved
+     * 3.3 degrees in that one cell. Over five such cells it drove itself to
+     * WALL_FOLLOW_KI_LIMIT_DEG and pinned there, and because it is added to the
+     * heading target it then dragged the robot 7 degrees off the maze. The
+     * "growing heading error" in the second half of that run was this term's
+     * own output.
+     *
+     * A large lateral error is a POSITION error and belongs entirely to the
+     * proportional term. Only what P cannot remove is evidence of a standing
+     * bias, and while P is pinned there is no such evidence to be had -- the
+     * loop is already doing everything it can.
+     *
+     * The OTHER freeze, on single_far, is a different argument and both are
+     * needed. Two walls resolve the ambiguity outright and a single wall
+     * reading SHORT is unambiguous too, but a single wall reading FAR cannot
+     * tell an off-centre robot from a wall that has ended -- and winding an
+     * integrator on that would bake the guess in permanently. */
+    if (!single_far && !clamped) {
         wf_drift_deg += WALL_FOLLOW_KI_DEG_PER_MM_S
-                        * wf_error_mm * WALL_FOLLOW_UPDATE_S;
+                        * wf_error_mm * dt_s;
 
         if (wf_drift_deg >  WALL_FOLLOW_KI_LIMIT_DEG)
             wf_drift_deg =  WALL_FOLLOW_KI_LIMIT_DEG;
@@ -186,14 +212,6 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
     }
 
     wf_integral = wf_drift_deg;
-
-    /* PROPORTIONAL ONLY. The integral is deliberately absent from this sum --
-     * it goes to the heading target instead, so the clamp below bounds how
-     * hard the robot may lean to fix a POSITION error and nothing else. */
-    float tilt = kp * wf_error_mm;
-
-    if (tilt >  cap) tilt =  cap;
-    if (tilt < -cap) tilt = -cap;
 
     /* SLEW LIMIT. The value above is where the heading target should go; this
      * decides how fast it is allowed to get there.
@@ -210,7 +228,7 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
      * cycles, because sampling faster than the sensor produces only re-reads a
      * stale measurement. Using the control period here would make the slew
      * STRAIGHT_TOF_DIVIDER times slower than the constant says. */
-    const float max_step = WALL_FOLLOW_TILT_SLEW_DPS * WALL_FOLLOW_UPDATE_S;
+    const float max_step = WALL_FOLLOW_TILT_SLEW_DPS * dt_s;
     float       step     = tilt - wf_tilt_deg;
 
     if (step >  max_step) step =  max_step;

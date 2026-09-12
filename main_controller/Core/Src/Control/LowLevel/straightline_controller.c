@@ -372,7 +372,11 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     sl_breakaway_count = 0U;
 
     uint32_t start_ms = HAL_GetTick();
-    uint32_t last_pid = 0;
+    /* Both seeded from the move's own start, never from 0: a tick counter that
+     * has been running for minutes would otherwise make the first measured
+     * period enormous. */
+    uint32_t last_pid = start_ms;
+    uint32_t last_tof = start_ms;
     uint32_t tof_div  = 0;
     float    tilt_deg = 0.0f;
 
@@ -394,7 +398,34 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             continue;
         }
 
+        /* THE PERIOD IS MEASURED, NOT ASSUMED, and the difference is not
+         * small. A ToF sweep blocks this loop for 138 ms, so the real cadence
+         * is 10, 10, 10, 138 and repeat -- 81% of a move's wall-clock time is
+         * spent inside one of those reads with the motors holding a stale
+         * command.
+         *
+         * Telling a PID that a 138 ms step took 10 ms multiplies its
+         * derivative by 13.8. The trace shows exactly that: across one sweep
+         * the heading error moved 5.66 deg, the D term read it as
+         * 0.20 * 5.66 / 0.010 = 113 units, P added 42, and the steering
+         * clamped at its limit. With the true period it would have been 8
+         * units and nothing would have saturated. Every steering slam in the
+         * late half of that run is this arithmetic, not a collision.
+         *
+         * The blocking read is the real defect and wants fixing in the ToF
+         * driver. Until then the loop must at least be honest about how long
+         * it has been away. */
+        float dt_s = (float)(now - last_pid) * 0.001f;
+
+        /* Bounded so a debugger halt or a lost I2C transaction cannot hand the
+         * PIDs a period long enough to wind the integrator in one step. */
+        if (dt_s > CONTROL_SAMPLE_TIME_S * 40.0f) dt_s = CONTROL_SAMPLE_TIME_S * 40.0f;
+        if (dt_s < CONTROL_SAMPLE_TIME_S)         dt_s = CONTROL_SAMPLE_TIME_S;
+
         last_pid = now;
+
+        controller.distance_pid.T = dt_s;
+        yaw_pid.T                 = dt_s;
 
         YawEstimator_Correct();
         YawEstimator_PublishTelemetry();
@@ -425,9 +456,26 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
         if (++tof_div >= STRAIGHT_TOF_DIVIDER) {
             tof_div = 0;
             ToF_Measurement_t m[TOF_SENSOR_COUNT];
-            (void)ToF_ReadAll(m);
+            /* Latest, not newest-only: free-running, three polls in four
+             * find nothing new, and handing the wall follower an invalid
+             * reading each time would make it drop and re-acquire its
+             * reference several times a second. */
+            (void)ToF_ReadAllLatest(m, TOF_MAX_SAMPLE_AGE_MS);
 
-            tilt_deg = WallFollow_Update(m);
+            /* The wall follower's own interval, which is this cycle plus the
+             * STRAIGHT_TOF_DIVIDER - 1 short ones before it. Its slew limit
+             * and its integral are both rates, so handing it the nominal
+             * 40 ms while the true gap is 168 ran them at a quarter of the
+             * speed their constants claim. */
+            float tof_dt_s = (float)(now - last_tof) * 0.001f;
+
+            if (tof_dt_s > WALL_FOLLOW_UPDATE_S * 10.0f)
+                tof_dt_s = WALL_FOLLOW_UPDATE_S * 10.0f;
+            if (tof_dt_s < WALL_FOLLOW_UPDATE_S)
+                tof_dt_s = WALL_FOLLOW_UPDATE_S;
+
+            tilt_deg = WallFollow_Update(m, tof_dt_s);
+            last_tof = now;
 
             /* FRONT-WALL ALIGNMENT, attempted only in the first quarter of the
              * move and applied at most once.

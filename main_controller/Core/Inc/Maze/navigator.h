@@ -217,6 +217,17 @@ extern volatile uint8_t  tm_maze_abort_reason;
  * has to go. Carrying it would apply the correction twice. */
 extern volatile float tm_maze_residual_cm;
 
+/* Continuous-ranging mode switching, per run. Both should read 0.
+ *
+ * A failed START means the run went ahead on blocking single-shot reads, so it
+ * is slow but correct -- read the timing before concluding anything about the
+ * tuning. A failed STOP is the more serious one: the stop is only a request
+ * and the part is in an undefined state if it is reconfigured during the
+ * window, so a 1 here means the next thing to touch the sensors may find them
+ * in a state it does not expect. */
+extern volatile uint8_t tm_maze_tof_start_fail;
+extern volatile uint8_t tm_maze_tof_stop_fail;
+
 /* BLOCKING. Runs the whole exploration and returns when it ends; check
  * tm_maze_abort_reason for why. Calling it again after a run has completed
  * does nothing, because a second lap would drive the robot back through an

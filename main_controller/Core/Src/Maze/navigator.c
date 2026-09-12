@@ -16,6 +16,8 @@ volatile uint8_t     tm_maze_complete;
 volatile uint32_t    tm_maze_moves;
 volatile uint8_t     tm_maze_abort_reason;
 volatile float       tm_maze_residual_cm;
+volatile uint8_t     tm_maze_tof_start_fail;
+volatile uint8_t     tm_maze_tof_stop_fail;
 
 
 static void recordCell(float move_error_cm, uint8_t move_ok,
@@ -171,6 +173,18 @@ void Navigator_Run(void)
     MazeMap_Init();
     MazeMap_SetPose(NAV_START_X, NAV_START_Y, NAV_START_DIR);
     WallFollow_ResetBias();   /* start of a RUN: forget the learned bias too */
+
+    /* FREE-RUN THE SENSORS FOR THE WHOLE RUN. See MAZE_TOF_CONTINUOUS.
+     *
+     * Started before the filter reset, not after, so the reset sees the sensors
+     * already in continuous mode and arms its discard accordingly. The two are
+     * describing the same state and should not disagree about it. */
+#if MAZE_TOF_CONTINUOUS
+    if (ToF_StartContinuousAll() != TOF_OK) {
+        tm_maze_tof_start_fail = 1U;
+    }
+#endif
+
     ToF_ResetFilterAll();
     TurnController_ResetYaw();   /* start of run: heading origin is here */
 
@@ -307,6 +321,22 @@ void Navigator_Run(void)
         }
     }
 
+    /* ONE EXIT, and everything that has to be undone is undone here.
+     *
+     * Every break above lands on this line, and the only other way out of this
+     * function returns before the sensors are started. That matters more than
+     * usual because stopping is the awkward path on this part: the API call
+     * only REQUESTS a stop, the sensor finishes whatever measurement is in
+     * flight first, and reconfiguring during that window leaves the device in
+     * an undefined state. A stop skipped on an abort path would leave the
+     * sensors free-running into whatever ran next. */
     Motor_Brake();
+
+#if MAZE_TOF_CONTINUOUS
+    if (ToF_StopContinuousAll() != TOF_OK) {
+        tm_maze_tof_stop_fail = 1U;
+    }
+#endif
+
     tm_maze_complete = 1U;
 }

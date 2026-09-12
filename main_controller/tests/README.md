@@ -1,14 +1,21 @@
 # Host-side tests
 
-Two suites live here. Both compile real firmware sources on the development
+Seven suites live here. Most compile real firmware sources on the development
 machine and run them against simulated data, so they catch maths errors that
 on-target testing cannot: on hardware you can only watch the output, whereas
-here it can be compared against a known ground truth.
+here it can be compared against a known ground truth. The rest mirror logic that
+cannot be linked on the host because it needs the HAL or the ST API, and pin the
+RULE rather than the plumbing.
 
 | Suite | Covers | Run after changing |
 |---|---|---|
 | `ekf_host_test.c` | Yaw EKF (gyro + encoder fusion) | `EKF.c` |
 | `tof_filter_host_test.c` | VL53L0X noise filter | `tof_filter.c` |
+| `tof_cache_host_test.c` | Held-reading age gate | `tof_sensors.c`, `TOF_MAX_SAMPLE_AGE_MS` |
+| `motion_profile_host_test.c` | Trapezoidal profiles | `motion_profile.c` |
+| `maze_map_host_test.c` | Pose and wall bookkeeping | `maze_map.c` |
+| `navigator_host_test.c` | Reactive wall-following rule | `navigator.c` |
+| `wall_follow_host_test.c` | Lateral loop and the cascade rule | `wall_follow.c`, the `WALL_FOLLOW_*` constants |
 
 ---
 
@@ -113,6 +120,30 @@ than that it never happens. A one-sample blip is much cheaper than being blind
 to a real opening in the maze.
 
 
+## tof_cache_host_test.c - the held-reading age gate
+
+```sh
+gcc -O1 -Wall -Wextra -o tof_cache_test tests/tof_cache_host_test.c \
+    -I Core/Inc/Control/LowLevel -lm && ./tof_cache_test
+```
+
+Mirrors the decision `ToF_ReadAllLatest()` makes when a free-running sensor has
+nothing new yet. The driver cannot run on the host -- it pulls in the ST API and
+the HAL -- so what is pinned here is the rule rather than the plumbing.
+
+The rule exists because continuous ranging and a 10 ms control loop do not tick
+together: three polls in four legitimately find nothing new. Reporting that as
+an invalid measurement is honest and useless, because the wall follower reads
+invalid as "no wall" and would drop and re-acquire its reference several times a
+second. So the newest good reading is held and served.
+
+The age limit is the other half. Without it a dead sensor is indistinguishable
+from one merely between measurements, and its last reading would be served
+forever while the robot steers to a wall that is no longer there.
+
+Also pins the unsigned-subtraction idiom against the tick counter's 32-bit wrap,
+where a signed comparison would call a brand-new reading ancient.
+
 ## navigator_host_test.c - reactive wall-following rule
 
 ```sh
@@ -135,4 +166,4 @@ logic error.
 The rule itself is copied into the test rather than linked, because
 `navigator.c` needs the HAL and cannot build on the host. The constants come
 from the real `navigator.h`, so the test also proves that header parses
-standalone and that `MazeTrace_t` still satisfies its 36-byte stride assert.
+standalone and that `MazeTrace_t` still satisfies its 40-byte stride assert.

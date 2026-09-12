@@ -51,7 +51,12 @@ uint8_t WallSense_ReadCell(WallReading_t *out)
     for (uint8_t s = 0; s < WALL_SENSE_SAMPLES; s++) {
 
         ToF_Measurement_t m[TOF_SENSOR_COUNT];
-        (void)ToF_ReadAll(m);   /* a partial sweep is still worth voting on */
+        /* FRESH, not latest. The robot is standing still, so waiting costs
+         * nothing, and the vote is only worth counting if the samples are
+         * independent -- repeated non-blocking reads would return one
+         * measurement five times and report it as a unanimous 5/5.
+         * A partial sweep is still worth voting on. */
+        (void)ToF_ReadAllFresh(m);
 
         for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
             if (m[i].valid && m[i].distance_mm != TOF_DISTANCE_INVALID) {

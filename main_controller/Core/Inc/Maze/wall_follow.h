@@ -84,8 +84,17 @@ void WallFollow_Reset(void);
  * every cell and never converging on it. */
 void WallFollow_ResetBias(void);
 
-/* Feed one ToF sweep. Returns the heading offset in degrees to ADD to the
- * heading target: positive tilts the robot anticlockwise.
+/* Feed one ToF sweep, with the MEASURED seconds since the previous one.
+ *
+ * The interval is a parameter rather than a constant because the true gap is
+ * not the nominal WALL_FOLLOW_UPDATE_S. A ToF read blocks the control loop for
+ * about 138 ms, so the real cadence is 168 ms, and the slew limit and the
+ * integral -- both rates -- were running at a quarter of the speed their
+ * constants claim. The constant survives as the nominal value the host test
+ * and the notes reason about, and as the floor this is clamped to.
+ *
+ * Returns the heading offset in degrees to ADD to the heading target:
+ * positive tilts the robot anticlockwise.
  *
  * FORWARD TRAVEL ONLY. The side sensors are at the very front of the chassis,
  * so in reverse they trail the body on a long arm and report the opposite of
@@ -95,7 +104,8 @@ void WallFollow_ResetBias(void);
  * Returns 0 when no wall is usable, which is the correct behaviour rather
  * than a failure -- the robot then holds its heading target open-loop until a
  * wall comes back. */
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT]);
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+                        float dt_s);
 
 /* The integral, in degrees, to be ADDED TO THE HEADING TARGET by the caller.
  *

@@ -196,4 +196,40 @@ uint32_t ToF_GetFilterJumpCount(ToF_Sensor_t sensor);
  * measurement. Returns TOF_OK only when all three produced a valid reading. */
 int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT]);
 
+/* Read all three, falling back to the newest good reading when a free-running
+ * sensor has nothing new yet. THIS IS WHAT A MOVING ROBOT SHOULD CALL.
+ *
+ * Continuous ranging produces a result about every TOF_INTER_MEASUREMENT_MS
+ * while the control loop runs every CONTROL_SAMPLE_TIME_S, so most polls
+ * legitimately find nothing new. ToF_ReadAll() reports that as an invalid
+ * measurement, and a wall follower reads invalid as "no wall" -- it would drop
+ * its reference and pick it up again several times a second. This holds the
+ * last good reading instead, and only gives up on it once it is older than
+ * max_age_ms, which is what tells a slow sensor apart from a dead one.
+ *
+ * Returns TOF_OK only when all three produced a reading, fresh or held. */
+int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+                      uint32_t max_age_ms);
+
+/* Read all three, WAITING for a genuinely new measurement from each.
+ * THIS IS WHAT A STATIONARY ROBOT SHOULD CALL.
+ *
+ * The counterpart to the above, and the distinction is about independence
+ * rather than speed. Voting several times at a cell centre only means anything
+ * if the votes are separate measurements; repeated non-blocking reads would
+ * return one sample several times and make a 5-sample vote look confident
+ * about a single reading. In single-shot mode this is ToF_ReadAll() unchanged,
+ * since that already blocks for a fresh measurement. */
+int ToF_ReadAllFresh(ToF_Measurement_t out[TOF_SENSOR_COUNT]);
+
+/* Read accounting. tof_stale_drops is the one worth watching: it counts
+ * readings that aged out of the cache entirely, meaning a sensor stopped
+ * producing rather than merely not being ready yet. It should stay at zero.
+ * The ratio of fresh to cached says whether the loop is outrunning the
+ * sensors, which with a 10 ms loop and a 40 ms sensor it should be, about
+ * one fresh read in four. */
+extern volatile uint32_t tof_fresh_count;
+extern volatile uint32_t tof_cached_count;
+extern volatile uint32_t tof_stale_drops;
+
 #endif /* TOF_SENSORS_H */

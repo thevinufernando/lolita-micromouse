@@ -527,6 +527,41 @@
  * Only a runaway escape: the stop completes in a millisecond or two. */
 #define TOF_STOP_TIMEOUT_MS 100U
 
+/* Oldest a held reading may be before ToF_ReadAllLatest() gives up on it, ms.
+ *
+ * This is the line between "the sensor has not finished this measurement yet"
+ * and "the sensor has stopped". Free-running, a result lands every
+ * TOF_INTER_MEASUREMENT_MS, so anything under that is the normal case and must
+ * not raise an alarm. Two intervals plus a timing budget is comfortably past
+ * one missed measurement and comfortably short of the robot having moved
+ * anywhere meaningful -- 120 ms is 1.2 cm at cruise.
+ *
+ * Without a limit at all a dead sensor would go unnoticed: its last reading
+ * would be served forever and the robot would steer to a wall that is no
+ * longer there. tof_stale_drops counts how often this fires, and should be
+ * zero on a healthy run. */
+#define TOF_MAX_SAMPLE_AGE_MS 120U
+
+/* Run the maze with the ToF sensors free-running rather than single-shot.
+ *
+ * !! THIS IS THE ROLLBACK SWITCH. Set it to 0 to get the old behaviour. !!
+ *
+ * Single-shot blocks the control loop for about 46 ms per sensor, so a sweep
+ * of three costs 138 ms. Measured on a real move, the loop ran 60 cycles at
+ * 10 ms and 19 at 138: of 3222 ms, 2622 were spent inside a sensor read with
+ * the motors holding a stale command. The loop was open 81% of the time.
+ *
+ * That is not a tuning problem, it is the reason several tuning problems were
+ * unfixable. It produced a 13.8x derivative kick on every sweep cycle -- the
+ * PID was told a 138 ms step took 10 -- which saturated the steering, and it
+ * left the wall follower correcting at a sixth of the rate its constants
+ * claimed.
+ *
+ * Free-running trades that for samples up to one measurement period old, about
+ * 4 mm of travel at cruise. If the arena behaves worse rather than better,
+ * this define is the single thing to change. */
+#define MAZE_TOF_CONTINUOUS 1
+
 /* ========================== WALL DETECTION ============================== */
 /* Distances to booleans. See Core/Inc/Maze/wall_sense.h for the reasoning.  */
 
@@ -680,8 +715,27 @@
  * never converging -- which is precisely what has been happening to
  * wf_drift_deg, wiped at the start of all 26 moves of every run and reading
  * exactly 0.000 in every log because of it. Only WallFollow_ResetBias() clears
- * it, once at the start of a run. */
-#define WALL_FOLLOW_KI_DEG_PER_MM_S 0.10f
+ * it, once at the start of a run.
+ *
+ * 0.10 -> 0.04, BECAUSE IT WAS SIZED FOR THE WRONG ERROR. The 5 second figure
+ * above assumed the 8 mm standing offset that a two-wall corridor produces.
+ * Single-wall cells routinely show 20-25 mm, and at 0.10 a 23 mm error moved
+ * this term 3.3 degrees in ONE cell -- measured, not estimated. Five such
+ * cells in a row drove it to WALL_FOLLOW_KI_LIMIT_DEG and pinned it there, and
+ * since it is added to the heading target it then held the robot 7 degrees off
+ * the maze. The growing heading error in the second half of that run was this
+ * constant's own output.
+ *
+ * A term that can move degrees within a single cell is not learning a property
+ * of the robot, it is a second and slower position loop competing with the
+ * first. At 0.04 an 8 mm standing offset still buys the 4 degrees the P term
+ * was holding, over about 12 seconds or five cells, which is the timescale a
+ * mechanical asymmetry deserves.
+ *
+ * The gain is only half the fix. See the anti-windup in wall_follow.c: while
+ * the proportional term is clamped there is no evidence of a standing bias to
+ * be had, because the loop is already doing everything it can. */
+#define WALL_FOLLOW_KI_DEG_PER_MM_S 0.04f
 
 /* Clamp on the integral, in degrees.
  *

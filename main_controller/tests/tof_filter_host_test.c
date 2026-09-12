@@ -234,6 +234,42 @@ int main(void)
         check_true("NULL handling did not crash", 1, "survived");
     }
 
+    /* ---- 9: the sample rate changes, and the tuning must survive it ----
+     *
+     * Free-running ranging feeds this filter a sample every ~40 ms instead of
+     * every ~168, so the same physical motion arrives in quarter-sized steps.
+     * Two things have to stay true at the new rate: a genuine approach must
+     * NOT look like a jump, and a wall ending must still look like one. The
+     * jump detector is what separates them, and it is the one piece of tuning
+     * a rate change could plausibly invalidate. */
+    {
+        ToF_Filter_t f;
+        ToF_Filter_Reset(&f);
+
+        /* Driving at a wall at 10 cm/s, sampled every 40 ms: 4 mm per sample.
+         * Nothing here should trip the detector -- this is ordinary motion. */
+        uint32_t before = 0;
+        uint16_t d = 200;
+        for (int i = 0; i < 20; i++) {
+            ToF_Filter_Update(&f, d);
+            d = (uint16_t)(d - 4);
+        }
+        before = f.jump_count;
+        check_true("40 ms approach ramp is not seen as a jump",
+                   before == 0, before ? "detector fired" : "no jumps");
+
+        /* Now the side wall ends: the reading leaves for the next cell. That
+         * is a real step and must be followed at once, not averaged across. */
+        ToF_Filter_Update(&f, 250);
+        check_true("a wall ending still registers as a jump",
+                   f.jump_count == 1, f.jump_count ? "fired" : "MISSED");
+
+        /* And the output must actually be at the new distance, not stranded
+         * between the two -- that is the whole point of snapping. */
+        check("output follows the step immediately",
+              (float)ToF_Filter_GetLast(&f), 250.0f, 5.0f);
+    }
+
     printf("\n===== %s (%d failure%s) =====\n\n",
            failures ? "FAILURES PRESENT" : "ALL CHECKS PASSED",
            failures, failures == 1 ? "" : "s");

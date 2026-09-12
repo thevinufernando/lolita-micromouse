@@ -26,6 +26,43 @@ static uint8_t s_ready[TOF_SENSOR_COUNT];
  * triggers, and guards against starting continuous mode twice. */
 static uint8_t s_continuous[TOF_SENSOR_COUNT];
 
+/* MOST RECENT GOOD MEASUREMENT, and when it arrived.
+ *
+ * Continuous ranging and a 10 ms control loop do not tick at the same rate:
+ * the sensor produces a result about every TOF_INTER_MEASUREMENT_MS, so three
+ * polls in four legitimately find nothing new. A non-blocking read reports
+ * that as TOF_ERROR_TIMEOUT with the measurement invalidated, which is honest
+ * but useless to a control loop -- the wall follower reads "invalid" as "no
+ * wall", so it would drop its reference, slew its correction to zero, pick the
+ * wall back up on the next fresh sample, and flicker at the poll rate.
+ *
+ * So the newest good reading is kept here and served, with an age, by
+ * ToF_ReadAllLatest(). Holding it in the DRIVER rather than in each controller
+ * keeps `valid` meaning the one thing every consumer already assumes it means:
+ * this number can be trusted. */
+static ToF_Measurement_t s_last[TOF_SENSOR_COUNT];
+static uint32_t          s_last_ms[TOF_SENSOR_COUNT];
+
+/* Throw away the next sample this sensor produces.
+ *
+ * Set by ToF_ResetFilterAll(), which the navigator calls after every pivot
+ * because the stored samples describe a heading the robot no longer holds.
+ * Single-shot made that reset a guarantee: the next measurement was triggered
+ * after it. Free-running does not -- the sample already in flight may have
+ * been captured halfway through the turn, and it would refill the history with
+ * exactly the data the reset existed to discard.
+ *
+ * Dropping one sample makes the first reading the filter sees provably later
+ * than the reset, with no assumption about how long anything takes. */
+static uint8_t s_discard_next[TOF_SENSOR_COUNT];
+
+/* How the reads are going. tof_stale_drops is the one that matters: it counts
+ * readings that aged out entirely, which means a sensor stopped producing
+ * rather than merely not being ready yet. It should be zero. */
+volatile uint32_t tof_fresh_count;
+volatile uint32_t tof_cached_count;
+volatile uint32_t tof_stale_drops;
+
 /* Noise filter state, one per sensor. Kept here rather than inside the filter
  * module so the filter stays a pure, host-testable transform with no global
  * state of its own. */
@@ -462,6 +499,15 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
     (void)VL53L0X_ClearInterruptMask(
         &s_dev[sensor], VL53L0X_REG_SYSTEM_INTERRUPT_GPIO_NEW_SAMPLE_READY);
 
+    /* The sample that may straddle a pivot. Read and cleared above -- which is
+     * the whole point, the latch had to be cleared for the sensor to produce
+     * another -- but never decoded, so the filter does not see it. Reported as
+     * "nothing new yet", which is exactly what it is from the caller's side. */
+    if (s_discard_next[sensor]) {
+        s_discard_next[sensor] = 0U;
+        return TOF_ERROR_TIMEOUT;
+    }
+
     return ToF_DecodeMeasurement(sensor, &data, out);
 }
 
@@ -567,6 +613,13 @@ void ToF_ResetFilterAll(void)
 {
     for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
         ToF_Filter_Reset(&s_filter[i]);
+
+        /* The cache is history too, and it is history about a heading the
+         * robot no longer holds. Clearing the filter but serving the cached
+         * reading afterwards would defeat the reset entirely. */
+        ToF_InvalidateMeasurement(&s_last[i]);
+        s_last_ms[i]      = 0U;
+        s_discard_next[i] = s_continuous[i];   /* only free-running needs it */
     }
 }
 
@@ -606,6 +659,129 @@ int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT])
         }
 
         if (status != TOF_OK) {
+            result = TOF_ERROR;
+        }
+    }
+
+    return result;
+}
+
+
+int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+                      uint32_t max_age_ms)
+{
+    int result = TOF_OK;
+
+    if (out == NULL) {
+        return TOF_ERROR;
+    }
+
+    const uint32_t now = HAL_GetTick();
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        ToF_Sensor_t sensor = (ToF_Sensor_t)i;
+        int status;
+
+        if (!s_ready[i]) {
+            ToF_InvalidateMeasurement(&out[i]);
+            result = TOF_ERROR;
+            continue;
+        }
+
+        if (s_continuous[i]) {
+            status = ToF_ReadContinuous(sensor, &out[i], 0U);
+        } else {
+            status = ToF_ReadSingle(sensor, &out[i]);
+        }
+
+        if (status == TOF_OK) {
+            s_last[i]    = out[i];
+            s_last_ms[i] = now;
+            tof_fresh_count++;
+            continue;
+        }
+
+        /* Nothing new. Serve the last good reading while it is young enough to
+         * still describe where the robot is.
+         *
+         * The age limit is what keeps this honest. Without it a sensor that
+         * has died goes unnoticed: its last reading would be repeated forever
+         * and the wall follower would steer to a wall that is no longer there.
+         * Past the limit the measurement goes invalid, which every consumer
+         * already knows how to handle. */
+        if (s_last[i].valid && (now - s_last_ms[i]) <= max_age_ms) {
+            out[i] = s_last[i];
+            tof_cached_count++;
+            continue;
+        }
+
+        ToF_InvalidateMeasurement(&out[i]);
+
+        if (s_last[i].valid) {
+            /* Had a reading, and it aged out. That is a sensor that stopped
+             * producing, not a poll that was merely early. */
+            ToF_InvalidateMeasurement(&s_last[i]);
+            tof_stale_drops++;
+        }
+
+        result = TOF_ERROR;
+    }
+
+    return result;
+}
+
+
+int ToF_ReadAllFresh(ToF_Measurement_t out[TOF_SENSOR_COUNT])
+{
+    int result = TOF_OK;
+
+    if (out == NULL) {
+        return TOF_ERROR;
+    }
+
+    const uint32_t now = HAL_GetTick();
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        ToF_Sensor_t sensor = (ToF_Sensor_t)i;
+        int status;
+
+        if (!s_ready[i]) {
+            ToF_InvalidateMeasurement(&out[i]);
+            result = TOF_ERROR;
+            continue;
+        }
+
+        /* WAITS for a genuinely new measurement in continuous mode, which is
+         * the opposite of what a moving robot wants and exactly right for a
+         * stationary one. WallSense votes several times at a cell centre and
+         * the votes are only worth counting if they are independent samples;
+         * back-to-back non-blocking reads would return one sample several
+         * times over and turn a 5-sample vote into a 1-sample vote wearing a
+         * disguise.
+         *
+         * Single-shot already blocks for a fresh measurement, so there it is
+         * the existing behaviour unchanged. */
+        if (s_continuous[i]) {
+            status = ToF_ReadContinuous(sensor, &out[i], 1U);
+
+            /* One retry, and only for a timeout. The sample armed for discard
+             * by ToF_ResetFilterAll() reports itself that way, and consuming
+             * it is the point -- but a caller that asked to WAIT for a new
+             * measurement should get one, not the news that the previous one
+             * was thrown away. A genuinely broken stream simply times out
+             * twice, which is bounded and still reports failure. */
+            if (status == TOF_ERROR_TIMEOUT) {
+                status = ToF_ReadContinuous(sensor, &out[i], 1U);
+            }
+        } else {
+            status = ToF_ReadSingle(sensor, &out[i]);
+        }
+
+        if (status == TOF_OK) {
+            s_last[i]    = out[i];
+            s_last_ms[i] = now;
+            tof_fresh_count++;
+        } else {
             result = TOF_ERROR;
         }
     }

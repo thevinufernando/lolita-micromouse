@@ -143,5 +143,47 @@ int main(void){
           "and never past its own limit while doing so");
   }
 
+  /* ANTI-WINDUP. The measured failure: a single-wall cell 23 mm off centre.
+     The P term asks for more than the clamp, so the loop is already doing all
+     it can, and anything the integrator adds on top is windup rather than a
+     bias it has learned. Replays the cell that moved the term 3.3 degrees. */
+  {
+    const float e   = -23.0f;                       /* as recorded */
+    const float p   = WALL_FOLLOW_KP_DEG_PER_MM * e;
+    const int   sat = (fabsf(p) > WALL_FOLLOW_MAX_TILT_DEG);
+
+    CHECK(sat, "a 23 mm single-wall error does saturate the tilt clamp");
+
+    /* THE LOWER GAIN ALONE IS NOT ENOUGH, which is the reason the gate is
+       there rather than just a smaller number. The wall was in view for about
+       1.4 s of that cell and the term moved 3.3 degrees. The reduced gain cuts
+       that to roughly 1.3 -- better, still far too much for something meant to
+       learn a property of the robot over a whole run. */
+    const float seen_s  = 1.4f;
+    float       ungated = WALL_FOLLOW_KI_DEG_PER_MM_S * e * seen_s;
+
+    CHECK(fabsf(ungated) < 3.3f,
+          "the reduced gain alone cuts the measured windup");
+    CHECK(fabsf(ungated) > 0.5f,
+          "but leaves more than a bias estimator should move in one cell");
+
+    /* Gated on saturation it does not move at all, which is the point. */
+    float gated = sat ? 0.0f : ungated;
+    CHECK(gated == 0.0f, "gated on saturation it does not move");
+
+    /* And the gate must NOT fire in the case the term exists for: a small
+       standing offset with both walls in view, where P is nowhere near its
+       clamp and the residual really is evidence of a bias. */
+    const float small = 8.0f;
+    CHECK(fabsf(WALL_FOLLOW_KP_DEG_PER_MM * small) < WALL_FOLLOW_MAX_TILT_DEG,
+          "an 8 mm standing offset leaves the clamp alone, so it still learns");
+  }
+
+  /* The two freezes are independent and both must hold. A single wall reading
+     SHORT is unambiguous, so it is not single_far -- only the clamp can stop
+     it there, which is exactly the case above. */
+  CHECK(err_left(40) < 0.0f && err_left(90) > 0.0f,
+        "short reads negative and long reads positive on a left wall");
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

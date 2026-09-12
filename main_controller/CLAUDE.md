@@ -528,6 +528,112 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (newest) - The integral was the thing moving, not the alignment
+
+First run on continuous ranging. Mode switching worked: both failure flags read
+0, 3870 fresh reads against 3 held, no stale drops. The run reached 33 cells,
+up from 27.
+
+**Front-wall alignment got much better and is not the problem.** Stop distances
+against the 87 mm target spanned 67-92 mm, mean 81. The previous run spanned
+42-112. Nothing about the alignment gain wants reducing; it was starved of
+sweeps, and now it is not.
+
+**The lateral integral was winding on position error.** Per-cell it moved as
+much as 3.3 degrees, pinned at WALL_FOLLOW_KI_LIMIT_DEG for a stretch, and
+since it is added to the heading target it then held the robot 7 degrees off the
+maze. The heading errors of +11 to +14.7 degrees in the late half of that run
+were this term's own output, not something it was correcting.
+
+The cause is that a single-wall cell routinely shows 20-25 mm of lateral error
+where the two-wall corridor the gain was sized against shows 8. Two fixes, and
+both are needed:
+
+- **Anti-windup**, the ordinary kind: stop integrating while the proportional
+  term is clamped. A large lateral error is a POSITION error and belongs
+  entirely to P. Only what P cannot remove is evidence of a standing bias, and
+  while P is pinned there is no such evidence to be had.
+- **`WALL_FOLLOW_KI_DEG_PER_MM_S` 0.10 -> 0.04.** The host test shows why the
+  gain alone was not enough: at 0.04 the measured cell still moves the term
+  about 1.3 degrees, better than 3.3 and still far too much for something
+  learning a property of the robot. The gate is what removes it.
+
+**The loop is four times better and not yet fixed.** Periods now read 10 ms for
+150 cycles and 35 ms for 49, so 53% of the move still has the loop stopped,
+down from 81%. The 35 ms is I2C traffic for three sensors rather than ranging
+latency, so the remaining move is to read one sensor per control cycle and let
+the held-reading cache cover the other two: four cycles would cost about 48 ms
+instead of 65, and no single cycle would exceed about 12.
+
+### 2026-09-12 (last) - The control loop was open 81% of the time
+
+Measured from the raw straight trace: 60 cycles at 10 ms and 19 at 138 ms. Of
+3222 ms in one move, 2622 were spent inside a blocking sensor read with the
+motors holding a stale command.
+
+`ToF_ReadAll()` does three blocking single-shot reads at about 46 ms each. The
+driver has had a non-blocking continuous mode all along -- its own header calls
+it "what a moving robot wants" -- and the maze run simply never turned it on.
+Only two test-harness functions did.
+
+**This was not a tuning problem, it was why several tuning problems could not be
+fixed.** Every PID was told each 138 ms gap was 10 ms, which multiplies the
+derivative by 13.8. From the trace, across one sweep the heading error moved
+5.66 deg, the D term computed `0.20 * 5.66 / 0.010` = 113 units, P added 42, and
+the steering clamped at its limit. With the true period it is 8 units and
+nothing saturates. Every steering slam in the late half of that run was this
+arithmetic, not a collision. The wall follower had the same bug at a quarter
+scale: its slew and integral used a nominal 40 ms against a real 168.
+
+Switching the mode is one call. These were the consequences, and two of them
+would have broken the robot outright:
+
+- **A non-blocking read with nothing new invalidates the measurement.** Polling
+  a 40 ms sensor from a 10 ms loop means three reads in four come back invalid,
+  and `usable()` in `wall_follow.c` reads invalid as "no wall" -- the loop would
+  drop its reference, slew to zero, re-acquire, and flicker at the poll rate.
+  `ToF_ReadAllLatest()` holds the newest good reading and serves it with an age.
+  The age limit is what tells a slow sensor from a dead one; without it a failed
+  sensor's last reading is served forever and the robot steers to a wall that is
+  not there. `tof_stale_drops` counts that and should be zero.
+- **`WallSense_ReadCell()` votes five times with no delay.** Single-shot made
+  each vote an independent measurement. Free-running, five back-to-back reads
+  return one sample five times and report it as a unanimous 5/5.
+  `ToF_ReadAllFresh()` waits for a genuinely new measurement per vote. Costs
+  about 200 ms per cell, down from 690.
+- **`ToF_ResetFilterAll()` after a pivot stopped being a guarantee.** It exists
+  because the stored samples describe a heading the robot no longer holds.
+  Single-shot guaranteed the next sample was triggered after it; free-running
+  does not, and the sample in flight may have been captured mid-rotation. It now
+  arms a per-sensor discard: the next sample is consumed, latch cleared, never
+  decoded, so the first reading the filter sees provably started after the reset.
+- **Stopping continuous mode moved onto the critical route.** A stop is only a
+  request and the part is undefined if reconfigured during the window. Every
+  `break` in `Navigator_Run()` already fell through to one cleanup point, so the
+  stop lives there, and a failure is recorded in `tm_maze_tof_stop_fail` rather
+  than swallowed.
+
+`MAZE_TOF_CONTINUOUS` is the rollback: set it to 0 and everything behaves as it
+did before. `TOF_MAX_SAMPLE_AGE_MS` is 120, two measurement periods plus a
+timing budget, which is 1.2 cm of travel at cruise.
+
+**Nothing else was retuned, on purpose.** `TOF_FILTER_EMA_ALPHA` stays at 0.2
+because per-sample noise rejection does not change with rate, only the time
+constant, from about 840 ms to 200 -- which is the point. `STRAIGHT_TOF_DIVIDER`
+stays at 4, which gives a 40 ms sweep at a true 10 ms loop and already matches
+`TOF_INTER_MEASUREMENT_MS`. `TOF_FILTER_JUMP_THRESHOLD_MM` stays at 30, and
+`tof_filter_host_test.c` gained a case proving it: at 40 ms and 10 cm/s a
+genuine approach is 4 mm per sample and must not trip the detector, while a wall
+ending still must.
+
+New suite `tof_cache_host_test.c` pins the age-gate rule, including the
+unsigned-subtraction idiom against the tick counter's 32-bit wrap.
+
+**The pass/fail test is the timing, not the feel.** The reader now histograms
+the per-cycle period from the straight trace. It should print 10 ms and nothing
+above 25. If it still shows 138s, continuous mode did not start -- check
+`tm_maze_tof_start_fail` before concluding anything about the tuning.
+
 ### 2026-09-12 (latest) - One integrator, and where it is applied
 
 The lateral loop was not converging: a run showed the robot visibly yawed left
