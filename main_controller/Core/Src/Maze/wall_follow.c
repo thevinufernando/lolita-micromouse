@@ -15,6 +15,10 @@ static uint8_t active_side = WALL_FOLLOW_NONE;
  * neither cell has an opinion, which vetoes nothing. */
 static WallFollowCells_t s_cells;
 
+/* Travel at the previous update, for working out whether the robot is actually
+ * moving. Negative means "no previous sample this move". */
+static float s_last_travel_cm = -1.0f;
+
 /* Integral of the lateral error, in degrees. It is NOT part of the tilt: it is
  * added to the heading TARGET, outside the tilt clamp, and reaches the
  * controller through WallFollow_GetDriftDeg(). wf_drift_deg holds it.
@@ -41,6 +45,11 @@ void WallFollow_Reset(void)
      * set one inherit the previous move's cells, and after a pivot those
      * describe walls that are no longer on the sides they used to be. */
     WallFollow_SetCells(0);
+
+    /* Travel restarts at zero every move, so a value carried over from the
+     * last one would make the first update of this one look like a large jump
+     * backwards. */
+    s_last_travel_cm = -1.0f;
 }
 
 
@@ -137,6 +146,27 @@ static uint8_t usable(const ToF_Measurement_t *m)
 float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
                         float dt_s, float travelled_cm)
 {
+    /* IS THE ROBOT ACTUALLY MOVING? Sampled here, at the top, because the
+     * no-reference path below returns early -- and a travel sample skipped for
+     * a stretch of cells would come back as one enormous step divided by a
+     * single interval, which reads as a robot sprinting. Whether there is a
+     * wall to follow has nothing to do with whether the wheels are turning.
+     *
+     * Lateral authority comes from leaning while travelling forward, so with
+     * no forward motion there is no correction to be had, and the fact that it
+     * did not arrive says nothing about the robot's asymmetry. A wedged run
+     * drove the integral to -7.66 of a +/-8 limit over two seconds of grinding
+     * at 3.8 cm/s. */
+    uint8_t moving = 1U;
+
+    if (s_last_travel_cm >= 0.0f && dt_s > 0.0f) {
+        const float rate = fabsf(travelled_cm - s_last_travel_cm) / dt_s;
+
+        moving = (rate >= WALL_FOLLOW_MIN_TRAVEL_CMS) ? 1U : 0U;
+    }
+
+    s_last_travel_cm = travelled_cm;
+
     uint8_t left_ok  = usable(&m[TOF_LEFT])  && !vetoed(1U, travelled_cm);
     uint8_t right_ok = usable(&m[TOF_RIGHT]) && !vetoed(0U, travelled_cm);
 
@@ -290,6 +320,12 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
      * bias, and while P is pinned there is no such evidence to be had -- the
      * loop is already doing everything it can.
      *
+     * THERE ARE THREE GATES HERE AND THEY GUARD DIFFERENT THINGS. This one is
+     * about the loop asking for everything it can; `moving` is about the robot
+     * not answering; `conf` is about the reference not being worth believing.
+     * A term that learns a property of the ROBOT has no business updating
+     * under any of the three.
+     *
      * The OTHER gate, on confidence, is a different argument and both are
      * needed. The proportional term may act on a doubtful reference in
      * proportion to how doubtful it is, because it forgets immediately if the
@@ -297,7 +333,7 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
      * would bake the guess in permanently -- so it gets a threshold rather
      * than a taper, and stops learning entirely once the reference is not
      * clearly worth trusting. */
-    if (conf >= WALL_FOLLOW_TRUST_CONF && !clamped) {
+    if (conf >= WALL_FOLLOW_TRUST_CONF && !clamped && moving) {
         wf_drift_deg += WALL_FOLLOW_KI_DEG_PER_MM_S
                         * wf_error_mm * dt_s;
 

@@ -68,17 +68,29 @@
 
 /* Where the robot is placed in the map at the start of a run.
  *
- * PUT THE ARENA INSIDE THE MAP. (0,0) facing north is the competition
- * convention and is correct for a real 16x16 maze, but it pins the robot into
- * a corner with the west and south boundaries hard against it. A bench arena
- * that opens west of the start column does not fit there: a run found exactly
- * that opening, drove through it, and left the map behind.
+ * (0,0) FACING NORTH: the competition convention, and correct when the robot
+ * really does start in the south-west corner of a 16x16 maze. The map's
+ * perimeter is pre-set by MazeMap_Init(), so the west and south boundaries are
+ * already walls before the robot looks at them.
  *
- * Starting mid-map costs nothing -- the coordinates are arbitrary labels, and
- * the recorded walls are the same shape wherever they land -- and it also
- * exercises the recorder honestly, because none of the boundary walls are
- * pre-set on top of readings the robot actually took. */
-#define NAV_START_X   8
+ * !! THE POSE MUST MATCH WHERE THE ROBOT PHYSICALLY IS. !! These coordinates
+ * are labels, not measurements -- nothing checks them against the arena, and a
+ * mismatch does not announce itself. It shows up later as the run ending with
+ * NAV_END_OFF_MAP, because the robot drove through an opening the map says is
+ * a boundary wall.
+ *
+ * That is not hypothetical here. This was 8,0 for exactly that reason: a bench
+ * arena that opens west of the start column, and a run that found the opening,
+ * drove through it and left the map behind. The last recorded run travelled
+ * SEVEN CELLS WEST of its start column, from x=8 down to x=1. If the robot is
+ * not genuinely against the west boundary when it is placed, that run from
+ * (0,0) aborts on its second westward cell.
+ *
+ * Starting mid-map costs nothing when the arena is a bench setup: the
+ * coordinates are arbitrary, the recorded walls are the same shape wherever
+ * they land, and none of the pre-set boundary walls sit on top of readings the
+ * robot actually took. Move it back if the map runs out of room to the west. */
+#define NAV_START_X   0
 #define NAV_START_Y   0
 #define NAV_START_DIR NORTH
 #define NAV_HAND_RIGHT 1     /* 1 = right-hand rule, 0 = left-hand */
@@ -124,6 +136,7 @@
 #define NAV_END_LOOPED      3U   /* back at the start cell, arena closed */
 #define NAV_END_TRACE_FULL  4U   /* ran out of room to record            */
 #define NAV_END_OFF_MAP     5U   /* the next cell is outside the maze     */
+#define NAV_END_STALLED     6U   /* wedged: commanded hard, went nowhere   */
 
 /* Actions the decision rule can produce. Recorded per cell so the log shows
  * WHY the robot did what it did, not just where it ended up. */
@@ -139,7 +152,7 @@
  * does not, the run stops on a full buffer instead of on the budget and the
  * reason is reported as NAV_END_TRACE_FULL. Keep it comfortably above
  * NAV_MAX_MOVES + 2, which covers the budget, the final record, and the extra
- * one a failed move writes. At 40 bytes each this costs 2560 bytes of RAM. */
+ * one a failed move writes. At 48 bytes each this costs 3072 bytes of RAM. */
 #define MAZE_TRACE_CAPACITY 64U
 
 typedef struct {
@@ -174,10 +187,29 @@ typedef struct {
    * the last cell means it never got there, and pinned at
    * WALL_FOLLOW_KI_LIMIT_DEG means the asymmetry is mechanical. None of that
    * is visible in a single move's trace. */
+  /* Whether entry_err_mm below means anything: a move with no wall in view
+   * the whole way has no entry error to report, and zero is a plausible
+   * value rather than an obviously absent one. Sits in padding the compiler
+   * was already inserting after `action`. */
+  uint8_t entry_valid;
   float drift_deg;
+  /* THE LATERAL ERROR THE ARRIVING MOVE STARTED WITH.
+   *
+   * Paired with the move_error_cm above, this says whether a cell's lateral
+   * offset was inherited or created. It exists to answer one question the
+   * logs could not: does a PIVOT throw the robot sideways? A run came out of
+   * a dead end 46 mm further from the same wall than it went in, across one
+   * 180 and one cell of travel, and nothing recorded which of the two did it.
+   * The per-cycle trace only survives the last move; this survives all of
+   * them. */
+  float entry_err_mm;
+  /* How far the front-wall alignment moved this move's endpoint, cm, or zero
+   * if it never fired. Which moves align and by how much was previously only
+   * inferable from where the robot happened to stop. */
+  float align_delta_cm;
 } MazeTrace_t;
 
-_Static_assert(sizeof(MazeTrace_t) == 40,
+_Static_assert(sizeof(MazeTrace_t) == 48,
                "MazeTrace_t stride changed: update the SWD telemetry reader");
 
 extern volatile MazeTrace_t tm_maze_trace[MAZE_TRACE_CAPACITY];

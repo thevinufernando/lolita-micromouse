@@ -822,6 +822,25 @@
  * guessing is not something an integrator should do. */
 #define WALL_FOLLOW_TRUST_CONF 0.80f
 
+/* Below this speed the lateral integral stops learning, cm/s.
+ *
+ * ANTI-WINDUP OF THE SECOND KIND. The existing gate freezes the integral when
+ * the proportional term is clamped -- when the loop is asking for everything
+ * it can. This one covers when the loop asks correctly and the ROBOT does not
+ * respond, which is a different failure and was not covered at all.
+ *
+ * A wedged run showed why it matters: the integral reached -7.66 of a +/-8
+ * limit and the reader still reported it as not converged, because it spent
+ * over two seconds integrating a 14 mm error while the robot was grinding
+ * against a wall at 3.8 cm/s. None of that was evidence about the robot's
+ * mechanical asymmetry. It was evidence the robot was stuck.
+ *
+ * Lateral authority comes from leaning while moving FORWARD, so with no
+ * forward motion there is no correction to be had and nothing to learn from
+ * the fact that it did not arrive. 1.5 cm/s is well under the 10 cm/s cruise
+ * and above the noise on a differenced encoder reading. */
+#define WALL_FOLLOW_MIN_TRAVEL_CMS 1.5f
+
 /* Lateral error (mm) -> commanded heading offset (deg).
  *
  * This is a CASCADE, not a second steering term added alongside the heading
@@ -1202,6 +1221,34 @@
  * from stiction, it is jammed against something, and hammering it at full
  * scale will not help. Let the timeout report the failure instead. */
 #define STRAIGHT_BREAKAWAY_MAX 3U
+
+/* ---- GIVING UP ON A MOVE THAT IS NOT HAPPENING ----
+ *
+ * The breakaway above only arms once the profile has FINISHED, because while
+ * it is still running a slow patch is the controller's problem to solve. That
+ * leaves the case it was never written for: a robot wedged against a wall in
+ * the MIDDLE of a move. One was measured doing 3.8 cm/s against a profile
+ * asking for 10, with the command pinned between 155 and 176 of 200, steering
+ * clipped on 124 cycles out of 200, and the reference running 9.3 cm ahead. It
+ * ground like that for over two seconds and then the run ended looking like a
+ * steering failure, which it was not.
+ *
+ * Grinding costs more than the time. The lateral integral keeps learning from
+ * an error it cannot fix, the reference sails away so the front-wall alignment
+ * never gets its chance, and the log fills with symptoms of a problem whose
+ * cause was mechanical.
+ *
+ * So: below this rate, while the command is above the stiction floor and
+ * therefore genuinely trying, the robot is not moving. */
+#define STRAIGHT_STALL_RATE_CMS 1.5f
+
+/* How long that may persist before the move is abandoned, ms.
+ *
+ * Generous on purpose. A move legitimately sits below the rate threshold while
+ * accelerating away from rest, and again during each breakaway pulse, so this
+ * has to be long enough that neither trips it. 1200 ms is several times either
+ * and still less than half the two seconds the wedged run spent grinding. */
+#define STRAIGHT_STALL_ABORT_MS 1200U
 
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 

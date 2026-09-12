@@ -268,6 +268,9 @@ volatile float    sl_ref_cm;
 volatile float    sl_align_delta_cm;
 volatile uint8_t  sl_align_applied;
 volatile uint32_t sl_breakaway_count;
+volatile float    sl_entry_err_mm;
+volatile uint8_t  sl_entry_valid;
+volatile uint8_t  sl_stall_abort;
 
 /* The round-robin poll refreshes one sensor per control cycle, so a complete
  * rotation is exactly TOF_SENSOR_COUNT cycles -- which is when the wall
@@ -387,6 +390,9 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
     sl_align_delta_cm = 0.0f;
     sl_align_applied  = 0U;
+    sl_entry_err_mm   = 0.0f;
+    sl_entry_valid    = 0U;
+    sl_stall_abort    = 0U;
 
     /* Breakaway detector state. See the BREAKAWAY PULSE block in
      * control_config.h for why a proportional controller cannot restart this
@@ -394,6 +400,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     float    prev_measured   = 0.0f;
     uint32_t stall_cycles    = 0;
     uint32_t pulse_until_ms  = 0;
+    uint32_t stall_since_ms  = 0;   /* 0 = moving, or trying gently */
 
     sl_breakaway_count = 0U;
 
@@ -523,6 +530,20 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
              * those are, and what the map knows about them, is the navigator's
              * business. */
             tilt_deg = WallFollow_Update(m, tof_dt_s, measured);
+
+            /* THE LATERAL ERROR THIS MOVE INHERITED, captured on the first
+             * sweep that has a reference at all.
+             *
+             * It answers a question no existing log could: does a PIVOT throw
+             * the robot sideways? One run came out of a dead end 46 mm further
+             * from the same wall than it went in, across one 180 and one cell
+             * of travel, and there was no way to tell which of the two did it.
+             * The per-cycle trace only survives the last move, so this belongs
+             * in the per-cell record where every move keeps one. */
+            if (!sl_entry_valid && wf_side != WALL_FOLLOW_NONE) {
+                sl_entry_err_mm = wf_error_mm;
+                sl_entry_valid  = 1U;
+            }
             last_tof = now;
 
             /* FRONT-WALL ALIGNMENT, applied at most once per move.
@@ -562,19 +583,33 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
                      * robot would step the reference back by however far it
                      * currently lags, which is the same defect in a smaller
                      * size. */
-                    float remaining = new_target - ref_pos;
+                    /* TWO DIFFERENT REMAINING DISTANCES, and using the wrong
+                     * one cost a run.
+                     *
+                     * The rebuilt profile starts where the REFERENCE is, so
+                     * that is the distance it has to cover. But whether there
+                     * is room to stop is a question about the ROBOT, which is
+                     * behind the reference by however much it is lagging --
+                     * 2 to 3 cm normally and 9 cm when it is fighting
+                     * something. Asking the reference produced an alignment
+                     * that refused itself on exactly the moves that were going
+                     * badly, and the front-wall stops went from an 11 mm
+                     * spread to 54. */
+                    float remaining_ref   = new_target - ref_pos;
+                    float remaining_robot = new_target - measured;
 
-                    /* Distance the reference needs just to come to rest from
-                     * the speed it is doing now, plus a cushion. Computed from
-                     * the live velocity rather than assumed to be cruise,
-                     * because early in a move it is much less and the
-                     * alignment should be allowed to fire there too. */
+                    /* Distance needed just to come to rest from the speed the
+                     * reference is doing now, plus a cushion. Taken from the
+                     * live velocity rather than assumed to be cruise, because
+                     * early in a move it is much less and the alignment should
+                     * be allowed to fire there too. */
                     const float braking_cm =
                         (ref_vel * ref_vel)
                         / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)
                         + WALL_FRONT_ALIGN_ROOM_CM;
 
-                    const uint8_t has_room  = (fabsf(remaining) >= braking_cm);
+                    const uint8_t has_room  =
+                        (fabsf(remaining_robot) >= braking_cm);
                     const uint8_t good_read = (f <= WALL_FRONT_ALIGN_BEST_MM);
 
                     /* Running out of room: this is the last sweep that can
@@ -582,7 +617,8 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
                      * rather than waiting for a better one that will arrive
                      * too late to use. */
                     const uint8_t last_chance =
-                        (fabsf(remaining) < braking_cm + WALL_FRONT_ALIGN_ROOM_CM);
+                        (fabsf(remaining_robot) < braking_cm
+                                                  + WALL_FRONT_ALIGN_ROOM_CM);
 
                     /* Refuse a correction that would make the rest of the move
                      * run backwards. A reference that has already passed the
@@ -591,7 +627,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
                     if ((good_read || last_chance)
                         && has_room
                         && fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM
-                        && remaining * distance_cm > 0.0f) {
+                        && remaining_ref * distance_cm > 0.0f) {
 
                         /* New profile from here, at the speed the reference is
                          * already doing, and a clock to match. Continuous in
@@ -601,7 +637,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
                          * already making. */
                         MotionProfile_t rebuilt;
 
-                        if (MotionProfile_InitFrom(&rebuilt, remaining, ref_vel,
+                        if (MotionProfile_InitFrom(&rebuilt, remaining_ref, ref_vel,
                                                    STRAIGHT_PROFILE_MAX_CMS,
                                                    STRAIGHT_PROFILE_ACCEL_CMS2)) {
 
@@ -709,6 +745,37 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
         if (now < pulse_until_ms) {
             base = (target_cm > measured) ? CONTROL_MAX_SPEED : -CONTROL_MAX_SPEED;
+        }
+
+        /* GIVE UP ON A MOVE THAT IS NOT HAPPENING.
+         *
+         * Distinct from the breakaway above, which only arms once the profile
+         * has FINISHED. This is the case that was never covered: a robot
+         * wedged in the MIDDLE of a move, command above the stiction floor and
+         * therefore genuinely trying, and going nowhere. One was measured
+         * grinding like that for over two seconds at 3.8 cm/s against a
+         * profile asking for 10.
+         *
+         * Grinding costs more than the time. The lateral integral keeps
+         * learning from an error it cannot fix, the reference sails away so
+         * the front-wall alignment never gets its chance, and the run ends
+         * looking like a steering fault rather than a mechanical one. Failing
+         * the move says what actually happened. */
+        if (fabsf(base) >= CONTROL_MIN_MOVE_SPEED
+            && (travelled / dt_s) < STRAIGHT_STALL_RATE_CMS) {
+
+            if (stall_since_ms == 0U) {
+                stall_since_ms = now;
+            }
+            else if (now - stall_since_ms >= STRAIGHT_STALL_ABORT_MS) {
+                Motor_Brake();
+                sl_stall_abort = 1U;
+                controller.state = STRAIGHTLINE_IDLE;
+                return 0;
+            }
+        }
+        else {
+            stall_since_ms = 0U;
         }
 
         float left, right;

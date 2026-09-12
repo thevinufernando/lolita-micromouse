@@ -528,6 +528,54 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (current) - Stop grinding, stop guessing
+
+Four changes off one run, three of them fixes and one a measurement.
+
+**The alignment was asking the wrong body about room to stop.** The rebuilt
+profile starts where the REFERENCE is, so that is the distance it covers, but
+whether there is room to decelerate is a question about the ROBOT -- which is
+behind the reference by whatever it is lagging, 2 to 3 cm normally and 9 cm
+when it is fighting something. Asking the reference made the alignment refuse
+itself on exactly the moves that were going badly, and front-wall stops went
+from an 11 mm spread to 54 in one run. Now `remaining_robot` decides whether it
+may fire and `remaining_ref` is what the profile is built from.
+
+**A move that is not happening is now abandoned.** The existing breakaway only
+arms once the profile has FINISHED, so the case it was never written for is a
+robot wedged in the MIDDLE of a move. One was measured at 3.8 cm/s against a
+profile asking for 10, command pinned between 155 and 176 of 200, steering
+clipped on 124 of 200 cycles, reference 9.3 cm ahead, grinding for over two
+seconds. `STRAIGHT_STALL_RATE_CMS` and `STRAIGHT_STALL_ABORT_MS` end the move,
+and `NAV_END_STALLED` says so -- a wedge and a timeout are different failures
+wanting different answers, and reporting both as MOVE FAILED sent a run's worth
+of investigation at the steering when the cause was mechanical.
+
+**The integral has a third gate.** `conf` guards against a reference not worth
+believing and the clamp guards against the loop already asking for everything
+it can. Neither covers the loop asking correctly and the ROBOT not answering.
+That run drove the term to -7.66 of a +/-8 limit, most of it manufactured while
+wedged. `WALL_FOLLOW_MIN_TRAVEL_CMS` stops it learning when the wheels are not
+making ground -- lateral authority comes from leaning while moving forward, so
+with no forward motion there is nothing to learn from the correction failing to
+arrive. The travel sample is taken at the TOP of `WallFollow_Update`, before
+the no-reference path returns, or a stretch of cells with no wall comes back as
+one enormous step over a single interval and reads as a robot sprinting.
+
+**And the measurement, which is why this run was worth it.** A robot came out
+of a dead end 46 mm further from the same wall than it went in, across one 180
+and one cell of travel, and nothing recorded which of the two did it. The
+per-cycle trace only survives the last move. `MazeTrace_t` is 48 bytes now and
+carries `entry_err_mm`, the lateral error each arriving move STARTED with, plus
+`align_delta_cm` so which moves aligned is a fact rather than an inference from
+where the robot stopped. Paired with `move_error_cm` this says whether a cell's
+offset was inherited or created.
+
+If pivots turn out to be throwing the robot tens of millimetres sideways, the
+lateral loop is being asked to clean up after a far larger disturbance than
+anything it has been tuned against, and no amount of gain work fixes that. The
+reader prints the worst entry error and how many cells exceed 15 mm.
+
 ### 2026-09-12 (newest) - Align late, and tell the follower where it is
 
 Two faults from one move in the last run.

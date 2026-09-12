@@ -305,5 +305,55 @@ int main(void){
     #undef DROPPED
   }
 
+  /* ---- THREE GATES ON THE INTEGRAL, GUARDING THREE DIFFERENT THINGS ----
+     conf    : the reference is not worth believing
+     clamped : the loop is already asking for everything it can
+     moving  : the loop asked correctly and the ROBOT did not answer
+     A term that learns a property of the robot must update under none. */
+  {
+    #define LEARNS(conf, clamped, moving) \
+        ((conf) >= WALL_FOLLOW_TRUST_CONF && !(clamped) && (moving))
+
+    CHECK(LEARNS(1.0f, 0, 1), "all three clear: it learns");
+    CHECK(!LEARNS(0.5f, 0, 1), "a doubtful reference stops it");
+    CHECK(!LEARNS(1.0f, 1, 1), "a saturated proportional term stops it");
+    CHECK(!LEARNS(1.0f, 0, 0), "and a robot that is not moving stops it");
+
+    /* Independence: no gate can rescue another. */
+    int rescued = 0;
+    for (int c = 0; c < 2; c++)
+      for (int k = 0; k < 2; k++)
+        for (int mv = 0; mv < 2; mv++)
+          if (LEARNS(c ? 1.0f : 0.5f, k, mv) && (!c || k || !mv)) rescued = 1;
+    CHECK(!rescued, "every gate is independently sufficient to stop it");
+    #undef LEARNS
+  }
+
+  /* The movement gate has to admit ordinary travel and reject a wedge. The
+     measured wedge was 3.8 cm/s against a profile asking for 10. */
+  CHECK(WALL_FOLLOW_MIN_TRAVEL_CMS < STRAIGHT_PROFILE_MAX_CMS * 0.5f,
+        "the movement threshold is well under cruise");
+  CHECK(WALL_FOLLOW_MIN_TRAVEL_CMS > 0.5f,
+        "and above the noise on a differenced encoder reading");
+
+  /* ---- GIVING UP ON A WEDGE ----
+     Distinct from the breakaway, which only arms after the profile ends. The
+     abort window must outlast the entire breakaway sequence, or a move would
+     be abandoned while the recovery it already has is still being tried. */
+  {
+    const float breakaway_ms = (float)STRAIGHT_BREAKAWAY_MAX
+                             * ((float)STRAIGHT_BREAKAWAY_MS
+                                + (float)STRAIGHT_BREAKAWAY_CYCLES
+                                  * CONTROL_SAMPLE_TIME_S * 1000.0f);
+
+    CHECK((float)STRAIGHT_STALL_ABORT_MS > breakaway_ms,
+          "the stall abort outlasts the whole breakaway sequence");
+    CHECK(STRAIGHT_STALL_RATE_CMS < STRAIGHT_PROFILE_MAX_CMS * 0.25f,
+          "and only fires well below the commanded speed");
+    /* It also has to be shorter than the grind that prompted it. */
+    CHECK((float)STRAIGHT_STALL_ABORT_MS < 2000.0f,
+          "while still cutting the two seconds of grinding short");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

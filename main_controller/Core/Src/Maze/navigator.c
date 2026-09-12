@@ -44,6 +44,9 @@ static void recordCell(float move_error_cm, uint8_t move_ok,
     r->wall_side      = wf_side;
     r->action         = action;
     r->drift_deg      = WallFollow_GetDriftDeg();
+    r->entry_err_mm   = sl_entry_err_mm;
+    r->entry_valid    = sl_entry_valid;
+    r->align_delta_cm = sl_align_applied ? sl_align_delta_cm : 0.0f;
 
     r->votes = (uint16_t)((wall_front_votes & 7U)
                         | ((wall_left_votes  & 7U) << 3)
@@ -363,7 +366,14 @@ void Navigator_Run(void)
         if (!ok) {
             observe(&w, 0U);
             recordCell(arrival_err_cm, 0U, &w, NAV_ACT_STOP);
-            tm_maze_abort_reason = NAV_END_MOVE_FAILED;
+
+            /* A wedge and a timeout are different failures and want different
+             * answers -- one is mechanical, the other is usually a gain. The
+             * log said MOVE FAILED for both, which sent a run's worth of
+             * investigation at the steering when the robot had simply been
+             * stuck against a wall. */
+            tm_maze_abort_reason = sl_stall_abort ? NAV_END_STALLED
+                                                  : NAV_END_MOVE_FAILED;
             break;
         }
     }

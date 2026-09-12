@@ -125,6 +125,22 @@ extern volatile uint8_t sl_align_applied;
  * knowing before reaching for the tuning. */
 extern volatile uint32_t sl_breakaway_count;
 
+/* The lateral error the last move STARTED with, and whether it had a reference
+ * at all to measure one from.
+ *
+ * Answers a question no log could: does a PIVOT throw the robot sideways? One
+ * run came out of a dead end 46 mm further from the same wall than it went in,
+ * across one 180 and one cell of travel, with no way to tell which of the two
+ * did it. Recorded per cell by the navigator, because the per-cycle trace only
+ * survives the last move. */
+extern volatile float   sl_entry_err_mm;
+extern volatile uint8_t sl_entry_valid;
+
+/* Set when a move was abandoned because the robot stopped moving while the
+ * command was still above the stiction floor -- a wedge, not a steering fault.
+ * Cleared at the start of every move. */
+extern volatile uint8_t sl_stall_abort;
+
 //Blocking moves. Return 1 on success, 0 if the safety timeout fired.
 uint8_t runForwardDistance(float distance_cm);
 uint8_t runBackwardDistance(float distance_cm);
