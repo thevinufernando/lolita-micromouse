@@ -528,7 +528,179 @@ accident.
 
 ## Change log
 
-### 2026-09-12 (newest) - "Late" is not "in trouble"
+### 2026-09-12 (newest) - The lean never got built, and the last 5 cm were blind
+
+Two measurements finally separated what had been one confused symptom.
+
+**The front-wall stop spread is 16 to 83 mm against a 75 mm target**, across
+nine walled stops, every one of which DID align. So the alignment fires and the
+robot still stops anywhere across 67 mm. The cause is that the alignment
+happens on the long segment, which ends a braking offset short of the cell
+centre, and the five centimetres that follow were pure odometry with the
+front-wall correction explicitly disabled. Every bit of slip, carried residual
+and arrival slop in those five centimetres landed straight in the gap.
+
+**The stop segment now aligns too, against the real 75 mm target.** The old
+reasoning -- that the long segment already applied the correction and a second
+would double it -- was wrong. The long segment's alignment places the DECISION
+POINT; this is a second and much better look, with the wall going from 125 mm
+to 75, which is the closest and most accurate reading the front sensor ever
+gets. It needs room to decelerate into, so `CELL_DECISION_MARGIN_CM` goes
+1.5 -> 3.0 and the stop segment is 6.5 cm rather than 5.0. The in-flight wall
+window shrinks from 8.6 cm of travel to 7.1, still about 13 rotations.
+
+**And the wall follower was not failing to correct, it was never getting to
+act.** Pairing each move's exit error against its entry error splits cleanly by
+segment type:
+
+```
+segments that CONTINUE at speed (lean kept)      error moves 24 to 38 mm
+segments that START from rest   (lean zeroed)    error moves 1 mm
+```
+
+Ten cells in a row entered at -22 and left at -22, entered at 23 and left at
+23. A pivot resets the tilt to zero, so every move after a turn rebuilds its
+lean from nothing, and at `WALL_FOLLOW_TILT_SLEW_DPS` of 15 with a 33 ms sweep
+that is half a degree per update -- 0.4 s to reach 6 degrees, on a 1.26 s move
+whose first 0.5 s is spent accelerating.
+
+`WALL_FOLLOW_TILT_SLEW_DPS` 15 -> 20, with `STRAIGHT_YAW_LIMIT` 80 -> 88 to pay
+for it. **30 was the first attempt and the host test refused it, correctly.**
+The ramp cost as a fraction of the inner loop's linear range is
+`R * TURN_FF_GAIN / STRAIGHT_YAW_LIMIT` -- the proportional gain cancels, so no
+amount of retuning `STRAIGHT_YAW_KP` buys any of it back, and 30 against a
+limit of 80 spends 75% of the range before the tilt asks for anything. 20
+against 88 is 5.0 degrees of 11.0, which keeps the margin. 88 is itself the
+most that coexists with cruise: feedforward at 14 cm/s is 112 units and
+112 + 88 is exactly `CONTROL_MAX_SPEED`.
+
+**A real ordering bug, found while reading that path.** `CellMotion_Forward()`
+installed the wall follower's cell context and then called the move, whose
+`WallFollow_Reset()` promptly cleared it. So every move starting from rest --
+after a pivot, most of them -- ran with no map veto and a crossing distance of
+zero, which told the follower its side sensors were already looking into the
+next cell from the first millimetre. The context now travels WITH the move, in
+`StraightMove_t.cells`, and is applied after the reset, which is the only
+ordering that cannot go wrong.
+
+Also: a cell the robot chained straight through has no stop of its own, and was
+reporting the previous cell's. Two rows of the trace carried the same number
+and a cell with no wall ahead appeared to have stopped 60 mm from one.
+
+### 2026-09-12 (previous) - Committing to a stop is not the same as stopping driving
+
+The user's observation was that the front-wall gap varies noticeably from cell
+to cell, and that a cell which stopped short put the robot into a post. The
+cause is one line, and the exit-error measurement added last time is what made
+it findable.
+
+**The last 15 mm of every move was a coast.** `arriving` latched the moment the
+robot first came within `DISTANCE_TOLERANCE_CM` and the command was zeroed from
+there. The profile already plans a deceleration that reaches zero exactly at
+the target; releasing the drive 15 mm early throws that plan away and lets
+friction finish the move instead. How far a coast carries depends on the speed
+the robot happened to have when it crossed the band, and that varies with how
+much it was lagging -- 6 to 9 cm/s in the logs, which on this chassis is 12 to
+20 mm of roll. So the robot stopped anywhere across about a centimetre, with a
+front wall right there to make it obvious.
+
+The command is now CLAMPED AGAINST THE DIRECTION OF TRAVEL rather than removed.
+That is what the latch was always for: refusing to drive backwards into a band
+the robot has passed, since reversing is the one direction this chassis has no
+lateral sensing for. Driving forward to a target it has not yet reached was
+never the thing to prevent.
+
+No stiction floor in that branch, deliberately. The floor exists to raise a
+command too small to move the robot, and at the end of a stop a command too
+small to move the robot is the correct answer -- flooring it would put back the
+overshoot this removes.
+
+**Narrowing the tolerance instead would have been a trap**, and it is worth
+writing down why. `short_of_it`, which arms the breakaway, uses the same
+constant. Tighten the completion band alone and a robot resting 5 mm short
+neither completes nor gets a pulse, and the move runs to the 8 s timeout.
+Tighten both and every cell ends with a full-scale breakaway lurch. The band is
+not the problem; what happens inside it was.
+
+**`stop_front_mm` now records the outcome.** `align_delta_cm` says how far the
+endpoint was moved and `F_mm` says what the sensor predicted on the way in, but
+nothing said where the robot actually came to rest -- which is the only thing
+that decides whether the pivot happens at the cell centre. It is read from the
+front sensor at rest, after the settle, and the reader prints the spread. That
+spread is where every subsequent move begins.
+
+`MazeTrace_t` is 56 bytes. 64 records is 3584 bytes of a 128 KB part.
+
+From the run itself, the alignment is now working and the lateral loop is not:
+
+```
+front alignment     11 of 19 cells, mean -1.02 cm
+reasons             fired x11, no wall x5, too far x3
+entry lateral error worst -40 mm, 9 of 17 cells over 15 mm
+```
+
+All three "too far" cells read about 265 mm predicted at the centre, which is a
+wall two cells away being correctly refused. The reason codes are earning their
+place.
+
+**And the exit errors say the wall follower is doing almost nothing.** On
+eleven of seventeen moves the lateral error at the end matched the error at the
+start to within 2 mm -- entered at -19 and left at -19, entered at 25 and left
+at 25, entered at 33 and left at 34. A whole cell of travel with no correction
+at all. That is the next thing to chase, and it is a different problem from the
+alignment.
+
+### 2026-09-12 (previous) - The gate was inside the wall cluster
+
+The alignment fixes worked. It fired on 10 of 17 cells against 1 of 19, mean
+correction +0.54 cm rather than a single 3.5 cm lunge, and the reasons are
+honest now: five cells had no wall in range, two had one too far to use. The
+longitudinal axis is no longer the problem.
+
+**The robot still clipped a post, and the trace names the cycle.** On the last
+move, 7.1 cm in, fused yaw jumped from -91.5 to -85.1 in about 100 ms and to
+-80.3 in the next -- eleven degrees anticlockwise in 200 ms, with the encoder
+distance spiking to 19 cm/s against a 14 cm/s cruise. That is a body pivoting
+about a contact point with the far wheel running free, at exactly the travel
+where the post sits between the cell being left and the one being entered.
+
+**It went in blind.** `err_mm` reads 0.0 for the first 830 ms of that move --
+the cell it was crossing has no side walls at all, so the follower had nothing
+to hold. The error was not accumulated there; the move STARTED 34 mm out, and
+so did the one before it.
+
+**`WALL_FOLLOW_USABLE_MAX_MM` 95 -> 110, and the run's own readings are the
+argument.** The side sensors returned 33, 41, 47, 51, 54, 56, 60, 64, 67, 68,
+70, 83, 84, 88, 93, 96 and 97 for walls, and 192, 229, 498, 534 and 575 for
+openings. There is a clean gap between 97 and 192 -- and the gate sat at 95,
+INSIDE the wall cluster, discarding the 96 and the 97.
+
+That is the worst possible place to go blind. A reading near the gate means a
+large lateral error, which is when the correction matters most. And because the
+gate is also the far end of the confidence ramp, a reading that did survive at
+93 mm was worth only 0.30 of full gain, capping the lean at 3 degrees against an
+error asking for 15 -- about 10 mm of correction per cell, while the robot was
+entering cells 25 to 38 mm out. At 110 the same reading is worth 0.52 and may
+lean 5.2 degrees.
+
+**And the measurement that should have existed three runs ago.** `entry_err_mm`
+says what a move started with; nothing said what the previous one ENDED with,
+so "the pivot throws the robot sideways" has been inference every time. A move
+that ends centred followed by one that starts 25 mm out convicts the pivot; a
+move that ends 25 mm out convicts the move. Those want opposite fixes.
+
+`exit_err_mm` is the last lateral reading a move had a reference for.
+`MazeTrace_t` is 52 bytes for it, which is what the stride assert is for, and
+the reader now prints the mean and worst jump across each cell boundary. 64
+records at 52 bytes is 3328 bytes of a 128 KB part.
+
+One test was quietly not testing anything. `wall_follow_host_test.c` checked
+that "a reading at the edge of usable range stays timid" using a hard-coded
+94 mm, written when the gate was 95 -- it stopped testing the edge the moment
+the gate moved. It is expressed at the gate now, plus two new cases pinning the
+97-versus-192 separation the change rests on.
+
+### 2026-09-12 (earlier) - "Late" is not "in trouble"
 
 Second run with the reason codes, and they earned their place immediately --
 though the first thing they proved was that they were lying.

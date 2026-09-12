@@ -679,7 +679,31 @@
  * map's veto applies, which is conservative in both directions but blunts it. */
 #define TOF_SIDE_AHEAD_CM 4.0f
 
-#define WALL_FOLLOW_USABLE_MAX_MM 95U
+/* Furthest side reading still treated as a wall of THIS corridor, mm.
+ *
+ * It is two things at once: the hard gate in usable(), and the far end of the
+ * confidence ramp in far_confidence(). So it sets both when a reading is
+ * thrown away and how hard the loop is allowed to pull on one it keeps.
+ *
+ * 95 -> 110, from the readings themselves. Across a 17-cell run the side
+ * sensors returned 33, 41, 47, 51, 54, 56, 60, 64, 67, 68, 70, 83, 84, 88, 93,
+ * 96 and 97 for walls, and 192, 229, 498, 534 and 575 for openings. There is a
+ * clean gap between 97 and 192, and the gate sat at 95 -- inside the wall
+ * cluster, discarding the 96 and the 97, which are simply what a wall looks
+ * like from a robot 30 mm off centre.
+ *
+ * THAT IS THE WORST POSSIBLE PLACE TO GO BLIND. A reading near the gate means
+ * a large lateral error, which is exactly when the correction is needed most;
+ * and because the ramp ends here too, a reading that survived the gate at 93
+ * was worth only 0.30 of full gain, capping the lean at 3 degrees against an
+ * error asking for 15. The robot then fixes about 10 mm per cell, and it was
+ * entering cells 25 to 38 mm out.
+ *
+ * At 110 the same 93 mm reading is worth 0.52 and may lean 5.2 degrees, which
+ * is roughly double the correction rate. 110 is still far below the 192 mm
+ * floor of the opening cluster, so nothing that is not a wall gets in, and the
+ * map veto and the span check are both unchanged behind it. */
+#define WALL_FOLLOW_USABLE_MAX_MM 110U
 
 /* ONE-SIDED SINGLE-WALL CORRECTION.
  *
@@ -942,7 +966,36 @@
  *
  * 15 costs 3.75 degrees and crosses the wider 10 degree clamp in 0.67 s, still
  * comfortably inside a 2.4 s cell. */
-#define WALL_FOLLOW_TILT_SLEW_DPS 15.0f
+/* 15 -> 30, because 15 was costing the correction entirely on the moves that
+ * needed it most.
+ *
+ * A pivot resets the tilt to zero, so every move that starts from rest -- which
+ * after a turn is most of them -- has to rebuild its lean from nothing. At
+ * 15 deg/s and a 33 ms sweep that is 0.5 degrees per update, so 0.4 s to reach
+ * 6 degrees, on a 1.26 s move whose first 0.5 s is spent accelerating. The
+ * lean was only ever established for the last fraction of the move.
+ *
+ * THE LOG SAYS EXACTLY THAT. Measuring the lateral error a move ended with
+ * against the one it started with: on the segments that CONTINUE at speed, and
+ * therefore keep their lean, the error moves 24 to 38 mm. On the segments that
+ * start from rest it moves 1 mm. Ten cells in a row entered at -22 and left at
+ * -22, entered at 23 and left at 23. That is not a loop correcting slowly, it
+ * is a loop that never got to act.
+ *
+ * 30 was the first attempt and the host test refused it, correctly. The ramp
+ * cost is R / (STRAIGHT_YAW_KP / TURN_FF_GAIN) degrees of standing heading
+ * error, and as a FRACTION of the inner loop's linear range that works out as
+ * R * TURN_FF_GAIN / STRAIGHT_YAW_LIMIT -- the proportional gain cancels, so
+ * no amount of retuning STRAIGHT_YAW_KP buys any of it back. At 30 against a
+ * limit of 80 it is 75% of the range, spent before the tilt asks for anything.
+ *
+ * 20 with STRAIGHT_YAW_LIMIT raised to 88 lands at 5.0 degrees of a 11.0
+ * degree range, which keeps the half-range margin the test pins. The lean then
+ * reaches 7 degrees in 0.35 s, inside the 0.5 s the robot spends accelerating
+ * anyway, so it is established by the time the robot is actually translating
+ * -- which is the whole point. That is about 13 mm of correction per
+ * from-rest cell, against the 1 mm measured. */
+#define WALL_FOLLOW_TILT_SLEW_DPS 20.0f
 
 /* ---- WHY THERE IS NO REVERSE MOVE. Not a tuning choice. ----
  *
@@ -1028,7 +1081,16 @@
  * a saturated steering command silently costs forward speed instead of the
  * other way round. Raising CONTROL_MAX_SPEED does not buy it back -- the motor
  * stops answering at about 130 units either way. */
-#define STRAIGHT_YAW_LIMIT 80.0f
+/* 80 -> 88, to pay for the faster tilt slew above.
+ *
+ * 88 is the most that coexists with ordinary travel: feedforward at cruise is
+ * STRAIGHT_FF_GAIN * STRAIGHT_PROFILE_MAX_CMS = 112 units, and 112 + 88 is
+ * exactly CONTROL_MAX_SPEED. Past this, steering and cruise cannot both be
+ * satisfied and allocate() starts taking the difference out of forward speed.
+ *
+ * It also widens the inner loop's linear range to 88/8 = 11 degrees, which
+ * keeps WALL_FOLLOW_MAX_TILT_DEG comfortably inside it. */
+#define STRAIGHT_YAW_LIMIT 88.0f
 #define STRAIGHT_YAW_INT_LIMIT 20.0f
 
 /* Control cycles per complete rotation of the round-robin ToF poll.
@@ -1185,7 +1247,16 @@
  * stop at, which it cannot fix: this chassis has no reverse. Too large and the
  * in-flight wall window shrinks from the far end, because the segment stops
  * before the side sensors have had long enough in the next cell. */
-#define CELL_DECISION_MARGIN_CM 1.5f
+/* 1.5 -> 3.0. The margin is no longer only slack: the stop segment now
+ * re-aligns against the front wall over it, and it cannot do that without room
+ * to decelerate into. Braking from cruise takes 3.5 cm, so a 5.0 cm stop
+ * segment left no slack at all and the retarget refused itself every time --
+ * which is why front-wall stops spread 16 to 83 mm against a 75 mm target.
+ *
+ * The cost is the in-flight wall window, which shrinks from 8.6 cm of travel
+ * to 7.1 -- still around 13 round-robin rotations, comfortably above
+ * WALL_FLIGHT_MIN_SAMPLES. */
+#define CELL_DECISION_MARGIN_CM 3.0f
 
 /* How far short of the cell centre a chained forward ends, cm.
  *

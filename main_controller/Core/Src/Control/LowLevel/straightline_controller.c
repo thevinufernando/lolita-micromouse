@@ -504,6 +504,9 @@ uint8_t runForwardMove(const StraightMove_t *mv)
     if (mv->keep_wall_follow) WallFollow_NewSegment();
     else                      WallFollow_Reset();
 
+    /* AFTER the reset, never before -- WallFollow_Reset() clears the context. */
+    if (mv->cells) WallFollow_SetCells(mv->cells);
+
     PIDController_Init(&controller.distance_pid);
     PIDController_Init(&yaw_pid);
 
@@ -1054,10 +1057,40 @@ uint8_t runForwardMove(const StraightMove_t *mv)
          * two are equivalent going forwards and only one of them stays true if
          * this ever has to run a move in the other direction. */
         if (arriving && !chaining) {
-            /* Committed to stopping, so stop driving. Keyed on the latch and
-             * not on the band, so a robot that has coasted a little past does
-             * not get commanded back into it. */
-            base = 0.0f;
+
+            /* COMMITTED TO STOPPING IS NOT THE SAME AS STOPPING DRIVING, and
+             * conflating the two is what made the front-wall stop wander.
+             *
+             * This used to zero the command outright the moment the robot
+             * first came within DISTANCE_TOLERANCE_CM. That turns the last
+             * 15 mm of every move into a COAST, and how far a coast carries
+             * depends entirely on the speed the robot happened to have when it
+             * crossed the band -- which varies with how much it was lagging.
+             * Measured from this chassis: coasting from 18.7 cm/s takes 8.5 cm,
+             * so from the 6 to 9 cm/s seen at the band it is 12 to 20 mm. The
+             * robot therefore stopped anywhere in about a centimetre, cell to
+             * cell, with a front wall right there to show it.
+             *
+             * The profile already plans a deceleration that reaches zero
+             * exactly at the target. Following it to the end is both more
+             * accurate and more repeatable than releasing early and letting
+             * friction finish the job.
+             *
+             * WHAT THE LATCH IS ACTUALLY FOR is refusing to drive BACKWARDS.
+             * A robot that coasts past the target would otherwise be commanded
+             * back into the band, and reversing is the one direction this
+             * chassis has no lateral sensing for. So the command is clamped
+             * against the direction of travel rather than removed: still
+             * driving toward a target it has not reached, never away from one
+             * it has passed.
+             *
+             * No stiction floor here on purpose. The floor exists to raise a
+             * command too small to move the robot, and at this point a command
+             * too small to move the robot is the correct answer -- flooring it
+             * would put back exactly the overshoot this removes. */
+            if (base * distance_cm < 0.0f) {
+                base = 0.0f;
+            }
         }
         else if (ref_acc * ref_vel >= 0.0f && fabsf(ref_vel) > 1.0f) {
             base = applyMinSpeed(base);
@@ -1176,6 +1209,7 @@ uint8_t runForwardFused(float distance_cm)
         .exit_speed_cms   = 0.0f,
         .keep_wall_follow = 0U,
         .keep_odometry    = 0U,
+        .cells            = 0,
         .wall_window_cm   = -1.0f,
         .wall_centre_cm   = 0.0f,
     };

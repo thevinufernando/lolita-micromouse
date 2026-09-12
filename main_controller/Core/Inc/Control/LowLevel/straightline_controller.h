@@ -5,6 +5,7 @@
 #include "DRV8833.h"
 #include "PID.h"
 #include "control_config.h"
+#include "wall_follow.h"
 #include <math.h>
 #include "main.h"
 
@@ -87,6 +88,18 @@ typedef struct {
    * Resetting it mid-corridor throws away a good reference and steps the
    * tilt to zero at exactly the wrong moment. */
   uint8_t keep_wall_follow;
+
+  /* What the map knows about the two cells this segment touches, or NULL.
+   *
+   * PASSED IN RATHER THAN SET BEFOREHAND, because the reset above CLEARS it.
+   * The caller used to install the context and then call this, which reset the
+   * wall follower and wiped it again -- so every move that started from rest,
+   * which after a pivot is most of them, ran with no cell context at all: no
+   * map veto, and a crossing distance of zero that told the follower its side
+   * sensors were already looking at the next cell from the first millimetre.
+   * Applying it here, after the reset, is the only ordering that cannot go
+   * wrong. */
+  const WallFollowCells_t *cells;
 
   /* 1 = do NOT zero the encoders; measure from wherever they are.
    *

@@ -234,9 +234,31 @@ typedef struct {
    * if it never fired. Which moves align and by how much was previously only
    * inferable from where the robot happened to stop. */
   float align_delta_cm;
+  /* THE LATERAL ERROR THE ARRIVING MOVE ENDED WITH, measured before any pivot.
+   *
+   * entry_err_mm alone could never answer the question three runs have turned
+   * on: when a cell starts 25 mm off centre, was it the previous move that
+   * failed to centre the robot, or the pivot that threw it? A move that ends
+   * centred followed by one that starts 25 mm out convicts the pivot. A move
+   * that ends 25 mm out convicts the move. The two want opposite fixes.
+   *
+   * This is what pushed the record past 48 bytes. Worth it -- the stride is
+   * only there to force the reader to keep up, and 64 records at 52 bytes is
+   * 3328 bytes of a 128 KB part. */
+  float exit_err_mm;
+  /* WHERE THE ROBOT ACTUALLY STOPPED, read from the front sensor once it is at
+   * rest at the cell centre. TOF_DISTANCE_INVALID when there is no wall ahead.
+   *
+   * This is the front-wall alignment's OUTCOME, and until now nothing recorded
+   * it. align_delta_cm says how far the endpoint was moved and F_mm says what
+   * the sensor predicted on the way in, but neither says where the robot came
+   * to rest -- which is the only thing that decides whether the pivot happens
+   * at the cell centre. A spread here IS a spread in where every subsequent
+   * move begins. */
+  uint16_t stop_front_mm;
 } MazeTrace_t;
 
-_Static_assert(sizeof(MazeTrace_t) == 48,
+_Static_assert(sizeof(MazeTrace_t) == 56,
                "MazeTrace_t stride changed: update the SWD telemetry reader");
 
 extern volatile MazeTrace_t tm_maze_trace[MAZE_TRACE_CAPACITY];

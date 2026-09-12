@@ -70,13 +70,36 @@ int main(void){
   }
 
   /* A reading at the edge of usable range must stay timid: that is the case
-     the caution was written for, and it has to survive the taper. */
+     the caution was written for, and it has to survive the taper.
+     EXPRESSED AT THE GATE rather than at a fixed distance -- it was written as
+     94 mm when the gate was 95, and silently stopped testing the edge the
+     moment the gate moved. What it means is "the furthest reading still
+     accepted", so that is what it should say. */
   {
-    const float c = conf_of(94.0f, WALL_FOLLOW_SETPOINT_LEFT_MM);
-    CHECK(fabsf(tilt_single(31.0f, c)) < 4.0f,
+    const float edge = (float)WALL_FOLLOW_USABLE_MAX_MM;
+    const float c    = conf_of(edge, WALL_FOLLOW_SETPOINT_LEFT_MM);
+    CHECK(fabsf(tilt_single(edge - WALL_FOLLOW_SETPOINT_LEFT_MM, c)) < 4.0f,
           "a reading at the edge of range still cannot lunge");
     CHECK(c < WALL_FOLLOW_TRUST_CONF,
           "and is not trusted enough for the integral to learn from");
+  }
+
+  /* THE READINGS THE GATE WAS THROWING AWAY. Across one 17-cell run the side
+     sensors returned 33..97 for walls and 192..575 for openings, with nothing
+     in between -- and the gate sat at 95, inside the wall cluster. A robot
+     30 mm off centre in this corridor IS what a 93 mm reading looks like, and
+     going blind at exactly that error is the opposite of what is wanted. */
+  {
+    CHECK((float)WALL_FOLLOW_USABLE_MAX_MM > 97.0f,
+          "a 97 mm reading is a wall of this corridor and must be usable");
+    CHECK((float)WALL_FOLLOW_USABLE_MAX_MM < 192.0f,
+          "and an opening at 192 mm must still be rejected");
+
+    /* The gate is also the far end of the ramp, so widening it buys authority
+       as well as admission -- which is the half that actually corrects. */
+    const float c = conf_of(93.0f, WALL_FOLLOW_SETPOINT_LEFT_MM);
+    CHECK(fabsf(tilt_single(30.0f, c)) > 4.0f,
+          "and 30 mm off with only a far wall now buys a real lean");
   }
 
   /* The integral's threshold has to admit the case it exists for. */

@@ -64,6 +64,15 @@ static uint8_t s_flight_ok;
  * to "fired" -- and a 19-cell run reported fourteen alignments while exactly
  * one correction had been applied. A log that confidently reports the opposite
  * of what happened is worse than one that reports nothing. */
+/* Latched with the alignment outcome and for the same reason: the stop
+ * segment that precedes a pivot would otherwise overwrite it. */
+static float   s_exit_err_mm;
+static uint8_t s_exit_valid;
+
+/* The front reading taken at rest at the cell centre -- the alignment's
+ * outcome, as opposed to its intent. */
+static uint16_t s_stop_front_mm = TOF_DISTANCE_INVALID;
+
 static uint8_t s_align_reason;
 static uint8_t s_align_applied;
 static float   s_align_delta_cm;
@@ -110,6 +119,8 @@ void CellMotion_Record(float move_error_cm, uint8_t move_ok,
     r->entry_err_mm   = sl_entry_err_mm;
     r->entry_valid    = sl_entry_valid;
     r->align_delta_cm = s_align_applied ? s_align_delta_cm : 0.0f;
+    r->exit_err_mm    = s_exit_valid ? s_exit_err_mm : 0.0f;
+    r->stop_front_mm  = s_stop_front_mm;
 
     r->votes = (uint16_t)((wall_front_votes  & 7U)
                         | ((wall_left_votes   & 7U) << 3)
@@ -138,7 +149,14 @@ void CellMotion_Record(float move_error_cm, uint8_t move_ok,
 static uint8_t stopAtCell(void);
 
 
-static void setCellContext(float start_offset_cm)
+/* Build what the map knows about the two cells a segment touches.
+ *
+ * RETURNED RATHER THAN INSTALLED. It used to call WallFollow_SetCells() here,
+ * before starting the move -- and the move's own WallFollow_Reset() then wiped
+ * it. It now travels with the move and is applied after that reset. */
+static WallFollowCells_t s_cells;
+
+static const WallFollowCells_t *cellContext(float start_offset_cm)
 {
     WallFollowCells_t c;
     uint8_t f;
@@ -172,7 +190,9 @@ static void setCellContext(float start_offset_cm)
      * where it would be if the robot had started at the centre. */
     c.cross_cm = start_offset_cm + NAV_CELL_CM * 0.5f - TOF_SIDE_AHEAD_CM;
 
-    WallFollow_SetCells(&c);
+    s_cells = c;
+
+    return &s_cells;
 }
 
 
@@ -270,6 +290,9 @@ void CellMotion_BeginRun(void)
     s_align_applied       = 0U;
     s_align_reason        = SL_ALIGN_NO_WALL;
     s_align_delta_cm      = 0.0f;
+    s_exit_err_mm         = 0.0f;
+    s_exit_valid          = 0U;
+    s_stop_front_mm       = TOF_DISTANCE_INVALID;
     s_chain_ref_cm        = Encoder_getAverageDistance();
     s_gap_mark_ms         = HAL_GetTick();
     tm_chain_gap_ms_max   = 0U;
@@ -360,12 +383,24 @@ static uint8_t stopAtCell(void)
 
         StraightMove_t mv = {
             .distance_cm      = remaining,
-            /* NO ALIGNMENT HERE. The long segment that preceded this one owns
-             * the front-wall correction and has already applied it; a second
-             * one over the last few centimetres would correct the same error
-             * twice. There is no room for it either -- braking from cruise
-             * takes most of this distance. */
-            .front_target_mm  = 0.0f,
+            /* ALIGN AGAIN HERE, AGAINST THE REAL TARGET.
+             *
+             * This used to be 0, on the reasoning that the long segment had
+             * already applied the front-wall correction and a second one would
+             * correct the same error twice. That reasoning was wrong in a way
+             * the numbers eventually showed: the long segment's alignment
+             * places the DECISION POINT, and the five centimetres that follow
+             * are pure odometry. Every bit of wheel slip, carried residual and
+             * arrival slop in those five centimetres lands straight in the
+             * front-wall gap, which measured 16 to 83 mm against a 75 mm
+             * target across nine walled stops.
+             *
+             * It is not the same correction twice, it is a second and much
+             * better look: the wall is at 125 mm when this segment starts and
+             * 75 when it ends, which is the closest and most accurate reading
+             * the front sensor ever gets. The refusal tests are unchanged, so
+             * it declines when there is no wall or no room. */
+            .front_target_mm  = WALL_FRONT_ALIGN_MM,
             .entry_speed_cms  = CELL_CHAIN_SPEED_CMS,
             .exit_speed_cms   = 0.0f,
             .keep_wall_follow = 1U,
@@ -379,12 +414,17 @@ static uint8_t stopAtCell(void)
          * its side sensors cross into the next one. They will not, over a
          * stretch this short -- and saying so correctly is cheaper than
          * relying on it. */
-        setCellContext(CELL_DECISION_OFFSET_CM);
+        mv.cells = cellContext(CELL_DECISION_OFFSET_CM);
 
         ok = runForwardMove(&mv);
     }
 
     Motor_Brake();
+
+    /* A stop that aligned is placed by the WALL, so the gap the encoders
+     * report is the correction rather than an error left over -- the same rule
+     * the forward move follows, applied at the other end of the cell. */
+    const uint8_t stop_aligned = sl_align_applied;
 
     /* The stop segment ends on a settle check -- five cycles under
      * STRAIGHT_SETTLE_SPEED_CMS -- so the robot is stopped, but a light
@@ -392,9 +432,27 @@ static uint8_t stopAtCell(void)
      * pivot is usually the next thing to happen. */
     HAL_Delay(NAV_PIVOT_SETTLE_MS);
 
+    /* WHERE IT ACTUALLY STOPPED. Taken here and nowhere else: this is the only
+     * moment the robot is at rest at a cell centre with the front sensor
+     * looking down the corridor it is about to leave or turn out of.
+     *
+     * The held reading costs nothing -- the sensors free-run and the robot has
+     * been still for the settle above, so the newest sample is already from
+     * after it stopped. */
+    {
+        ToF_Measurement_t m[TOF_SENSOR_COUNT];
+
+        s_stop_front_mm = (ToF_ReadAllLatest(m, TOF_MAX_SAMPLE_AGE_MS) == TOF_OK
+                           && m[TOF_FRONT].valid)
+                        ? m[TOF_FRONT].distance_mm
+                        : TOF_DISTANCE_INVALID;
+    }
+
     /* Standing at the centre by definition now: whatever gap is left is error
      * the next move inherits, and it is reported the same way it always was. */
-    tm_maze_residual_cm = s_chain_ref_cm - Encoder_getAverageDistance();
+    tm_maze_residual_cm = stop_aligned
+                        ? 0.0f
+                        : (s_chain_ref_cm - Encoder_getAverageDistance());
 
     if (tm_maze_residual_cm >  NAV_RESIDUAL_LIMIT_CM)
         tm_maze_residual_cm =  NAV_RESIDUAL_LIMIT_CM;
@@ -481,8 +539,6 @@ uint8_t CellMotion_Forward(void)
 
     const float start_offset = s_rolling ? CELL_DECISION_OFFSET_CM : 0.0f;
 
-    setCellContext(start_offset);
-
     StraightMove_t mv = {
         .distance_cm      = distance,
         /* The segment ends short of the centre, so the wall it is aiming to
@@ -502,6 +558,7 @@ uint8_t CellMotion_Forward(void)
         .wall_window_cm   = start_offset + NAV_CELL_CM * 0.5f
                             - TOF_SIDE_AHEAD_CM + 0.5f,
         .wall_centre_cm   = distance + CELL_DECISION_OFFSET_CM,
+        .cells            = cellContext(start_offset),
     };
 
     const uint8_t ok = runForwardMove(&mv);
@@ -510,6 +567,8 @@ uint8_t CellMotion_Forward(void)
     s_align_reason   = sl_align_reason;
     s_align_applied  = sl_align_applied;
     s_align_delta_cm = sl_align_delta_cm;
+    s_exit_err_mm    = sl_exit_err_mm;
+    s_exit_valid     = sl_exit_valid;
 
     tm_chain_segments++;
 
@@ -522,8 +581,13 @@ uint8_t CellMotion_Forward(void)
         return 0U;
     }
 
-    s_rolling     = 1U;
-    s_gap_mark_ms = HAL_GetTick();
+    s_rolling       = 1U;
+    s_gap_mark_ms   = HAL_GetTick();
+    /* Chained straight through, so this cell has no stop of its own. Carrying
+     * the previous one forward put the same number on two rows of the trace
+     * and made a cell with no wall ahead appear to have stopped 60 mm from
+     * one. */
+    s_stop_front_mm = TOF_DISTANCE_INVALID;
 
     /* The cell the pose is about to name has moved on by one pitch. */
     s_chain_ref_cm += NAV_CELL_CM;
@@ -587,13 +651,16 @@ uint8_t CellMotion_Forward(void)
      * shortfall is corrected instead of accumulating. */
     const float target_cm = NAV_CELL_CM + tm_maze_residual_cm;
 
-    setCellContext(0.0f);
+    (void)cellContext(0.0f);
+    WallFollow_SetCells(&s_cells);
 
     const uint8_t ok = runForwardFused(target_cm);
 
     s_align_reason   = sl_align_reason;
     s_align_applied  = sl_align_applied;
     s_align_delta_cm = sl_align_delta_cm;
+    s_exit_err_mm    = sl_exit_err_mm;
+    s_exit_valid     = sl_exit_valid;
 
     /* !! THE TWO CORRECTIONS MUST NOT BOTH FIRE !! -- see the note above. */
     float left_over = sl_align_applied
