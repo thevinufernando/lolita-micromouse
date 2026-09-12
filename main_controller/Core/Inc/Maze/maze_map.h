@@ -2,6 +2,12 @@
 #define MAZE_MAP_H
 
 #include <stdint.h>
+#include <stdbool.h>
+
+/* MAZE_SIZE, Direction, v_walls, h_walls and the pose now come from the
+ * ALGORITHM, which owns them. This module is a view over that state, not a
+ * second copy of it -- see the note below. */
+#include "maze.h"
 
 /*
  * ============================================================================
@@ -10,10 +16,19 @@
  *
  * The robot's record of which walls it has seen and where it thinks it is.
  *
- * SCOPE: storage and bookkeeping only. There is no flood fill, no path
- * planning and no decision about where to go next -- that lives in the
- * MicroMouseAlgorithm repo and is deliberately not duplicated here. This
- * module answers "what have I seen" and "where am I", nothing more.
+ * SCOPE: a VIEW over state the algorithm owns, plus the one thing the
+ * algorithm does not track.
+ *
+ * THE ARRAYS AND THE POSE ARE NOT DEFINED HERE ANY MORE. v_walls, h_walls,
+ * mouse_x, mouse_y and mouse_dir live in the ported flood fill
+ * (Core/Src/Maze/floodfill/floodfill_run.c), because that is what updates them
+ * after every move. This file used to define its own copies under the same
+ * names, which was harmless only while the two never met. They meet now.
+ *
+ * What remains here is the shaped access the firmware wants and the algorithm
+ * has no need for: walls by compass side, walls of an arbitrary cell in
+ * robot-relative terms, the next cell along a heading, and whether a cell has
+ * actually been looked at.
  *
  * ---------------------------------------------------------------------------
  * WALL REPRESENTATION - MUST MATCH THE ALGORITHM SIDE
@@ -42,20 +57,28 @@
  * ============================================================================
  */
 
-#define MAZE_SIZE 16
+/* MAZE_SIZE and Direction come from maze.h above. The algorithm declares
+ * Direction as { NORTH, EAST, SOUTH, WEST } with the default numbering, which
+ * is the 0..3 clockwise order the turn helpers below rely on. */
 
-/* Same ordering as the algorithm side. Do not renumber: the turn helpers
- * below rely on NORTH..WEST being 0..3 clockwise. */
-typedef enum { NORTH = 0, EAST = 1, SOUTH = 2, WEST = 3 } Direction;
+/* DEFINED BY THE ALGORITHM, in floodfill_run.c. Declared here so firmware code
+ * that only wants the view does not have to reach into the solver's headers.
+ * The types are the algorithm's -- bool rather than uint8_t, plain int rather
+ * than int16_t -- and must not be "tidied" to match the old firmware ones, or
+ * the declaration stops matching the definition. */
+extern bool v_walls[MAZE_SIZE][MAZE_SIZE + 1];
+extern bool h_walls[MAZE_SIZE + 1][MAZE_SIZE];
 
-extern uint8_t v_walls[MAZE_SIZE][MAZE_SIZE + 1];
-extern uint8_t h_walls[MAZE_SIZE + 1][MAZE_SIZE];
-
-/* Where the robot believes it is. Updated by the advance/turn helpers, so it
- * is dead reckoning at cell granularity -- it is only as good as the moves
- * that were actually completed. */
-extern int16_t mouse_x;
-extern int16_t mouse_y;
+/* Where the robot believes it is, at cell granularity.
+ *
+ * WHOEVER IS DRIVING UPDATES THIS, and only one of them ever is. The reactive
+ * navigator moves it with MazeMap_Advance() and the turn helpers below; the
+ * flood fill moves it itself after each completed move, exactly as it did on
+ * the simulator. Two writers would disagree the first time a move failed, and
+ * every wall recorded afterwards would land in a cell the robot never stood
+ * in -- which is the one error a maze map cannot recover from. */
+extern int mouse_x;
+extern int mouse_y;
 extern Direction mouse_dir;
 
 /* Clear the map, place the mouse at (0,0) facing NORTH, and set the maze's
@@ -113,6 +136,15 @@ uint8_t MazeMap_WallWest(int16_t x, int16_t y);
  * all four sides. Anything reasoning about a cell it has not visited must ask
  * this first. */
 uint8_t MazeMap_IsKnown(int16_t x, int16_t y);
+
+/* Mark a cell as surveyed without writing any walls.
+ *
+ * For a driver that records walls itself. The flood fill calls the algorithm's
+ * own updateWalls(), which writes the same arrays but knows nothing about the
+ * visited bitmap this module keeps -- so without this, MazeMap_IsKnown() would
+ * answer "no" for every cell of a flood-fill run and the wall follower's cell
+ * veto would never fire. */
+void MazeMap_MarkKnown(int16_t x, int16_t y);
 
 /* The three robot-relative walls of any cell, for a robot facing `dir`.
  *

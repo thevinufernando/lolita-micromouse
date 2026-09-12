@@ -1,7 +1,9 @@
 #include "maze_map.h"
 
-uint8_t v_walls[MAZE_SIZE][MAZE_SIZE + 1];
-uint8_t h_walls[MAZE_SIZE + 1][MAZE_SIZE];
+/* v_walls, h_walls and the pose are DEFINED BY THE ALGORITHM, in
+ * floodfill_run.c, because that is what updates them after every move. They
+ * used to be defined here under the same names, which was harmless only while
+ * the two never met in one binary. */
 
 /* Cells whose walls have actually been read, one bit each.
  *
@@ -18,22 +20,19 @@ static uint8_t s_known[(MAZE_SIZE * MAZE_SIZE + 7) / 8];
 /* Defined further down, with the wall accessors it was written for. */
 static uint8_t inBounds(int16_t x, int16_t y);
 
-int16_t   mouse_x;
-int16_t   mouse_y;
-Direction mouse_dir;
 
 
 void MazeMap_Init(void)
 {
     for (int16_t y = 0; y < MAZE_SIZE; y++) {
         for (int16_t x = 0; x < MAZE_SIZE + 1; x++) {
-            v_walls[y][x] = 0U;
+            v_walls[y][x] = false;
         }
     }
 
     for (int16_t y = 0; y < MAZE_SIZE + 1; y++) {
         for (int16_t x = 0; x < MAZE_SIZE; x++) {
-            h_walls[y][x] = 0U;
+            h_walls[y][x] = false;
         }
     }
 
@@ -41,12 +40,12 @@ void MazeMap_Init(void)
      * pose helpers cannot walk the mouse outside the arrays even if a move
      * is mis-reported, and it matches what the simulator assumes. */
     for (int16_t y = 0; y < MAZE_SIZE; y++) {
-        v_walls[y][0] = 1U;           /* west edge  */
-        v_walls[y][MAZE_SIZE] = 1U;   /* east edge  */
+        v_walls[y][0] = true;           /* west edge  */
+        v_walls[y][MAZE_SIZE] = true;   /* east edge  */
     }
     for (int16_t x = 0; x < MAZE_SIZE; x++) {
-        h_walls[0][x] = 1U;           /* south edge */
-        h_walls[MAZE_SIZE][x] = 1U;   /* north edge */
+        h_walls[0][x] = true;           /* south edge */
+        h_walls[MAZE_SIZE][x] = true;   /* north edge */
     }
 
     for (uint16_t i = 0; i < sizeof s_known; i++) {
@@ -56,6 +55,16 @@ void MazeMap_Init(void)
     mouse_x = 0;
     mouse_y = 0;
     mouse_dir = NORTH;
+}
+
+
+void MazeMap_MarkKnown(int16_t x, int16_t y)
+{
+    if (!inBounds(x, y)) return;
+
+    const uint16_t bit = (uint16_t)(y * MAZE_SIZE + x);
+
+    s_known[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
 }
 
 
@@ -80,30 +89,27 @@ void MazeMap_UpdateWalls(uint8_t front, uint8_t left, uint8_t right)
      * walls being read -- after a failed move, for instance -- and a cell
      * counted as known on that basis would hand out wall data nobody measured.
      */
-    if (inBounds(mouse_x, mouse_y)) {
-        const uint16_t bit = (uint16_t)(mouse_y * MAZE_SIZE + mouse_x);
-        s_known[bit >> 3] |= (uint8_t)(1U << (bit & 7U));
-    }
+    MazeMap_MarkKnown((int16_t)mouse_x, (int16_t)mouse_y);
 
     if (front) {
-        if (mouse_dir == NORTH)      h_walls[mouse_y + 1][mouse_x] = 1U;
-        else if (mouse_dir == EAST)  v_walls[mouse_y][mouse_x + 1] = 1U;
-        else if (mouse_dir == SOUTH) h_walls[mouse_y][mouse_x]     = 1U;
-        else                         v_walls[mouse_y][mouse_x]     = 1U;
+        if (mouse_dir == NORTH)      h_walls[mouse_y + 1][mouse_x] = true;
+        else if (mouse_dir == EAST)  v_walls[mouse_y][mouse_x + 1] = true;
+        else if (mouse_dir == SOUTH) h_walls[mouse_y][mouse_x]     = true;
+        else                         v_walls[mouse_y][mouse_x]     = true;
     }
 
     if (left) {
-        if (mouse_dir == NORTH)      v_walls[mouse_y][mouse_x]     = 1U;
-        else if (mouse_dir == EAST)  h_walls[mouse_y + 1][mouse_x] = 1U;
-        else if (mouse_dir == SOUTH) v_walls[mouse_y][mouse_x + 1] = 1U;
-        else                         h_walls[mouse_y][mouse_x]     = 1U;
+        if (mouse_dir == NORTH)      v_walls[mouse_y][mouse_x]     = true;
+        else if (mouse_dir == EAST)  h_walls[mouse_y + 1][mouse_x] = true;
+        else if (mouse_dir == SOUTH) v_walls[mouse_y][mouse_x + 1] = true;
+        else                         h_walls[mouse_y][mouse_x]     = true;
     }
 
     if (right) {
-        if (mouse_dir == NORTH)      v_walls[mouse_y][mouse_x + 1] = 1U;
-        else if (mouse_dir == EAST)  h_walls[mouse_y][mouse_x]     = 1U;
-        else if (mouse_dir == SOUTH) v_walls[mouse_y][mouse_x]     = 1U;
-        else                         h_walls[mouse_y + 1][mouse_x] = 1U;
+        if (mouse_dir == NORTH)      v_walls[mouse_y][mouse_x + 1] = true;
+        else if (mouse_dir == EAST)  h_walls[mouse_y][mouse_x]     = true;
+        else if (mouse_dir == SOUTH) v_walls[mouse_y][mouse_x]     = true;
+        else                         h_walls[mouse_y + 1][mouse_x] = true;
     }
 }
 
@@ -137,7 +143,19 @@ uint8_t MazeMap_NextCell(int16_t x, int16_t y, Direction dir,
 
 uint8_t MazeMap_Advance(void)
 {
-    return MazeMap_NextCell(mouse_x, mouse_y, mouse_dir, &mouse_x, &mouse_y);
+    /* Through locals, because the pose is the algorithm's `int` and this takes
+     * int16_t. Narrowing is safe: every value is a maze index. */
+    int16_t nx = 0, ny = 0;
+
+    if (!MazeMap_NextCell((int16_t)mouse_x, (int16_t)mouse_y, mouse_dir,
+                          &nx, &ny)) {
+        return 0U;
+    }
+
+    mouse_x = nx;
+    mouse_y = ny;
+
+    return 1U;
 }
 
 

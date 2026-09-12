@@ -7,6 +7,9 @@
 #include "ICM42688.h"
 #include "tof_sensors.h"
 #include "navigator.h"
+#include "cell_motion.h"
+#include "floodfill_run.h"
+#include "mms_api.h"
 
 /* Result of the most recent move */
 volatile float  tm_final_left_cm    = 0.0f;
@@ -675,6 +678,43 @@ TEST_FN void Test_MazeRun(void)
   LED_Blink(1, 100, 900);   /* done: go read the trace */
 }
 
+/* ---- TEST 15: the ported flood fill ---------------------------------------
+ *
+ * The three-phase solver from MicroMouseAlgorithm, driving the real robot
+ * through mms_api.c. Same cell-level motion, same trace, same telemetry as
+ * TEST_MAZE_RUN -- only the decision rule is different.
+ *
+ * THE RUN SETUP LIVES HERE RATHER THAN INSIDE FloodFill_Run(), because that
+ * function is the algorithm's own main() and every line inside it is the
+ * original. Starting the sensors and clearing the trace are the robot's
+ * business, so they happen around it.
+ *
+ * Runs ONCE and then heartbeats. tm_maze_abort_reason says how it ended, and
+ * the per-cell trace reads exactly as it does for the reactive run.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_FloodFillRun(void)
+{
+  if (!tm_maze_complete)
+  {
+    LED_Blink(1, 300, 300);
+
+    tm_maze_trace_count  = 0U;
+    tm_maze_moves        = 0U;
+    tm_maze_abort_reason = NAV_END_RUNNING;
+
+    CellMotion_BeginRun();
+    MMS_ApiReset();
+
+    FloodFill_Run();
+
+    CellMotion_EndRun();
+    tm_maze_complete = 1U;
+  }
+
+  Motor_Brake();
+  LED_Blink(1, 100, 900);   /* done: go read the trace */
+}
+
 void TestHarness_RunCycle(void)
 {
 #if   (ACTIVE_TEST == TEST_MOTORS_OPEN_LOOP)
@@ -726,6 +766,10 @@ void TestHarness_RunCycle(void)
 
 #elif (ACTIVE_TEST == TEST_MAZE_RUN)
   Test_MazeRun();
+  return;   /* runs once, then heartbeats */
+
+#elif (ACTIVE_TEST == TEST_FLOODFILL_RUN)
+  Test_FloodFillRun();
   return;   /* runs once, then heartbeats */
 
 #else

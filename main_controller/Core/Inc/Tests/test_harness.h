@@ -34,9 +34,10 @@
 #define TEST_TOF_CONTINUOUS 12   /* No motion. Continuous ToF ranging.    */
 #define TEST_TOF_MODE_CYCLE 13   /* No motion. Mode switching + stop path. */
 #define TEST_MAZE_RUN 14         /* MOVES. Reactive navigation + wall map. */
+#define TEST_FLOODFILL_RUN 15    /* MOVES. The ported flood-fill solver.    */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_MAZE_RUN
+#define ACTIVE_TEST TEST_FLOODFILL_RUN
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */

@@ -528,6 +528,58 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (newest) - The flood fill, ported
+
+`MicroMouseAlgorithm/maze.c` and `Main.c` now drive the robot, under
+`Core/{Inc,Src}/Maze/floodfill/`. They came across essentially unchanged:
+`main()` is `FloodFill_Run()` and `debug_log()`'s body moved out, because it was
+`fprintf(stderr)`. Every line of `floodfill_phase()`, `updateWalls()`,
+`getBestDirection()`, `checkDeadEnd()` and `floodfill_speed_run()` is the
+original. `ACTIVE_TEST` is `TEST_FLOODFILL_RUN`.
+
+**`tests/floodfill_diff.sh` is the reason to trust that.** It builds the
+original and the port into two binaries, links both against the same simulated
+maze, and compares their transcripts action for action over seven seeded mazes.
+Everything about the builds is identical except which copy of the algorithm
+they contain, so "the algorithm did not change" is checked rather than
+asserted. Run it after touching anything under `floodfill/`; if it diverges,
+change `MicroMouseAlgorithm` first and re-port.
+
+**The one adaptation: wall readings are cached per cell.**
+`API_wallFront/Left/Right` are called several times per cell -- once in
+`updateWalls()`, again in `getBestDirection()` -- which is free on the simulator
+and about 200 ms a time here. `mms_api.c` reads the cell once on arrival and
+serves every query from that snapshot. The differential test runs each maze
+both ways and the transcripts match, so this saves time without changing a
+decision.
+
+**A failed turn is reported one call late.** `API_turnLeft/Right` return void,
+so a timed-out pivot is latched and returned from the next `API_moveForward()`,
+which `Main.c` already treats as a crash. The trace shows the failure on the
+move after the turn.
+
+**THE ALGORITHM OWNS THE POSE AND THE MAP.** `mouse_x`, `mouse_y`, `mouse_dir`,
+`v_walls` and `h_walls` are defined in `floodfill_run.c`; `maze_map.c` used to
+define its own copies under the same names, which was harmless only while the
+two never met in one binary. It is now a view over that state, keeping only
+what the algorithm has no use for: walls by compass side, robot-relative walls
+of an arbitrary cell, the next cell along a heading, and a visited bitmap. The
+types are the algorithm's -- `bool` walls, `int` pose -- and the reader follows
+the pose width change.
+
+Nothing may write the pose except whoever is driving. Two writers would
+disagree the first time a move failed, and every wall recorded afterwards would
+land in a cell the robot never entered.
+
+**`cell_motion.c` is the layer both drivers stand on**: observe, turn, forward,
+plus the residual carry, the front-wall alignment interaction, the wall
+follower's cell context and the per-cell trace. It was private to
+`navigator.c`; re-implementing it for the flood fill would have meant
+re-learning every hard-won rule in it. The right-hand rule stays in
+`navigator.c`, so `TEST_MAZE_RUN` still works.
+
+Costs about 4.9 KB of bss, against roughly 16 KB used of 128 KB.
+
 ### 2026-09-12 (head) - A move was ending while the robot was still moving
 
 21 cells, ended on a genuine wedge. The per-cell entry error, added last time,

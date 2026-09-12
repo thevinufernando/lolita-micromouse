@@ -16,6 +16,12 @@ RULE rather than the plumbing.
 | `maze_map_host_test.c` | Pose, wall bookkeeping, known-vs-open | `maze_map.c` |
 | `navigator_host_test.c` | Reactive wall-following rule | `navigator.c` |
 | `wall_follow_host_test.c` | Lateral loop and the cascade rule | `wall_follow.c`, the `WALL_FOLLOW_*` constants |
+| `floodfill_diff.sh` | **That the ported flood fill IS the original** | anything under `Core/*/Maze/floodfill/` |
+
+> **The maze state moved.** `v_walls`, `h_walls` and the pose are defined by the
+> algorithm now (`Core/Src/Maze/floodfill/floodfill_run.c`), not by
+> `maze_map.c`, so any test that links the map also has to link the algorithm
+> and a stub API. The build lines below already do.
 
 ---
 
@@ -144,11 +150,58 @@ forever while the robot steers to a wall that is no longer there.
 Also pins the unsigned-subtraction idiom against the tick counter's 32-bit wrap,
 where a signed comparison would call a brand-new reading ancient.
 
+## maze_map_host_test.c - pose, wall bookkeeping, known-vs-open
+
+```sh
+gcc -O1 -Wall -Wextra -o maze_map_test tests/maze_map_host_test.c \
+    Core/Src/Maze/maze_map.c Core/Src/Maze/floodfill/maze.c \
+    Core/Src/Maze/floodfill/floodfill_run.c tests/floodfill_sim_api.c \
+    -DSIM_PROVIDE_DEBUG_LOG -I Core/Inc/Maze -I Core/Inc/Maze/floodfill \
+    && ./maze_map_test
+```
+
+Covers the direction arithmetic in both directions -- `MazeMap_CellWalls()`
+must read back exactly what `MazeMap_UpdateWalls()` wrote, from all four
+headings -- and the distinction between a cell with no walls and a cell nobody
+has looked at. Getting the first wrong produces a map that is plausible,
+self-consistent and mirrored; getting the second wrong makes every unexplored
+cell read as wide open.
+
+## floodfill_diff.sh - is the ported algorithm the same algorithm?
+
+```sh
+tests/floodfill_diff.sh [path-to-MicroMouseAlgorithm]
+```
+
+The one test that matters for the port. It builds `MicroMouseAlgorithm`'s
+`maze.c` + `Main.c` into one binary and the copies under
+`Core/{Inc,Src}/Maze/floodfill/` into another, links BOTH against the same
+simulated maze in `floodfill_sim_api.c`, and compares their transcripts action
+for action across seven seeded mazes.
+
+Everything about the two builds is identical except which copy of the algorithm
+they contain. So "the algorithm did not change" stops being a claim and becomes
+something the build either proves or fails. Run it after touching anything
+under `floodfill/`, and if it ever diverges, change
+`MicroMouseAlgorithm` first and re-port rather than patching the copy.
+
+It also runs every maze twice, once serving wall readings fresh and once from a
+per-cell snapshot. The snapshot is the single adaptation the robot needed -- a
+real sensor read costs about 200 ms and the algorithm asks several times per
+cell -- and the transcripts must match, or the caching is changing behaviour
+rather than just saving time.
+
+The mazes come from a seeded recursive backtracker, so both binaries carve the
+identical one and there are plenty of dead ends for `checkDeadEnd()` to find.
+
 ## navigator_host_test.c - reactive wall-following rule
 
 ```sh
 gcc -O1 -Wall -Wextra -o nav_test tests/navigator_host_test.c \
-    Core/Src/Maze/maze_map.c -I Core/Inc/Maze && ./nav_test
+    Core/Src/Maze/maze_map.c Core/Src/Maze/floodfill/maze.c \
+    Core/Src/Maze/floodfill/floodfill_run.c tests/floodfill_sim_api.c \
+    -DSIM_PROVIDE_DEBUG_LOG -I Core/Inc/Maze -I Core/Inc/Maze/floodfill \
+    && ./nav_test
 ```
 
 Checks the decision rule's truth table, then drives it around a simulated

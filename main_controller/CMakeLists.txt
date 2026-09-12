@@ -79,12 +79,21 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # reference code and are deliberately NOT built. Do not add them.
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Sensors/VL53L0X/Platform/vl53l0x_platform.c
 
-    # Maze layer - map + wall interpretation (no solving; that is the
-    # MicroMouseAlgorithm repo)
+    # Maze layer - map, wall interpretation, cell-level motion, and the
+    # solvers that sit on top of it
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/maze_map.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_sense.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/wall_follow.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/navigator.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/cell_motion.c
+
+    # The flood-fill solver, ported from MicroMouseAlgorithm essentially
+    # unchanged. maze.c and floodfill_run.c ARE that repo's files; mms_api.c is
+    # the only new code, and it exists to make API.h mean motors and sensors
+    # instead of a pipe to the simulator.
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/floodfill/maze.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/floodfill/floodfill_run.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Maze/floodfill/mms_api.c
 
     # Utilities
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/Utils/dwt_timer.c
@@ -105,6 +114,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X/Core
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Sensors/VL53L0X/Platform
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Maze
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Maze/floodfill
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Utils
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/Tests
 )
