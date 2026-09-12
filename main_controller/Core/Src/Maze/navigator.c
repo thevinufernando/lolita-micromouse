@@ -41,6 +41,7 @@ static void recordCell(float move_error_cm, uint8_t move_ok,
     r->move_ok        = move_ok;
     r->wall_side      = wf_side;
     r->action         = action;
+    r->drift_deg      = WallFollow_GetDriftDeg();
 
     r->votes = (uint16_t)((wall_front_votes & 7U)
                         | ((wall_left_votes  & 7U) << 3)
@@ -169,7 +170,7 @@ void Navigator_Run(void)
 
     MazeMap_Init();
     MazeMap_SetPose(NAV_START_X, NAV_START_Y, NAV_START_DIR);
-    WallFollow_Reset();
+    WallFollow_ResetBias();   /* start of a RUN: forget the learned bias too */
     ToF_ResetFilterAll();
     TurnController_ResetYaw();   /* start of run: heading origin is here */
 

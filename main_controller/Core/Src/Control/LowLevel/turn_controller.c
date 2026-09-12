@@ -1,5 +1,6 @@
 #include "turn_controller.h"
 #include "motion_profile.h"
+#include "wall_follow.h"
 
 #define DEG_TO_RAD_F (PI / 180.0f)
 #define RAD_TO_DEG_F (180.0f / PI)
@@ -423,7 +424,17 @@ static uint8_t runTurn(float angle_deg, float direction)
 
     turn_heading_target_deg += angle_deg * direction;
 
-    float target_yaw_deg = turn_heading_target_deg;
+    /* THE TURN INHERITS THE LEARNED BIAS TOO, the same way a straight move
+     * does. The accumulator stays nominal -- 90 degrees is 90 degrees -- and
+     * the correction is added where the target is USED, so the two loops read
+     * one number and neither owns it.
+     *
+     * Without this every turn lands the robot back at a heading the loop
+     * already knows is wrong, and the straight move that follows spends its
+     * first stretch turning out of it. The cell-by-cell correction still
+     * worked, but it re-introduced the error at every corner and paid for it
+     * again in the next cell. */
+    float target_yaw_deg = turn_heading_target_deg + WallFollow_GetDriftDeg();
     float sweep_deg      = target_yaw_deg - start_yaw_deg;
 
     turn_heading_error_deg = sweep_deg - (angle_deg * direction);

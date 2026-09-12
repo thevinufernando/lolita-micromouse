@@ -139,7 +139,7 @@
  * does not, the run stops on a full buffer instead of on the budget and the
  * reason is reported as NAV_END_TRACE_FULL. Keep it comfortably above
  * NAV_MAX_MOVES + 2, which covers the budget, the final record, and the extra
- * one a failed move writes. At 36 bytes each this costs 2304 bytes of RAM. */
+ * one a failed move writes. At 40 bytes each this costs 2560 bytes of RAM. */
 #define MAZE_TRACE_CAPACITY 64U
 
 typedef struct {
@@ -167,9 +167,17 @@ typedef struct {
   uint8_t move_ok;       /* 1 = the move that got here completed */
   uint8_t wall_side;     /* WallFollowSide_t in use       */
   uint8_t action;        /* NAV_ACT_* chosen FROM this reading */
+  /* What the lateral loop has learned about the heading reference so far.
+   *
+   * Per cell rather than per move because it is supposed to CONVERGE over a
+   * run: rising early and then flat is the term working, still climbing at
+   * the last cell means it never got there, and pinned at
+   * WALL_FOLLOW_KI_LIMIT_DEG means the asymmetry is mechanical. None of that
+   * is visible in a single move's trace. */
+  float drift_deg;
 } MazeTrace_t;
 
-_Static_assert(sizeof(MazeTrace_t) == 36,
+_Static_assert(sizeof(MazeTrace_t) == 40,
                "MazeTrace_t stride changed: update the SWD telemetry reader");
 
 extern volatile MazeTrace_t tm_maze_trace[MAZE_TRACE_CAPACITY];

@@ -528,6 +528,58 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (latest) - One integrator, and where it is applied
+
+The lateral loop was not converging: a run showed the robot visibly yawed left
+with the left wall in view and no correction arriving. Two causes, both about
+structure rather than gains.
+
+- **The correction had a ceiling it could not pass.** The integral added in the
+  previous change sat INSIDE the tilt sum, so the total lateral authority was
+  bounded by `WALL_FOLLOW_MAX_TILT_DEG`. If the yaw estimate is off from the
+  maze by more than that clamp, the robot cannot recover: to drive straight it
+  must command the full offset, the clamp stops it short, and it keeps turning
+  the same wrong way for as long as the wall lasts. The proportional term
+  saturates first and the integral, sharing the same budget, then has nothing
+  left to give.
+
+  The integral now goes to the **heading target**, outside the tilt clamp, via
+  `WallFollow_GetDriftDeg()`. The proportional term keeps its full tilt budget
+  for position. `WALL_FOLLOW_KI_LIMIT_DEG` is 8 degrees and is deliberately
+  LARGER than the tilt clamp -- `wall_follow_host_test.c` asserts that
+  ordering, which is the inverse of the check it replaced.
+
+  The linear-range rule still applies, but to the heading loop's ERROR, not to
+  how far the setpoint has moved. A setpoint the robot tracks costs no error.
+  What has to stay small is the integral's RATE, and the test checks that.
+
+- **There were two integrators doing one job.** `WALL_FOLLOW_DRIFT_BLEED`
+  integrated the TILT, and the tilt contained the integral -- two integrators
+  in series on one error, with no clamp on the outer one and no way for them to
+  agree on which owned the correction. The bleed is gone. One term now does
+  both jobs and it is the drift corrector, integrating the lateral error. The
+  reasoning that motivated the bleed is unchanged: a tilt the robot must hold
+  forever is the gyro being wrong, because a centred robot needs no tilt to
+  stay centred. It just arrives one integration earlier.
+
+- **Turns inherit the bias too.** `turn_controller.c` adds the learned drift
+  where the target is USED, the same way the straight move does; the
+  accumulator stays nominal. Without it every turn landed the robot at a
+  heading the loop already knew was wrong, and the next straight spent its
+  first stretch turning out of it.
+
+Instrumentation, since the complaint was about a heading that no log showed:
+
+- `StraightTrace_t` is 40 bytes and carries `yaw_deg`, `tilt_deg`, `drift_deg`
+  and `err_mm`. `yaw_err` alone says the inner loop is happy; it cannot say
+  whether the heading it is happy about is the right one. Capacity is 200, up
+  from 120, which was running out four fifths of the way through every move.
+- `MazeTrace_t` is 40 bytes and carries `drift_deg` per cell, because the term
+  is supposed to CONVERGE over a run and that is not visible in one move.
+- The reader prints the heading swept per move, the drift at every cell, and a
+  verdict on whether it settled, is still climbing, or is pinned at the limit.
+  Pinned means mechanical asymmetry, not a gain to trim.
+
 ### 2026-09-12 (later) - Front-wall alignment, and backing out of dead ends
 - **The forward axis is now closed-loop.** The side walls always held the
   robot's lateral position; nothing held its longitudinal position except

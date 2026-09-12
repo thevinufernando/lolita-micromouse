@@ -7,16 +7,40 @@ volatile float    wf_error_mm;
 volatile float    wf_tilt_deg;
 volatile float    wf_drift_deg;
 volatile uint32_t wf_switches;
+volatile float    wf_integral;
 
 static uint8_t active_side = WALL_FOLLOW_NONE;
 
+/* Integral of the lateral error, in degrees. It is NOT part of the tilt: it is
+ * added to the heading TARGET, outside the tilt clamp, and reaches the
+ * controller through WallFollow_GetDriftDeg(). wf_drift_deg holds it.
+ *
+ * It belongs to the ROBOT, not to a move -- see WALL_FOLLOW_KI_DEG_PER_MM_S
+ * and the ceiling argument at WALL_FOLLOW_KI_LIMIT_DEG. */
 
+
+/* Per-move reset. Clears what belongs to a move and DELIBERATELY KEEPS what
+ * belongs to the robot.
+ *
+ * wf_drift_deg is a slow learner of a standing asymmetry. Clearing it here is
+ * why it read exactly 0.000 in every log ever taken: it was wiped at the start
+ * of all 26 moves of a run and never given long enough to become anything. A
+ * term reset before it can act is not a term. */
 void WallFollow_Reset(void)
 {
     active_side  = WALL_FOLLOW_NONE;
     wf_side      = WALL_FOLLOW_NONE;
     wf_error_mm  = 0.0f;
     wf_tilt_deg  = 0.0f;
+}
+
+
+/* Full reset, including everything learned about the robot. Call once at the
+ * start of a run, never between moves. */
+void WallFollow_ResetBias(void)
+{
+    WallFollow_Reset();
+    wf_integral  = 0.0f;
     wf_drift_deg = 0.0f;
 }
 
@@ -145,6 +169,27 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
     const float cap = single_far ? WALL_FOLLOW_SINGLE_FAR_TILT_DEG
                                  : WALL_FOLLOW_MAX_TILT_DEG;
 
+    /* INTEGRATE ONLY ON A REFERENCE WORTH TRUSTING. Two walls resolve the
+     * ambiguity outright, and a single wall reading SHORT is unambiguous too.
+     * The far direction on a single wall is exactly the case that cannot tell
+     * an off-centre robot from a wall that has ended, and winding an integrator
+     * on that would bake the guess in permanently. Freezing is the right
+     * answer: the term keeps what it has learned and stops learning. */
+    if (!single_far) {
+        wf_drift_deg += WALL_FOLLOW_KI_DEG_PER_MM_S
+                        * wf_error_mm * WALL_FOLLOW_UPDATE_S;
+
+        if (wf_drift_deg >  WALL_FOLLOW_KI_LIMIT_DEG)
+            wf_drift_deg =  WALL_FOLLOW_KI_LIMIT_DEG;
+        if (wf_drift_deg < -WALL_FOLLOW_KI_LIMIT_DEG)
+            wf_drift_deg = -WALL_FOLLOW_KI_LIMIT_DEG;
+    }
+
+    wf_integral = wf_drift_deg;
+
+    /* PROPORTIONAL ONLY. The integral is deliberately absent from this sum --
+     * it goes to the heading target instead, so the clamp below bounds how
+     * hard the robot may lean to fix a POSITION error and nothing else. */
     float tilt = kp * wf_error_mm;
 
     if (tilt >  cap) tilt =  cap;
@@ -159,11 +204,7 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
      * asks the robot to rotate as hard as it can, which is never what a
      * centring correction wants, and it pins the inner loop's output for as
      * long as it takes. Ramping instead keeps the inner loop in its linear
-     * region, where a cascade is worth having.
-     *
-     * Note the SLEWED value is what gets bled into the drift estimate below,
-     * not the raw demand: the bleed is meant to pick up the standing tilt the
-     * robot is actually holding, and it never holds the un-slewed one. */
+     * region, where a cascade is worth having. */
     /* !! THIS FUNCTION IS NOT CALLED EVERY CONTROL CYCLE !! The straight-line
      * controller calls it once per ToF sweep, every STRAIGHT_TOF_DIVIDER
      * cycles, because sampling faster than the sensor produces only re-reads a
@@ -178,13 +219,6 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT])
     tilt = wf_tilt_deg + step;
 
     wf_tilt_deg = tilt;
-
-    /* Drift bleed. A tilt that persists is not a position error the robot is
-     * still correcting -- it is the heading estimate being wrong, because a
-     * centred robot needs no tilt to stay centred. Move the heading target
-     * toward it slowly enough that the lateral loop always wins in the short
-     * term and this only picks up the standing component. */
-    wf_drift_deg += WALL_FOLLOW_DRIFT_BLEED * tilt * WALL_FOLLOW_UPDATE_S;
 
     return tilt;
 }

@@ -655,6 +655,59 @@
  *
  * At the cap, one cell of travel still buys 192*sin(2.5) = 8.4 mm of
  * correction, comfortably more than the 4 mm per cell the robot was losing. */
+/* Integral term on the LATERAL error, in degrees of tilt per mm-second.
+ *
+ * THE LOOP WAS PROPORTIONAL-ONLY, AND IT SHOWS. Seven consecutive cells with
+ * both walls visible and full correction running still walked from -1.5 mm to
+ * +8.0 mm, about 1.4 mm per cell. That is not the loop failing, it is what a
+ * P-only loop does against a standing disturbance: at +8 mm it holds 4 degrees
+ * of tilt, and that tilt BALANCES the disturbance rather than removing it.
+ * Steady-state error is the definition of the thing.
+ *
+ * The disturbance is some persistent asymmetry -- a wheel slightly larger, a
+ * motor slightly stronger, a gyro bias the EKF has not caught. Which one does
+ * not matter to this term: an integrator nulls a standing error whatever
+ * causes it, which is exactly why it is the right tool here and why guessing
+ * the cause first is not necessary.
+ *
+ * SIZED to supply the 4 degrees the P term is currently holding, over roughly
+ * five seconds of driving: 8 mm * 0.1 * 5 s = 4 deg. Slow on purpose. It must
+ * be far slower than the proportional part or the two fight and the robot
+ * weaves, which is the same rule the drift bleed follows.
+ *
+ * IT PERSISTS ACROSS MOVES. The asymmetry belongs to the robot, not to one
+ * cell, so resetting it every move would mean re-learning it every move and
+ * never converging -- which is precisely what has been happening to
+ * wf_drift_deg, wiped at the start of all 26 moves of every run and reading
+ * exactly 0.000 in every log because of it. Only WallFollow_ResetBias() clears
+ * it, once at the start of a run. */
+#define WALL_FOLLOW_KI_DEG_PER_MM_S 0.10f
+
+/* Clamp on the integral, in degrees.
+ *
+ * NOT bounded by WALL_FOLLOW_MAX_TILT_DEG, because the integral is no longer
+ * part of the tilt. It is added to the HEADING TARGET instead, outside the
+ * tilt clamp, and that distinction is the whole fix.
+ *
+ * Inside the clamp it could not do its job. The failure is easy to state: if
+ * the yaw estimate is off from the maze by more than WALL_FOLLOW_MAX_TILT_DEG,
+ * the robot cannot recover. Suppose the estimate reads 8 degrees low. To drive
+ * straight the loop must command +8, but the clamp stops it at +6, so the
+ * robot keeps turning -- slower, but in the same wrong direction, for as long
+ * as the wall lasts. The proportional term saturates first and the integral,
+ * sharing the same 6 degree budget, then has nothing left to give. A run was
+ * observed doing exactly this: yawed left with the left wall in view and no
+ * correction arriving.
+ *
+ * Outside the clamp there is no such ceiling. The proportional term keeps its
+ * full tilt budget for position, and the integral separately shifts the
+ * reference the inner loop holds -- which is the correct place for it, since
+ * what it is learning IS a heading reference error.
+ *
+ * 8 degrees bounds it well past any accumulated gyro-to-maze misalignment a
+ * run should ever produce, and still far short of a wrong turn. */
+#define WALL_FOLLOW_KI_LIMIT_DEG 8.0f
+
 #define WALL_FOLLOW_SINGLE_FAR_KP 0.20f
 #define WALL_FOLLOW_SINGLE_FAR_TILT_DEG 2.5f
 
@@ -766,17 +819,22 @@
  * pair appears, this is the note to revisit -- the objection is entirely about
  * where the sensors are, not about reversing. */
 
-/* Slowly bleed the steady-state tilt back into the heading estimate.
+/* WALL_FOLLOW_DRIFT_BLEED IS GONE, folded into the integral above.
  *
- * THIS IS THE DRIFT CORRECTOR, and it falls out of the cascade for free. If
- * the gyro has drifted, holding the wall at its setpoint requires a persistent
- * non-zero tilt -- so the standing output of the lateral loop IS the drift.
- * Bleeding it into the heading target bounds the drift with no magnetometer
- * and no differentiating of wall distance.
+ * The drift corrector and the lateral integral were two integrators doing one
+ * job, in series, on the same error. The bleed integrated the TILT, and the
+ * tilt contained the integral, so the pair wound each other with no clamp on
+ * the outer one -- badly conditioned at best, and guaranteed to fight, since
+ * two integrators in series on one error have no way to agree on which of
+ * them owns the correction.
  *
- * Deliberately tiny: this must be far slower than the lateral loop, or the two
- * fight and the robot weaves. Degrees of correction per second of held tilt. */
-#define WALL_FOLLOW_DRIFT_BLEED 0.02f
+ * One integrator now does both jobs, and it is the drift corrector: it
+ * integrates the lateral ERROR and is added to the heading target. The
+ * reasoning that motivated the bleed still holds exactly as written -- a tilt
+ * the robot must hold forever is the gyro being wrong, because a centred robot
+ * needs no tilt to stay centred -- it just arrives one integration earlier.
+ *
+ * See WALL_FOLLOW_KI_DEG_PER_MM_S and WALL_FOLLOW_KI_LIMIT_DEG. */
 
 /* ============ STRAIGHTLINE: FUSED HEADING PID (degrees) ================= */
 /* Used by runForwardFused(). Distinct from STRAIGHT_HEADING_*, which holds  */

@@ -65,7 +65,10 @@ uint8_t runForwardFused(float distance_cm);
  * one trace then found the real cause immediately. The straight move has had
  * no instrumentation at all, and it is now failing identically across two
  * different binaries, so the answer is data rather than another guess. */
-#define SL_TRACE_CAPACITY 120U
+/* 200 entries at CONTROL_SAMPLE_TIME_S covers 2 s, which is a whole cell at
+ * STRAIGHT_PROFILE_MAX_CMS. At 120 the trace ran out four fifths of the way
+ * through every move, and the end of the move is where it goes wrong. */
+#define SL_TRACE_CAPACITY 200U
 
 typedef struct {
   float t_s;
@@ -74,9 +77,27 @@ typedef struct {
   float base;     /* forward command     */
   float steer;    /* differential        */
   float yaw_err;  /* heading error, deg  */
+  /* THE CONTINUOUS HEADING AND ITS THREE PARTS.
+   *
+   * yaw_err alone says the inner loop is happy; it cannot say whether the
+   * heading it is happy about is the right one. These four together decompose
+   * the demand completely:
+   *
+   *     yaw_deg  = where the robot believes it is pointing, unwrapped
+   *     tilt_deg = what the lateral loop is asking for, position only
+   *     drift_deg= what the integral has learned about the reference
+   *     err_mm   = the lateral error driving both
+   *
+   * A robot that is visibly yawed while yaw_err reads zero is the case this
+   * exists to catch: the estimate is wrong, not the loop, and drift_deg is
+   * the term that has to move. */
+  float yaw_deg;
+  float tilt_deg;
+  float drift_deg;
+  float err_mm;
 } StraightTrace_t;
 
-_Static_assert(sizeof(StraightTrace_t) == 24,
+_Static_assert(sizeof(StraightTrace_t) == 40,
                "StraightTrace_t stride changed: update the SWD telemetry reader");
 
 extern volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];

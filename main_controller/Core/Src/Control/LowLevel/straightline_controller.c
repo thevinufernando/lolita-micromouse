@@ -566,6 +566,10 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             tr->base    = sl_basespeed;
             tr->steer   = sl_steering;
             tr->yaw_err = sl_yaw_error_deg;
+            tr->yaw_deg = yaw;
+            tr->tilt_deg = tilt_deg;
+            tr->drift_deg = WallFollow_GetDriftDeg();
+            tr->err_mm = wf_error_mm;
             tm_sl_trace_count++;
         }
     }

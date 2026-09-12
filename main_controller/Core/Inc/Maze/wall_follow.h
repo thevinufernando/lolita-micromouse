@@ -62,12 +62,27 @@ typedef enum {
 extern volatile uint8_t wf_side;
 extern volatile float wf_error_mm;   /* measured - setpoint, signed */
 extern volatile float wf_tilt_deg;   /* heading offset being asked for */
-extern volatile float wf_drift_deg;  /* total bled into the heading target */
+extern volatile float wf_drift_deg;  /* integral, added to the heading target */
 extern volatile uint32_t wf_switches; /* times the active side changed */
 
-/* Forget the active side and the accumulated drift. Call at the start of a
- * move, and any time continuity is broken. */
+/* Mirror of wf_drift_deg under the name the telemetry reader prints: the
+ * standing asymmetry the loop has learned, in degrees of heading.
+ *
+ * It should settle to a small non-zero number and stay there -- that value IS
+ * the robot's bias. Still climbing at the end of a run means it has not
+ * converged. Pinned at WALL_FOLLOW_KI_LIMIT_DEG means the asymmetry is
+ * mechanical and wants fixing rather than trimming out. */
+extern volatile float wf_integral;
+
+/* Per-move reset: forgets the active side and the current tilt, and KEEPS what
+ * the loop has learned about the robot. Call at the start of a move and any
+ * time continuity is broken. */
 void WallFollow_Reset(void);
+
+/* Full reset, including the learned lateral bias and drift. Call ONCE at the
+ * start of a run. Per move it would mean re-learning the robot's asymmetry
+ * every cell and never converging on it. */
+void WallFollow_ResetBias(void);
 
 /* Feed one ToF sweep. Returns the heading offset in degrees to ADD to the
  * heading target: positive tilts the robot anticlockwise.
@@ -82,8 +97,12 @@ void WallFollow_Reset(void);
  * wall comes back. */
 float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT]);
 
-/* Drift accumulated so far, in degrees, to be applied to the heading target.
- * See the drift corrector note above. */
+/* The integral, in degrees, to be ADDED TO THE HEADING TARGET by the caller.
+ *
+ * This is the loop's only integrating term and it lives here, outside the tilt
+ * clamp, on purpose: what it learns is a heading reference error, so a ceiling
+ * set by how far the robot may lean would make it unable to correct a yaw
+ * estimate that has drifted further than that. See WALL_FOLLOW_KI_LIMIT_DEG. */
 float WallFollow_GetDriftDeg(void);
 
 #endif /* WALL_FOLLOW_H */

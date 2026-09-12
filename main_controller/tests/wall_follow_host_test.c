@@ -63,5 +63,68 @@ int main(void){
   CHECK(WALL_FOLLOW_MAX_TILT_DEG <= 60.0f/8.0f,
         "tilt clamp stays inside the heading loop's linear range");
 
+  /* The integral must actually null a standing error the P term only balances.
+     Replays the measured case: a constant +8 mm offset with both walls seen. */
+  {
+    float integ = 0.0f, e = 8.0f;
+    const float dt = WALL_FOLLOW_UPDATE_S;
+    int n = 0;
+    while (n < 2000 && integ < WALL_FOLLOW_KI_LIMIT_DEG) {
+      integ += WALL_FOLLOW_KI_DEG_PER_MM_S * e * dt;
+      if (integ > WALL_FOLLOW_KI_LIMIT_DEG) integ = WALL_FOLLOW_KI_LIMIT_DEG;
+      n++;
+      if (integ >= WALL_FOLLOW_KP_DEG_PER_MM * e) break;   /* matched P */
+    }
+    float secs = n * dt;
+    CHECK(integ >= WALL_FOLLOW_KP_DEG_PER_MM * e,
+          "integral can supply what the P term was holding");
+    CHECK(secs > 2.0f && secs < 15.0f,
+          "and takes seconds, not milliseconds, to do it");
+  }
+
+  /* THE RECOVERY CEILING. The integral goes to the heading target, not into
+     the tilt, so it must be allowed to exceed the tilt clamp -- otherwise a
+     yaw estimate that has drifted further than the clamp can never be
+     corrected, which is the observed "yawed left, wall in view, no
+     correction" failure. This check is the inverse of the one it replaced,
+     and deliberately so. */
+  CHECK(WALL_FOLLOW_KI_LIMIT_DEG > WALL_FOLLOW_MAX_TILT_DEG,
+        "the integral can out-reach the tilt clamp");
+  /* The linear-range rule applies to the heading loop's ERROR, not to how far
+     the setpoint has moved: a setpoint the robot is tracking produces no
+     error at all. So what has to stay small is the integral's RATE, and the
+     tracking error it costs. At the largest lateral error the gate admits,
+     the integral moves the target this fast: */
+  {
+    const float worst_mm   = (float)WALL_FOLLOW_USABLE_MAX_MM
+                             - WALL_FOLLOW_SETPOINT_LEFT_MM;
+    const float ramp_dps   = WALL_FOLLOW_KI_DEG_PER_MM_S * worst_mm;
+    /* Turn rate the heading loop buys per degree of error, from the measured
+       command-to-rate gain (TURN_FF_GAIN is units per deg/s). */
+    const float dps_per_deg = STRAIGHT_YAW_KP / TURN_FF_GAIN;
+    const float track_err   = ramp_dps / dps_per_deg;
+    CHECK(track_err < 0.5f * (STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP),
+          "tracking the integral costs far less than the linear range");
+  }
+
+  /* With a reference error bigger than the tilt clamp the robot must still be
+     able to command a heading that turns it back. Replays the failure: the
+     estimate reads REF_ERR degrees low, so the loop has to command +REF_ERR
+     just to drive straight. */
+  {
+    const float ref_err = WALL_FOLLOW_MAX_TILT_DEG + 2.0f;
+    float integ = 0.0f;
+    const float dt = WALL_FOLLOW_UPDATE_S;
+    /* Drifting into the left wall: the reading falls below setpoint, so the
+       error is negative -- the unambiguous direction, which integrates. */
+    for (int i = 0; i < 4000 && integ < ref_err; i++)
+      integ += WALL_FOLLOW_KI_DEG_PER_MM_S * 6.0f * dt;
+    CHECK(integ >= ref_err,
+          "a reference error past the tilt clamp is still reachable");
+    /* The old arrangement, integral inside the clamp, could not: */
+    CHECK(WALL_FOLLOW_MAX_TILT_DEG < ref_err,
+          "and the tilt clamp alone provably could not reach it");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }
