@@ -355,5 +355,28 @@ int main(void){
           "while still cutting the two seconds of grinding short");
   }
 
+  /* ---- FINISHED MEANS CLOSE ENOUGH *AND* STOPPED ----
+     The completion test was position only, so a robot crossing the band at
+     cruise called the move done and coasted on. Measured at 11.2 cm/s against
+     a 1.5 cm band, which is 22 to 25 mm of overshoot -- and a 90 degree turn
+     converts that into lateral error almost one for one. */
+  {
+    const float cruise = STRAIGHT_PROFILE_MAX_CMS;
+
+    CHECK(STRAIGHT_SETTLE_SPEED_CMS < cruise * 0.3f,
+          "the settle speed is a small fraction of cruise");
+    CHECK(STRAIGHT_SETTLE_SPEED_CMS > STRAIGHT_STALL_RATE_CMS,
+          "and above the stall threshold, so stopping is not read as wedging");
+
+    /* What the old test allowed, stated as the distance it let through. */
+    const float coast_old = cruise * CONTROL_SAMPLE_TIME_S
+                            * (float)CONTROL_SETTLE_CYCLES;
+    const float coast_new = STRAIGHT_SETTLE_SPEED_CMS * CONTROL_SAMPLE_TIME_S
+                            * (float)CONTROL_SETTLE_CYCLES;
+
+    CHECK(coast_new < coast_old * 0.25f,
+          "and it cuts the distance travelled during settling by 4x or more");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

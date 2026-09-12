@@ -1240,6 +1240,24 @@
  *
  * So: below this rate, while the command is above the stiction floor and
  * therefore genuinely trying, the robot is not moving. */
+/* Below this speed a move may be declared finished, cm/s.
+ *
+ * FINISHED MEANS CLOSE ENOUGH *AND* STOPPED. The completion test used to check
+ * position only, so a robot crossing into the tolerance band at full speed
+ * called the move done and then carried on for however far it took to stop.
+ * Measured: a median 11.2 cm/s against a profile asking for 10, exiting a
+ * 1.5 cm band, with front-wall stops landing 22 to 25 mm past target.
+ *
+ * That would be a rounding error if the robot only drove straight. It is not.
+ * A 90 degree turn converts longitudinal error into LATERAL error almost one
+ * for one: a cell that finished 22 mm off was followed by a move beginning
+ * 17 mm off centre, where every other entry error in that run was inside 7 mm.
+ *
+ * 2 cm/s is a fifth of cruise and well above the noise on a differenced
+ * encoder reading. The command is already zero inside the tolerance band, so
+ * reaching it only takes the time to coast. */
+#define STRAIGHT_SETTLE_SPEED_CMS 2.0f
+
 #define STRAIGHT_STALL_RATE_CMS 1.5f
 
 /* How long that may persist before the move is abandoned, ms.
@@ -1371,6 +1389,18 @@
  * pulse works, these moves complete on their own; if it does not, that shows
  * up as a timeout with sl_breakaway_count at its limit, which is the honest
  * answer and the one that says what to fix next.
+ *
+ * IT STAYS AT 1.5 EVEN THOUGH A TURN CONVERTS IT INTO LATERAL ERROR, and the
+ * reason is that narrowing it now would fight the speed gate rather than help.
+ *
+ * A move completes when the robot is inside the band AND has stopped, and
+ * arrival is latched at the first moment it is close enough -- see
+ * STRAIGHT_SETTLE_SPEED_CMS. Where the robot finally comes to rest is then
+ * decided by braking, not by this number. Narrowing the band would not place
+ * the robot better; it would only delay the latch until later in the
+ * deceleration, leaving less room to stop and making a timeout more likely.
+ * The band decides when to commit to stopping, and committing early is what
+ * makes the stop accurate.
  *
  * Previous note, from when it went 0.7 -> 1.5:
  *

@@ -528,6 +528,50 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (head) - A move was ending while the robot was still moving
+
+21 cells, ended on a genuine wedge. The per-cell entry error, added last time,
+paid for itself immediately.
+
+**The completion test checked position and not speed.** A robot crossing into
+the tolerance band at cruise declared the move finished and then carried on for
+however far it took to stop. Measured at a median 11.2 cm/s against a profile
+asking for 10, exiting a 1.5 cm band, landing 22 to 25 mm past target.
+
+That would be a rounding error if the robot only drove straight. It does not. A
+90 degree turn converts longitudinal error into LATERAL error almost one for
+one, and the new per-cell record shows it plainly: a cell that finished 22 mm
+off was followed by a move beginning 17 mm off centre, where every other entry
+error in that run was inside 7 mm. The completion tolerance was setting the
+floor on how well placed the robot could be after any turn.
+
+`STRAIGHT_SETTLE_SPEED_CMS` now requires the robot to be stopped as well as
+close. **Arrival is latched**, which is the part that matters: without it the
+speed condition makes things worse, because a robot that coasts through the
+band coasts back out, the test un-arms, the command returns, and it hunts --
+eventually backwards on a breakaway pulse, which is the one direction this
+chassis has no lateral sensing for. Latching turns "close enough" into a
+decision made once, and the command goes to zero from that moment.
+
+**The tolerance stays at 1.5.** Narrowing it now would fight the latch rather
+than help: where the robot comes to rest is decided by braking, and a smaller
+band only delays the commitment until later in the deceleration, leaving less
+room to stop. The band decides WHEN to commit; committing early is what makes
+the stop accurate.
+
+**The stall abort now waits for the breakaway to have had its turn.** It ran on
+a private 1200 ms clock and could cut the pulse sequence off before it had
+spent its budget, which is how a move gets abandoned somewhere the robot could
+plainly have driven on. It is gated on `sl_breakaway_count` reaching
+`STRAIGHT_BREAKAWAY_MAX` now.
+
+Still open: the alignment fired on 11 of 21 cells with a mean correction of
++1.73 cm and three clamped at the 4 cm limit. Systematically positive
+corrections of that size mean the robot arrives consistently short of where the
+front wall says it should be, and that bias is not yet explained. It was
+deprioritised earlier as a longitudinal problem; the entry-error data is what
+makes it a lateral one.
+
 ### 2026-09-12 (current) - Stop grinding, stop guessing
 
 Four changes off one run, three of them fixes and one a measurement.

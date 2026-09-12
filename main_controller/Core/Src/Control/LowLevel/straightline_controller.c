@@ -401,6 +401,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     uint32_t stall_cycles    = 0;
     uint32_t pulse_until_ms  = 0;
     uint32_t stall_since_ms  = 0;   /* 0 = moving, or trying gently */
+    uint8_t  arriving        = 0U;  /* has been inside the band at least once */
 
     sl_breakaway_count = 0U;
 
@@ -466,6 +467,15 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
         float measured   = Encoder_getAverageDistance();
         float elapsed_s  = (float)(now - start_ms) * 0.001f;
 
+        /* HOW FAST THE ROBOT IS ACTUALLY GOING, measured once and used by
+         * three different decisions below -- whether the move is finished,
+         * whether to fire a breakaway pulse, and whether to give up. They were
+         * separately re-deriving it or, worse, not asking at all. */
+        const float travelled = fabsf(measured - prev_measured);
+        const float speed_cms = travelled / dt_s;
+
+        prev_measured = measured;
+
         /* Profile time, which is move time until the alignment rebuilds the
          * profile and restarts its clock. */
         float prof_t_s   = elapsed_s - align_t0_s;
@@ -476,7 +486,38 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
         sl_ref_cm = ref_pos;
 
-        if (fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
+        /* FINISHED MEANS CLOSE ENOUGH *AND* STOPPED, and the second half was
+         * missing.
+         *
+         * The old test was position only, so a robot crossing into the
+         * tolerance band at full speed declared the move complete and then
+         * carried on for however far it took to stop. Measured: a median of
+         * 11.2 cm/s against a profile asking for 10, exiting a 1.5 cm band,
+         * and front-wall stops landing 22 to 25 mm past target.
+         *
+         * That overshoot would be a rounding error if the robot only ever
+         * drove straight. It is not, because a 90 degree turn converts
+         * longitudinal error into LATERAL error almost one for one -- a cell
+         * that stopped 22 mm short was followed by a move that began 17 mm off
+         * centre, against every other entry error in that run being inside
+         * 7 mm. The completion tolerance was setting the floor on how well
+         * placed the robot could possibly be after any turn, and no amount of
+         * lateral tuning gets underneath it. */
+        /* ARRIVAL IS LATCHED. Once the robot has been close enough once, it
+         * commits to stopping and the band is not consulted again.
+         *
+         * Without the latch the speed condition would make things worse rather
+         * than better: a robot that coasts through the band coasts back OUT of
+         * it, the completion test un-arms, the command returns, and it hunts
+         * -- eventually backwards, on a breakaway pulse, which is the one
+         * direction this chassis has no lateral sensing for. Latching turns
+         * "close enough" into a decision made once. */
+        if (!arriving && fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
+            arriving = 1U;
+        }
+
+        if (arriving && speed_cms < STRAIGHT_SETTLE_SPEED_CMS) {
+
             settle_counter++;
             if (settle_counter >= CONTROL_SETTLE_CYCLES) {
                 Motor_Brake();
@@ -702,7 +743,10 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * in sign. Written that way rather than as `ref_acc >= 0` because the
          * two are equivalent going forwards and only one of them stays true if
          * this ever has to run a move in the other direction. */
-        if (fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
+        if (arriving) {
+            /* Committed to stopping, so stop driving. Keyed on the latch and
+             * not on the band, so a robot that has coasted a little past does
+             * not get commanded back into it. */
             base = 0.0f;
         }
         else if (ref_acc * ref_vel >= 0.0f && fabsf(ref_vel) > 1.0f) {
@@ -719,11 +763,8 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * remaining error, briefly. It is a nudge to get the wheel over static
          * friction, after which the ordinary feedback has only kinetic
          * friction to work against. */
-        const float travelled = fabsf(measured - prev_measured);
         const float still_threshold =
             STRAIGHT_BREAKAWAY_RATE_CMS * CONTROL_SAMPLE_TIME_S;
-
-        prev_measured = measured;
 
         const uint8_t profile_done = (prof_t_s >= MotionProfile_Duration(&dist_profile));
         const uint8_t short_of_it  = (fabsf(measured - target_cm) >= DISTANCE_TOLERANCE_CM);
@@ -762,8 +803,15 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * looking like a steering fault rather than a mechanical one. Failing
          * the move says what actually happened. */
         if (fabsf(base) >= CONTROL_MIN_MOVE_SPEED
-            && (travelled / dt_s) < STRAIGHT_STALL_RATE_CMS) {
+            && speed_cms < STRAIGHT_STALL_RATE_CMS
+            && sl_breakaway_count >= STRAIGHT_BREAKAWAY_MAX) {
 
+            /* ONLY ONCE THE BREAKAWAY HAS HAD ITS TURN. The pulse is the
+             * recovery this drivetrain was given for exactly this situation,
+             * and abandoning a move on a private clock could cut it off before
+             * it had spent its budget. Waiting costs a bounded amount of time
+             * and removes the case where the robot gives up somewhere it
+             * could plainly have driven on. */
             if (stall_since_ms == 0U) {
                 stall_since_ms = now;
             }
