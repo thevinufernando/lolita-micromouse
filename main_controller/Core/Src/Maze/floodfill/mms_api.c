@@ -200,15 +200,24 @@ static void rotateCell(uint8_t turned_left)
     const uint16_t left  = wall_left_mm;
     const uint16_t right = wall_right_mm;
 
+    /* The vote tallies turn with them. Leaving those behind put a 5-of-5
+     * "wall ahead" in the trace beside a front flag of 0, which is the sort of
+     * contradiction that costs an hour before anyone suspects the log. */
+    const uint8_t vf = wall_front_votes;
+    const uint8_t vl = wall_left_votes;
+    const uint8_t vr = wall_right_votes;
+
     if (turned_left) {
-        wall_front_mm = left;
-        wall_right_mm = front;
+        wall_front_mm = left;    wall_front_votes = vl;
+        wall_right_mm = front;   wall_right_votes = vf;
         wall_left_mm  = TOF_DISTANCE_INVALID;
+        wall_left_votes = 0U;
     }
     else {
-        wall_front_mm = right;
-        wall_left_mm  = front;
+        wall_front_mm = right;   wall_front_votes = vr;
+        wall_left_mm  = front;   wall_left_votes  = vf;
         wall_right_mm = TOF_DISTANCE_INVALID;
+        wall_right_votes = 0U;
     }
 }
 

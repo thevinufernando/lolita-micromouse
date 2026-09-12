@@ -54,6 +54,19 @@ static struct {
 } s_flight;
 
 static uint8_t s_flight_ok;
+
+/* WHAT THE FRONT-WALL ALIGNMENT DID ON THE MOVE THAT ARRIVED HERE.
+ *
+ * Latched for the same reason the walls are: the straight controller's
+ * sl_align_* globals describe the LAST SEGMENT IT RAN, and a cell that ends in
+ * a turn runs a second, shorter segment to come to rest before the record is
+ * written. That segment deliberately does no alignment, so it reset the reason
+ * to "fired" -- and a 19-cell run reported fourteen alignments while exactly
+ * one correction had been applied. A log that confidently reports the opposite
+ * of what happened is worse than one that reports nothing. */
+static uint8_t s_align_reason;
+static uint8_t s_align_applied;
+static float   s_align_delta_cm;
 volatile uint8_t tm_maze_tof_start_fail;
 volatile uint8_t tm_maze_tof_stop_fail;
 
@@ -96,11 +109,12 @@ void CellMotion_Record(float move_error_cm, uint8_t move_ok,
     r->drift_deg      = WallFollow_GetDriftDeg();
     r->entry_err_mm   = sl_entry_err_mm;
     r->entry_valid    = sl_entry_valid;
-    r->align_delta_cm = sl_align_applied ? sl_align_delta_cm : 0.0f;
+    r->align_delta_cm = s_align_applied ? s_align_delta_cm : 0.0f;
 
-    r->votes = (uint16_t)((wall_front_votes & 7U)
-                        | ((wall_left_votes  & 7U) << 3)
-                        | ((wall_right_votes & 7U) << 6));
+    r->votes = (uint16_t)((wall_front_votes  & 7U)
+                        | ((wall_left_votes   & 7U) << 3)
+                        | ((wall_right_votes  & 7U) << 6)
+                        | ((s_align_reason    & 7U) << 9));
 
     tm_maze_trace_count++;
 }
@@ -253,6 +267,9 @@ void CellMotion_BeginRun(void)
      * by definition. */
     s_rolling             = 0U;
     s_flight_ok           = 0U;
+    s_align_applied       = 0U;
+    s_align_reason        = SL_ALIGN_NO_WALL;
+    s_align_delta_cm      = 0.0f;
     s_chain_ref_cm        = Encoder_getAverageDistance();
     s_gap_mark_ms         = HAL_GetTick();
     tm_chain_gap_ms_max   = 0U;
@@ -489,6 +506,11 @@ uint8_t CellMotion_Forward(void)
 
     const uint8_t ok = runForwardMove(&mv);
 
+    /* Captured now, before anything else can run a segment. */
+    s_align_reason   = sl_align_reason;
+    s_align_applied  = sl_align_applied;
+    s_align_delta_cm = sl_align_delta_cm;
+
     tm_chain_segments++;
 
     if (!ok) {
@@ -568,6 +590,10 @@ uint8_t CellMotion_Forward(void)
     setCellContext(0.0f);
 
     const uint8_t ok = runForwardFused(target_cm);
+
+    s_align_reason   = sl_align_reason;
+    s_align_applied  = sl_align_applied;
+    s_align_delta_cm = sl_align_delta_cm;
 
     /* !! THE TWO CORRECTIONS MUST NOT BOTH FIRE !! -- see the note above. */
     float left_over = sl_align_applied

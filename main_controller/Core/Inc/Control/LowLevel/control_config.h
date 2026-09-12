@@ -1284,10 +1284,23 @@
  * forward moves in that run could never align at all.
  *
  * So the alignment now waits for a reading worth using, and falls back on a
- * distant one only when it is running out of room. 200 mm is comfortably
- * inside the sensor's accurate band and is reached about halfway through a
- * cell. */
-#define WALL_FRONT_ALIGN_BEST_MM 200U
+ * distant one only when it is running out of room.
+ *
+ * EXPRESSED AS A MARGIN ABOVE THE TARGET, not as an absolute distance, and
+ * that matters as soon as the target moves. It was 200 mm against a 75 mm
+ * target, so 125 mm of margin, and a chained segment ends a braking offset
+ * short of the cell centre -- which puts its target at 125 mm and would leave
+ * a margin of 75.
+ *
+ * The cost of getting that wrong is the whole feature. The window in which the
+ * alignment may fire is bounded BELOW by the room it needs to stop and ABOVE
+ * by this; pinning the upper end to the sensor while the lower end followed
+ * the speed narrowed it from 85 mm of travel to 25, and the alignment fired
+ * once in a 19-cell run.
+ *
+ * 125 mm of margin is comfortably inside the sensor's accurate band and is
+ * reached about halfway through a cell. */
+#define WALL_FRONT_ALIGN_BEST_MARGIN_MM 125.0f
 
 /* Margin on top of the braking distance before the alignment gives up, cm.
  *

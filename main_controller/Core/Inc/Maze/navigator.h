@@ -185,8 +185,16 @@ typedef struct {
   uint16_t front_mm;     /* distances behind those calls  */
   uint16_t left_mm;
   uint16_t right_mm;
-  /* Vote tallies out of WALL_SENSE_SAMPLES, 3 bits each:
-   *     front | left << 3 | right << 6
+  /* Vote tallies out of WALL_SENSE_SAMPLES, 3 bits each, plus the alignment
+   * reason in the three bits above them:
+   *     front | left << 3 | right << 6 | SL_ALIGN_* << 9
+   *
+   * The reason rides here because the struct has no padding left and its
+   * stride is load-bearing -- see the assert below. align_delta_cm already
+   * says how far the front-wall alignment moved a move's endpoint; the reason
+   * says why it did not, which is the half that was missing. A run where the
+   * alignment fires once in nineteen cells is either an arena that offered no
+   * chances or a window that has closed, and those want opposite responses.
    * Packed because it fits exactly in the padding the compiler was already
    * inserting here, so the record stays 36 bytes and the SWD reader's stride
    * does not move. A unanimous 5-0 is a confident call; a 3-2 on the FRONT

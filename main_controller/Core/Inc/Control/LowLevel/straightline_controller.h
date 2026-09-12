@@ -198,8 +198,31 @@ extern volatile float sl_ref_cm;           /* profile reference position  */
  * endpoint. A delta that is consistently one sign means WALL_FRONT_ALIGN_MM
  * does not match where the robot actually stops -- re-measure it rather than
  * letting the alignment fight the profile every move. */
+/* The lateral error the last move ENDED with, and whether it had a reference
+ * to measure it against. Pair with sl_entry_err_mm: see the note in the .c. */
+extern volatile float   sl_exit_err_mm;
+extern volatile uint8_t sl_exit_valid;
+
 extern volatile float   sl_align_delta_cm;
 extern volatile uint8_t sl_align_applied;
+
+/* WHY THE ALIGNMENT DID NOT FIRE, which until now had to be inferred from
+ * where the robot stopped.
+ *
+ * It declines for six different reasons and they want six different responses:
+ * a run with no wall ever in range is an arena that offers no chances, whereas
+ * one that kept reading NO_ROOM is a window that has closed and a constant to
+ * move. Guessing between them cost a run. Holds the LAST reason seen on the
+ * move, so a move that fired reads FIRED and nothing else matters. */
+#define SL_ALIGN_FIRED      0U  /* it fired                                  */
+#define SL_ALIGN_NO_WALL    1U  /* nothing valid inside _RANGE_MM all move   */
+#define SL_ALIGN_TOO_FAR    2U  /* in range but worse than the margin allows */
+#define SL_ALIGN_NO_ROOM    3U  /* not enough left to decelerate into        */
+#define SL_ALIGN_BIG_DELTA  4U  /* correction beyond _MAX_CM; not believed   */
+#define SL_ALIGN_STALLED    5U  /* the move was wedged; not worth retargeting*/
+#define SL_ALIGN_INFEASIBLE 6U  /* the rebuilt profile would not fit         */
+
+extern volatile uint8_t sl_align_reason;
 
 /* Breakaway pulses fired during the last move. Should normally be 0. A move
  * that needed one still succeeded; a move that needed STRAIGHT_BREAKAWAY_MAX

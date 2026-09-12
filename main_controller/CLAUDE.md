@@ -528,7 +528,116 @@ accident.
 
 ## Change log
 
-### 2026-09-12 (newest) - The robot stops being stopped
+### 2026-09-12 (newest) - "Late" is not "in trouble"
+
+Second run with the reason codes, and they earned their place immediately --
+though the first thing they proved was that they were lying.
+
+**Fourteen of nineteen cells reported the alignment as FIRED while exactly one
+correction had been applied.** `CellMotion_Record()` read `sl_align_reason`
+live, and a cell that ends in a turn runs a SECOND segment to come to rest
+before the record is written. That segment deliberately does no alignment, so
+it reset the reason on the way past. Same class of bug as the in-flight walls,
+same fix: the outcome is latched in `cell_motion.c` the moment the forward
+returns, along with the delta and the applied flag. A log that confidently
+reports the opposite of what happened is worse than one that reports nothing.
+
+**The five honest cells said the new gate was refusing good chances.** Four of
+them declined with the profile already over -- and that gate was mine, added
+last time to stop the alignment firing on a wedged robot. It conflated two
+different things. The robot routinely lags its reference by several
+centimetres, so the profile finishes while the robot is still travelling at
+cruise with the front wall at the best reading it will ever give. Refusing
+there throws away the single best chance of every move.
+
+`stall_since_ms` is the honest test and already existed: non-zero only while
+the robot is commanded above the stiction floor and going nowhere. That is what
+"in trouble" means; "past the end of the plan" is just late.
+
+**And the room test was pairing the robot's distance with the reference's
+speed.** `has_room` asks whether the ROBOT can stop in the distance IT has
+left, so the momentum in that question is the robot's. Using `ref_vel` was
+inconsistent in both directions: it demanded room the robot did not need early
+in a move, when the reference was still ramping, and then demanded none at all
+once the profile ended -- which is exactly when the robot is still at cruise.
+It now brakes from a lightly filtered measured speed, seeded from the segment's
+entry speed so a chained continuation does not begin by believing it is
+stationary.
+
+Where the run actually stands, with the alignment still barely working:
+
+```
+walls read in flight   17 of 19      longest think gap   3 ms
+worst loop cycle       12 ms         straight cell       1.31 s
+entry lateral error    worst -53 mm, 9 of 17 cells over 15 mm
+gyro vs encoder yaw    43 deg apart, 234 rejected updates
+```
+
+**The wall it clipped is a lateral failure, not a longitudinal one.** Entry
+error after a pivot reached -53 mm in a 124 mm corridor, which puts a corner of
+the chassis into the wall line. The chain is: the alignment does not fire, so
+the robot pivots off the cell centre, and a pivot converts longitudinal offset
+into lateral offset almost one for one. Cells 15 and 16 show it happening in an
+open region with no side walls at all -- error went from -24 mm to -53 mm
+across one pivot and one cell, with nothing able to correct it.
+
+### 2026-09-12 (previous) - The alignment window closed when the speed went up
+
+Chaining worked. 89% of wall readings came free from the in-flight vote, the
+longest the motors ran open-loop waiting for the solver was 3 ms against the
+107 ms the margin buys, no loop cycle exceeded 13 ms, and a straight cell took
+1.39 s against 3.5 before. The run ended wedged at (4,7) after 19 cells.
+
+**The front-wall alignment fired once in nineteen cells, and that once was
+wrong.** Three separate faults, all found from that one number.
+
+**It fired on a move that had already failed.** The room test scales the
+braking requirement by the REFERENCE velocity, so once the profile runs out
+that term is zero and the requirement collapses to
+`WALL_FRONT_ALIGN_ROOM_CM` alone. The gate therefore springs open on exactly
+the moves that are going badly. The wedged move sat grinding at 4.7 cm/s
+against a profile asking 14, long past the end of its plan, and the alignment
+chose that moment to extend the target by another 3.54 cm. It is now gated on
+the profile still running: retargeting rebuilds a plan, and there is no plan
+left to rebuild.
+
+**`WALL_FRONT_ALIGN_BEST_MM` was an absolute distance and should have been a
+margin.** The window in which the alignment may fire is bounded below by the
+room it needs to stop and above by the reading it is willing to wait for. A
+chained segment ends a braking offset short of the cell centre, which moves its
+target from 75 mm to 125 mm -- so the lower bound followed the endpoint while
+the upper bound stayed pinned to the sensor, and the window narrowed from 85 mm
+of travel to 25. It is `WALL_FRONT_ALIGN_BEST_MARGIN_MM` now, 125 mm above
+whatever the move is actually aiming at, which reproduces the old behaviour
+exactly at the old target.
+
+**A rebuilt profile dropped the exit speed.** The retarget called
+`MotionProfile_InitFrom()`, which always ends at rest, so an alignment firing
+on a chained segment would have braked the robot to a stop at the decision
+point -- and the stop segment that followed would have built its feedforward
+believing it started at cruise. Rebuilding may change WHERE a segment ends,
+never HOW it ends.
+
+**And the reason it declined is now recorded per cell.** `SL_ALIGN_*` says
+which of the six tests stopped it, packed into the three spare bits above the
+vote tallies because `MazeTrace_t` has no padding left and its stride is
+load-bearing. This run could not distinguish "an arena with nothing to align
+against" from "a window that has closed", and those want opposite responses --
+the answer turned out to be both, and it took an hour of inference.
+
+Two smaller things from the same log:
+
+- **The vote tallies did not rotate with the walls.** A cell entered and then
+  turned in showed `0 0 1` beside `5/1/5`, because `rotateCell()` in the shim
+  turned the flags and the distances and left the counts behind. Telemetry
+  only, but a log that contradicts itself is worse than one that says nothing.
+- **Entry lateral error got worse, not better**: worst -40 mm with 9 of 16
+  cells over 15 mm, against 6 of 49 before. That is the next thing to look at
+  and it is not an alignment problem -- the alignment fixes the longitudinal
+  axis, and a cell that STARTS 40 mm off centre was placed there by the turn
+  before it.
+
+### 2026-09-12 (earlier) - The robot stops being stopped
 
 A 51-cell run took 3.5 s per cell. Of that, 0.8 s was `NAV_SETTLE_MS` standing
 still on purpose, 0.3 s was a five-vote wall read standing still to look, and
@@ -624,7 +733,7 @@ the margin buys, the flight-vs-stop read ratio, and whether the per-cycle
 period histogram still tops out near 12 ms now that the loop is doing the wall
 vote as well.
 
-### 2026-09-12 (previous) - The flood fill, ported
+### 2026-09-12 (earlier) - The flood fill, ported
 
 `MicroMouseAlgorithm/maze.c` and `Main.c` now drive the robot, under
 `Core/{Inc,Src}/Maze/floodfill/`. They came across essentially unchanged:

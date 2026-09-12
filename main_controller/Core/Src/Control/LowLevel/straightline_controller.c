@@ -268,6 +268,7 @@ volatile float    sl_ref_cm;
 volatile float    sl_align_delta_cm;
 volatile uint8_t  sl_align_applied;
 volatile uint32_t sl_breakaway_count;
+volatile uint8_t  sl_align_reason;
 volatile uint8_t  sl_flight_samples;
 volatile uint8_t  sl_flight_front;
 volatile uint8_t  sl_flight_left;
@@ -280,6 +281,8 @@ volatile uint16_t sl_flight_left_mm;
 volatile uint16_t sl_flight_right_mm;
 
 volatile float    sl_entry_err_mm;
+volatile float    sl_exit_err_mm;
+volatile uint8_t  sl_exit_valid;
 volatile uint8_t  sl_entry_valid;
 volatile uint8_t  sl_stall_abort;
 
@@ -561,14 +564,23 @@ uint8_t runForwardMove(const StraightMove_t *mv)
 
     sl_align_delta_cm = 0.0f;
     sl_align_applied  = 0U;
+    sl_align_reason   = (front_target_mm > 0.0f) ? SL_ALIGN_NO_WALL
+                                                 : SL_ALIGN_FIRED;
     sl_entry_err_mm   = 0.0f;
     sl_entry_valid    = 0U;
+    sl_exit_err_mm    = 0.0f;
+    sl_exit_valid     = 0U;
     sl_stall_abort    = 0U;
 
     /* Breakaway detector state. See the BREAKAWAY PULSE block in
      * control_config.h for why a proportional controller cannot restart this
      * drivetrain on its own. */
     float    prev_measured   = 0.0f;
+    /* SEEDED FROM THE ENTRY SPEED, not from zero. A chained segment's measured
+     * distance restarts at zero, so the first cycle's difference says the robot
+     * is stationary when it is doing cruise -- and this feeds the alignment's
+     * room test, which would then believe it needs no room at all. */
+    float    speed_ema       = mv->entry_speed_cms;
     uint32_t stall_cycles    = 0;
     uint32_t pulse_until_ms  = 0;
     uint32_t stall_since_ms  = 0;   /* 0 = moving, or trying gently */
@@ -649,6 +661,11 @@ uint8_t runForwardMove(const StraightMove_t *mv)
         const float speed_cms = travelled / dt_s;
 
         prev_measured = measured;
+
+        /* Smoothed, because a single cycle's encoder difference at 10 ms is
+         * mostly quantisation and the room test below is a decision, not a
+         * trend. */
+        speed_ema += 0.25f * (speed_cms - speed_ema);
 
         /* Profile time, which is move time until the alignment rebuilds the
          * profile and restarts its clock. */
@@ -794,6 +811,21 @@ uint8_t runForwardMove(const StraightMove_t *mv)
                 sl_entry_err_mm = wf_error_mm;
                 sl_entry_valid  = 1U;
             }
+
+            /* AND THE ERROR IT ENDS WITH. Kept as the LAST reading that had a
+             * reference at all, because the last few sweeps of a move are
+             * often taken across a cell boundary with nothing to see.
+             *
+             * This is the other half of entry_err_mm, and without it three
+             * runs' worth of "the pivot threw the robot sideways" has been
+             * inference. A move that ENDS centred and is followed by one that
+             * STARTS 25 mm out convicts the pivot; a move that ends 25 mm out
+             * convicts the move. Those want completely different fixes and
+             * there has been no way to tell them apart. */
+            if (wf_side != WALL_FOLLOW_NONE) {
+                sl_exit_err_mm = wf_error_mm;
+                sl_exit_valid  = 1U;
+            }
             last_tof = now;
 
             /* FRONT-WALL ALIGNMENT, applied at most once per move.
@@ -811,7 +843,34 @@ uint8_t runForwardMove(const StraightMove_t *mv)
              * from the speed the reference is actually doing. Below that, it
              * fires on the best reading available; above it, it waits for a
              * better one. */
-            if (!align_tried) {
+            /* NOT WHILE THE MOVE IS IN TROUBLE.
+             *
+             * Retargeting extends or shortens a move, and doing that to a robot
+             * that is already failing to make its current target only delays
+             * the moment someone admits it. One wedged move, grinding at
+             * 4.7 cm/s against a profile asking 14, had the alignment push its
+             * target out by a further 3.54 cm.
+             *
+             * The first attempt at this refused whenever the PROFILE had ended,
+             * and that was the wrong test -- it conflated "in trouble" with
+             * "late". The robot routinely lags its reference by several
+             * centimetres, so the profile finishes while the robot is still
+             * travelling at cruise with the front wall at its best reading yet.
+             * Refusing there threw away the single best chance of every move,
+             * and the log said so: four of the five uncontaminated cells in a
+             * 19-cell run declined with the plan already over.
+             *
+             * `stall_since_ms` is the honest test and it already exists: it is
+             * non-zero only while the robot is commanded above the stiction
+             * floor and going nowhere. It is one cycle stale here, which does
+             * not matter for a condition measured in hundreds of milliseconds. */
+            const uint8_t in_trouble = (stall_since_ms != 0U);
+
+            if (!align_tried && in_trouble) {
+                sl_align_reason = SL_ALIGN_STALLED;
+            }
+
+            if (!align_tried && !in_trouble) {
 
                 uint16_t f = m[TOF_FRONT].distance_mm;
 
@@ -848,19 +907,39 @@ uint8_t runForwardMove(const StraightMove_t *mv)
                     float remaining_ref   = new_target - ref_pos;
                     float remaining_robot = new_target - measured;
 
-                    /* Distance needed just to come to rest from the speed the
-                     * reference is doing now, plus a cushion. Taken from the
-                     * live velocity rather than assumed to be cruise, because
-                     * early in a move it is much less and the alignment should
-                     * be allowed to fire there too. */
+                    /* Distance needed to come to rest from the speed THE ROBOT
+                     * is doing, plus a cushion.
+                     *
+                     * The robot's speed, not the reference's, because the test
+                     * below asks about the distance THE ROBOT has left -- and a
+                     * question about whether a body can stop in a gap has to
+                     * use that body's own momentum. Pairing the robot's
+                     * remaining distance with the reference's velocity was
+                     * inconsistent in both directions: it demanded room the
+                     * robot did not need early in a move, and then demanded
+                     * none at all once the profile ended, which is precisely
+                     * when the robot is still travelling at cruise. */
                     const float braking_cm =
-                        (ref_vel * ref_vel)
+                        (speed_ema * speed_ema)
                         / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)
                         + WALL_FRONT_ALIGN_ROOM_CM;
 
                     const uint8_t has_room  =
                         (fabsf(remaining_robot) >= braking_cm);
-                    const uint8_t good_read = (f <= WALL_FRONT_ALIGN_BEST_MM);
+                    /* CLOSE ENOUGH TO THE TARGET, not close enough to the
+                     * sensor. The reading worth waiting for is one taken near
+                     * where the move is going to end, so the threshold has to
+                     * move with the endpoint -- and a chained segment ends a
+                     * braking offset short of the cell centre, which puts its
+                     * target five centimetres further from the wall.
+                     *
+                     * As an absolute 200 mm this quietly stopped working when
+                     * that happened: the window where a reading is both good
+                     * enough and still leaves room to stop narrowed from 85 mm
+                     * of travel to 25, because its near end is set by the room
+                     * test and its far end was pinned to the sensor. */
+                    const uint8_t good_read =
+                        (f <= front_target_mm + WALL_FRONT_ALIGN_BEST_MARGIN_MM);
 
                     /* Running out of room: this is the last sweep that can
                      * still retarget, so take whatever reading is in range
@@ -874,6 +953,14 @@ uint8_t runForwardMove(const StraightMove_t *mv)
                      * run backwards. A reference that has already passed the
                      * new endpoint has nothing useful to do with this, and
                      * reversing is never the answer. */
+                    /* Recorded in the order the tests are applied, so the
+                     * reason kept is the FIRST thing that stopped it rather
+                     * than the last thing checked. */
+                    if (!(good_read || last_chance))                      sl_align_reason = SL_ALIGN_TOO_FAR;
+                    else if (!has_room)                                   sl_align_reason = SL_ALIGN_NO_ROOM;
+                    else if (fabsf(delta) > WALL_FRONT_ALIGN_MAX_CM)      sl_align_reason = SL_ALIGN_BIG_DELTA;
+                    else if (remaining_ref * distance_cm <= 0.0f)         sl_align_reason = SL_ALIGN_NO_ROOM;
+
                     if ((good_read || last_chance)
                         && has_room
                         && fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM
@@ -887,9 +974,19 @@ uint8_t runForwardMove(const StraightMove_t *mv)
                          * already making. */
                         MotionProfile_t rebuilt;
 
-                        if (MotionProfile_InitFrom(&rebuilt, remaining_ref, ref_vel,
-                                                   STRAIGHT_PROFILE_MAX_CMS,
-                                                   STRAIGHT_PROFILE_ACCEL_CMS2)) {
+                        /* !! THE REBUILD MUST KEEP THE EXIT SPEED !!
+                         *
+                         * A chained segment hands the robot over still moving,
+                         * and a profile rebuilt to end at rest would brake to a
+                         * stop at the decision point. The caller would then
+                         * drive the stop segment believing it starts at cruise,
+                         * and its feedforward would be wrong for the whole of
+                         * it. Rebuilding is allowed to change WHERE the segment
+                         * ends, never HOW it ends. */
+                        if (MotionProfile_InitFromTo(&rebuilt, remaining_ref,
+                                                     ref_vel, mv->exit_speed_cms,
+                                                     STRAIGHT_PROFILE_MAX_CMS,
+                                                     STRAIGHT_PROFILE_ACCEL_CMS2)) {
 
                             dist_profile  = rebuilt;
                             target_cm     = new_target;
@@ -898,7 +995,11 @@ uint8_t runForwardMove(const StraightMove_t *mv)
 
                             sl_align_delta_cm = delta;
                             sl_align_applied  = 1U;
+                            sl_align_reason   = SL_ALIGN_FIRED;
                             align_tried       = 1U;
+                        }
+                        else {
+                            sl_align_reason = SL_ALIGN_INFEASIBLE;
                         }
                         /* Infeasible after all: leave the move alone. The
                          * has_room test should have caught it, so this is the
