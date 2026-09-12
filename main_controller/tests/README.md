@@ -12,7 +12,7 @@ RULE rather than the plumbing.
 | `ekf_host_test.c` | Yaw EKF (gyro + encoder fusion) | `EKF.c` |
 | `tof_filter_host_test.c` | VL53L0X noise filter | `tof_filter.c` |
 | `tof_cache_host_test.c` | Held-reading age gate | `tof_sensors.c`, `TOF_MAX_SAMPLE_AGE_MS` |
-| `motion_profile_host_test.c` | Trapezoidal profiles, mid-move retargeting | `motion_profile.c` |
+| `motion_profile_host_test.c` | Trapezoidal profiles, mid-move retargeting, **moves that end at speed** | `motion_profile.c`, `CELL_DECISION_OFFSET_CM` |
 | `maze_map_host_test.c` | Pose, wall bookkeeping, known-vs-open | `maze_map.c` |
 | `navigator_host_test.c` | Reactive wall-following rule | `navigator.c` |
 | `wall_follow_host_test.c` | Lateral loop and the cascade rule | `wall_follow.c`, the `WALL_FOLLOW_*` constants |
@@ -220,3 +220,28 @@ The rule itself is copied into the test rather than linked, because
 `navigator.c` needs the HAL and cannot build on the host. The constants come
 from the real `navigator.h`, so the test also proves that header parses
 standalone and that `MazeTrace_t` still satisfies its 40-byte stride assert.
+
+---
+
+## motion_profile_host_test.c - the chained-motion cases
+
+```sh
+gcc -O1 -Wall -Wextra -o prof_test tests/motion_profile_host_test.c \
+    Core/Src/Control/LowLevel/motion_profile.c \
+    -I Core/Inc/Control/LowLevel -lm && ./prof_test
+```
+
+Tests 8 to 10 cover `MotionProfile_InitFromTo()`, which is what continuous cell
+motion is built on. They are worth calling out because a mistake in any of them
+is invisible on a bench and expensive in a maze:
+
+| Test | Checks |
+|------|--------|
+| 8 | A cruise-to-cruise segment has NO ramps, takes exactly distance/speed, and beats the same cell driven rest-to-rest |
+| 9 | The two ends of a chained corridor: leaving a centre accelerates and never decelerates; the stop before a turn comes to rest exactly at the centre with cruise to spare |
+| 10 | A speed change with no room for it is REFUSED, and what gets built is the hardest stop rather than a reversal -- in both directions, plus a `v_end` pointing backwards |
+
+A profile that quietly decelerated to rest anyway would look like the robot
+merely being slow. One that overshot its distance would put the robot past the
+point it can still stop at before a turn, which this chassis cannot recover
+from -- it has no reverse.

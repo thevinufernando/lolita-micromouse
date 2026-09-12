@@ -1018,10 +1018,16 @@
  *
  * The cost is real but bounded: steering is taken out of forward speed, so at
  * full steering the base is capped at CONTROL_MAX_SPEED - 80 = 120. Ordinary
- * travel needs STRAIGHT_FF_GAIN * STRAIGHT_PROFILE_MAX_CMS = 80, which still
- * fits alongside full steering. Only a robot already fighting something wants
- * more than that at the same time as maximum steering, and in that case
- * steering is the half worth keeping. */
+ * travel needs STRAIGHT_FF_GAIN * STRAIGHT_PROFILE_MAX_CMS, which at 14 cm/s
+ * is 112 and still fits alongside full steering, with 8 units to spare. Only
+ * a robot already fighting something wants more than that at the same time as
+ * maximum steering, and in that case steering is the half worth keeping.
+ *
+ * THAT SPARE IS NOW THIN, and it is the reason the cruise speed cannot simply
+ * be raised again: 15 cm/s would need 120 and leave nothing, and at that point
+ * a saturated steering command silently costs forward speed instead of the
+ * other way round. Raising CONTROL_MAX_SPEED does not buy it back -- the motor
+ * stops answering at about 130 units either way. */
 #define STRAIGHT_YAW_LIMIT 80.0f
 #define STRAIGHT_YAW_INT_LIMIT 20.0f
 
@@ -1066,9 +1072,22 @@
  * coasted to 20.2 and could not reverse back.
  *
  * 10 cm/s leaves headroom: feedforward alone is ~80 units at cruise, so ~120
- * remain for the feedback to correct with before the command clips. */
-#define STRAIGHT_PROFILE_MAX_CMS 10.0f
-#define STRAIGHT_PROFILE_ACCEL_CMS2 20.0f
+ * remain for the feedback to correct with before the command clips.
+ *
+ * RAISED 10 -> 14 once the robot stopped braking at every cell. The ceiling
+ * here has never been the top speed -- it is the 130-unit knee where this
+ * motor stops responding to a larger command, because above it the feedback
+ * has no authority left to correct with. Feedforward at 14 cm/s is 112 units,
+ * which is still below that knee, and 88 units of the 200-unit budget remain
+ * for the loop. 16 cm/s would put the feedforward AT the knee and is the
+ * point past which this drivetrain needs gearing rather than tuning.
+ *
+ * The acceleration went with it, so the ramp stays the same 0.5 s it always
+ * was and the braking distance only grows from 2.5 cm to 3.5 cm -- which
+ * matters, because that distance is what MAZE_CONTINUOUS_CELLS has to give
+ * back before every turn. */
+#define STRAIGHT_PROFILE_MAX_CMS 14.0f
+#define STRAIGHT_PROFILE_ACCEL_CMS2 28.0f
 
 /* WHY SO SLOW: this robot's braking distance, not its top speed, sets the
  * cell time. Measured coasting from 18.7 cm/s to rest took 8.5 cm -- half a
@@ -1081,7 +1100,10 @@
  *
  * Faster is available only after the stopping problem is solved properly,
  * either with real braking authority or by not requiring the robot to stop
- * at every cell. */
+ * at every cell. THE SECOND OF THOSE IS NOW DONE -- see
+ * MAZE_CONTINUOUS_CELLS below -- which is what paid for 10 -> 14. The
+ * braking distance is still the binding constraint; it is simply no longer
+ * paid twice per cell. */
 
 /* Motor speed units per cm/s.
  *
@@ -1096,6 +1118,111 @@
  * IS the cruise speed, and getting it wrong is not something the loop
  * quietly absorbs. */
 #define STRAIGHT_FF_GAIN 8.0f
+
+/* ================= CONTINUOUS (CHAINED) CELL MOTION ===================== */
+/*                                                                          */
+/* Whether the robot is allowed to cross a cell boundary without stopping.  */
+/*                                                                          */
+/* 0 restores the old behaviour exactly: every forward move accelerates from */
+/* rest, decelerates to rest at the cell centre, settles, and reads its      */
+/* walls standing still. Keep this switch -- it is the rollback, and the two */
+/* paths are meant to stay comparable run for run.                          */
+
+/* WHERE THE TIME ACTUALLY WENT, measured from a 51-cell run:
+ *
+ *     driving one cell        2.4 s     (0.5 s accelerating, 0.5 s braking)
+ *     NAV_SETTLE_MS           0.8 s     standing still on purpose
+ *     five-vote wall read     0.3 s     standing still to read
+ *                            -------
+ *     one cell                3.5 s
+ *
+ * So a third of every cell was spent stopped, and another 40% of the driving
+ * was ramping to and from a speed it held for barely a second. None of that
+ * is the robot going anywhere.
+ *
+ * Chained, a cell is one cell pitch at cruise: 19.2 / 14 = 1.37 s. The walls
+ * are read WHILE MOVING, from the same free-running sensors the wall follower
+ * already uses, so the settle and the vote disappear rather than being made
+ * faster.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW A BLOCKING CONTROLLER RUNS CONTINUOUSLY
+ * ---------------------------------------------------------------------------
+ * The solver is an ordinary blocking loop: it asks for the walls, decides, and
+ * calls for a move. It cannot be asked to decide in advance, because what it
+ * decides depends on walls the robot has not reached yet.
+ *
+ * So the move ENDS EARLY instead. A chained forward stops driving
+ * CELL_DECISION_OFFSET_CM short of the cell centre and returns with the robot
+ * still rolling at cruise. That point is chosen as the last place from which
+ * the robot can still stop AT the centre -- so whatever the solver decides
+ * next is still available:
+ *
+ *   another forward   the next segment simply continues; nothing braked
+ *   a turn            the remaining offset is driven and the robot stops
+ *                     at the centre, exactly as it always did
+ *
+ * Between the two the motors hold their last command open-loop for as long as
+ * the solver takes to think. That is about a millisecond in the exploration
+ * phases, and CELL_DECISION_MARGIN_CM below is what pays for it. */
+#define MAZE_CONTINUOUS_CELLS 1
+
+/* The speed carried across a decision point. The same as the profile's cruise:
+ * a chained segment has no ramps at all, so this is the speed it both starts
+ * and ends at, and any other value would mean accelerating in the middle of a
+ * corridor for no reason. */
+#define CELL_CHAIN_SPEED_CMS STRAIGHT_PROFILE_MAX_CMS
+
+/* Slack beyond the pure braking distance, cm.
+ *
+ * IT BUYS TWO THINGS AND BOTH ARE REAL. The solver's think-time, during which
+ * the motors are holding their last command with nothing watching -- 1.5 cm is
+ * 107 ms at cruise, against roughly 1 ms of flood fill. And the ordinary lag
+ * between the reference and the robot, which is a centimetre or two on a move
+ * that is going well and more on one that is not.
+ *
+ * Too small and a turn arrives with the robot already past the point it can
+ * stop at, which it cannot fix: this chassis has no reverse. Too large and the
+ * in-flight wall window shrinks from the far end, because the segment stops
+ * before the side sensors have had long enough in the next cell. */
+#define CELL_DECISION_MARGIN_CM 1.5f
+
+/* How far short of the cell centre a chained forward ends, cm.
+ *
+ * DERIVED, NOT CONFIGURED. It is the distance needed to brake from cruise at
+ * the profile's own acceleration, plus the margin above. Writing it as a
+ * number would let it disagree with the profile the moment either speed
+ * changed, and the failure would be a robot that cannot stop in time for a
+ * turn -- which looks like a steering fault, not an arithmetic one. */
+#define CELL_DECISION_OFFSET_CM                                                \
+  ((CELL_CHAIN_SPEED_CMS * CELL_CHAIN_SPEED_CMS)                               \
+       / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)                                  \
+   + CELL_DECISION_MARGIN_CM)
+
+/* ---- READING WALLS WHILE MOVING ----
+ *
+ * The stationary read votes five independent sweeps at a cell centre. Moving,
+ * the same sensors are sampled once per complete round-robin rotation over the
+ * stretch of the move where they are looking at the cell being entered, and
+ * the votes are counted the same way: strict majority, with an invalid reading
+ * voting "no wall" exactly as it does standing still.
+ *
+ * THE WINDOW IS SET BY GEOMETRY. The side sensors lead the axle by
+ * TOF_SIDE_AHEAD_CM, so they cross into the next cell well before the body
+ * does, and they are still inside it when the segment ends. That gives
+ *
+ *     NAV_CELL_CM/2 + TOF_SIDE_AHEAD_CM - CELL_DECISION_OFFSET_CM
+ *
+ * of travel to sample over -- about 8.6 cm, or 15 rotations at cruise. The
+ * front sensor is compensated for the distance still to run, so a wall is
+ * declared on what it WILL read at the cell centre rather than on what it
+ * reads from further back. */
+
+/* Rotations that must land inside the window before the in-flight reading is
+ * trusted. Below this the move falls back to stopping and voting, which is
+ * slow and correct -- the one thing that must never happen is a confident
+ * answer from two samples. */
+#define WALL_FLIGHT_MIN_SAMPLES 5U
 
 /* ------------------- FRONT-WALL ALIGNMENT (longitudinal) ---------------- */
 /*                                                                          */

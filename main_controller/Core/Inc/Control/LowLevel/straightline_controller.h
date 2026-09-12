@@ -59,6 +59,88 @@ void StraightlineController_Init(void);
 uint8_t runForwardFused(float distance_cm);
 
 
+/* ---- One segment of a move, described rather than assumed ----
+ *
+ * runForwardFused() is this with every option at its default: from rest, to
+ * rest, alignment on, no in-flight wall reading. Chained cell motion needs the
+ * others, and passing six loose floats around was not going to age well.
+ *
+ * ENTRY AND EXIT SPEEDS ARE REFERENCE SPEEDS, not measurements. They describe
+ * the profile the caller wants built, and the point of them is CONTINUITY: a
+ * segment that begins where the last one's reference ended commands no step,
+ * so the feedforward carries straight through a cell boundary instead of
+ * dropping to zero and asking the robot to brake and restart. */
+typedef struct {
+
+  float distance_cm;      /* signed; maze moves are always forward       */
+
+  /* Front-sensor reading the segment should END at, or 0 for odometry
+   * alone. A chained segment stops short of the cell centre, so this is
+   * the wall distance AT THAT POINT, not at the centre. */
+  float front_target_mm;
+
+  float entry_speed_cms;  /* 0 = starting from rest                      */
+  float exit_speed_cms;   /* 0 = brake to rest and settle at the end     */
+
+  /* 1 = a continuation of a move already in progress. The wall follower
+   * keeps its side and its lean; only its travel baseline is restarted.
+   * Resetting it mid-corridor throws away a good reference and steps the
+   * tilt to zero at exactly the wrong moment. */
+  uint8_t keep_wall_follow;
+
+  /* 1 = do NOT zero the encoders; measure from wherever they are.
+   *
+   * A CALLER THAT TRACKS ITS OWN POSITION MUST SET THIS, and the default is
+   * the other way round because everything that came before this struct read
+   * Encoder_getAverageDistance() straight after the move and expected it to
+   * be the distance travelled.
+   *
+   * Chained cell motion does track its own: it works out each segment's
+   * length from an absolute odometer, which is how a segment absorbs the lag
+   * the last one left and the open-loop travel during the solver's
+   * think-time. Zeroing here would move the frame those numbers are measured
+   * in out from under it, silently, between the caller computing a distance
+   * and the segment starting. */
+  uint8_t keep_odometry;
+
+  /* IN-FLIGHT WALL READING. Sample the walls of the cell being ENTERED,
+   * from `wall_window_cm` of travel onward, so the solver never has to
+   * stop and vote. Negative disables it.
+   *
+   * `wall_centre_cm` is the travel at which the robot reaches that cell's
+   * centre -- which a chained segment never does, and that is the point:
+   * the front reading is compensated by the distance still to run, so a
+   * wall is declared on what the sensor WILL read there. */
+  float wall_window_cm;
+  float wall_centre_cm;
+
+} StraightMove_t;
+
+uint8_t runForwardMove(const StraightMove_t *mv);
+
+
+/* ---- What the last move saw while it was moving ----
+ *
+ * Votes counted the same way the stationary read counts them: strict majority
+ * of the samples taken inside the window, with an invalid reading voting "no
+ * wall" rather than abstaining. sl_flight_samples is the count they are out
+ * of, and is the only thing that says whether the answer is worth having --
+ * a window that produced two rotations has an opinion, not a measurement. */
+extern volatile uint8_t  sl_flight_samples;
+extern volatile uint8_t  sl_flight_front;
+extern volatile uint8_t  sl_flight_left;
+extern volatile uint8_t  sl_flight_right;
+extern volatile uint8_t  sl_flight_front_votes;
+extern volatile uint8_t  sl_flight_left_votes;
+extern volatile uint8_t  sl_flight_right_votes;
+
+/* Means over the valid samples. The front one is the PREDICTED reading at the
+ * cell centre, so it compares directly against a stationary read. */
+extern volatile uint16_t sl_flight_front_mm;
+extern volatile uint16_t sl_flight_left_mm;
+extern volatile uint16_t sl_flight_right_mm;
+
+
 /* Per-cycle trace of the last fused move, same idea as the turn trace.
  *
  * Guessing at the turn twice made things worse in two different directions;

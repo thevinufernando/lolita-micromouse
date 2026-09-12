@@ -528,7 +528,103 @@ accident.
 
 ## Change log
 
-### 2026-09-12 (newest) - The flood fill, ported
+### 2026-09-12 (newest) - The robot stops being stopped
+
+A 51-cell run took 3.5 s per cell. Of that, 0.8 s was `NAV_SETTLE_MS` standing
+still on purpose, 0.3 s was a five-vote wall read standing still to look, and
+1.0 s of the 2.4 s of driving was ramping to and from a speed held for barely a
+second. A third of every cell was spent not moving, and most of the rest was
+spent changing speed.
+
+**`MAZE_CONTINUOUS_CELLS` makes a forward end at cruise instead of at rest.**
+It stops driving `CELL_DECISION_OFFSET_CM` short of the cell centre -- the last
+point from which the robot can still stop AT the centre -- and returns with the
+robot rolling. Whatever the solver decides next is still available: another
+forward simply continues, and a turn is preceded by a stop segment that drives
+the remaining offset. A chained cell is one cell pitch at cruise, 1.37 s, with
+no ramps in it at all.
+
+The solver is an ordinary blocking loop and could not be asked to decide in
+advance, because what it decides depends on walls the robot has not reached. So
+the move ends early rather than the decision happening late. Between the two
+the motors hold their last command open-loop for however long the solver takes
+-- about a millisecond in the exploration phases -- and
+`CELL_DECISION_MARGIN_CM` is what pays for it. `tm_chain_gap_ms_max` is the
+number that says whether it still does; 1.5 cm buys 107 ms at cruise.
+
+**Nothing above the motion layer changed.** Every entry point that needs the
+robot standing still calls the stop itself -- both pivots, `CellMotion_Observe()`
+and `CellMotion_EndRun()` -- so a caller cannot forget, and the reactive
+navigator, which observes at every cell, never chains and behaves exactly as it
+did. The flood fill is untouched and `floodfill_diff.sh` still passes on all
+seven mazes.
+
+**Walls are read while moving.** The side sensors lead the axle by
+`TOF_SIDE_AHEAD_CM`, so they cross into the cell being entered a third of the
+way through the move and are still inside it when the segment ends -- about
+8 cm of travel, or 15 round-robin rotations at cruise. Votes are counted
+exactly as the stationary read counts them, strict majority with an invalid
+reading voting "no wall", so the answer does not depend on whether the robot
+happened to be moving. **The front sensor is compensated for the distance still
+to run**, because a segment that deliberately ends short would otherwise miss
+every front wall: one at the far side of the next cell reads about 190 mm from
+where the segment ends, against a 150 mm threshold meant for a robot at the
+centre. Fewer than `WALL_FLIGHT_MIN_SAMPLES` rotations and the robot stops and
+votes, which is slow and right. `tm_chain_flight_reads` against
+`tm_chain_stop_reads` says how often that happens.
+
+**A turn no longer re-reads the cell.** The snapshot is robot-relative so a
+pivot invalidated it, and the shim responded by observing again -- a settle and
+a five-vote sweep, better than a second, to rediscover something the algorithm
+had already written into `v_walls`/`h_walls` a moment earlier. It now reads the
+rotated view back out of the map. The distances rotate with the flags, with the
+side turned away from reported as unmeasured rather than filled in with a
+number that means something else.
+
+**`NAV_PIVOT_SETTLE_MS` split off from `NAV_SETTLE_MS`.** They were the same
+800 ms constant guarding different things. The wall-reading pause is now rare
+and can stay generous; the pause after a pivot is on the critical path of every
+turn and was spending two thirds of a second re-confirming what the turn
+controller had just confirmed with `TURN_PROFILE_SETTLE_MS`.
+
+**Speed 10 -> 14 cm/s, acceleration 20 -> 28.** The ceiling here has never been
+top speed -- it is the 130-unit knee where this motor stops answering a larger
+command, above which the feedback has no authority. Feedforward at 14 cm/s is
+112 units, still under it, with 88 of the 200-unit budget left for the loop.
+16 cm/s would put the feedforward AT the knee and is where this drivetrain
+needs gearing rather than tuning. Raising `CONTROL_MAX_SPEED` does not buy it
+back.
+
+Supporting changes:
+
+- **`MotionProfile_InitFromTo()`** -- the general form, with a terminal
+  velocity. `Init` and `InitFrom` are wrappers, deliberately, so an error in
+  the general form shows up in the existing rest-to-rest tests. It reports
+  infeasible when the distance is shorter than `|v0^2 - v_end^2| / 2a` and
+  builds that minimum instead, because a reference that reverses to make the
+  arithmetic work would drive the robot backwards. Three new host tests cover
+  cruise-to-cruise, the two ends of a corridor, and both refusals.
+- **`StraightMove_t`** replaces the loose arguments to the fused move.
+  `runForwardFused()` is now every option at its default.
+- **`keep_odometry` is separate from `keep_wall_follow`, and that separation is
+  load-bearing.** The chained caller computes each segment's length from an
+  absolute odometer; zeroing the encoders inside the segment would move that
+  frame out from under it between the caller reading it and the segment
+  starting. **`YawEstimator_RebaseEncoders()` is now tied to the reset**, since
+  it adds the current yaw to an origin whose "since reset" term it assumes is
+  zero -- calling it without having reset double-counts the whole heading the
+  robot has turned through since the last real reset.
+- **`WallFollow_NewSegment()`** restarts only the movement detector's travel
+  baseline. Calling `WallFollow_Reset()` at a cell boundary instead would drop
+  a good reference and step the tilt to zero, which is the exact discontinuity
+  the slew limit exists to prevent.
+
+What to read first in the next run: `tm_chain_gap_ms_max` against the 107 ms
+the margin buys, the flight-vs-stop read ratio, and whether the per-cycle
+period histogram still tops out near 12 ms now that the loop is doing the wall
+vote as well.
+
+### 2026-09-12 (previous) - The flood fill, ported
 
 `MicroMouseAlgorithm/maze.c` and `Main.c` now drive the robot, under
 `Core/{Inc,Src}/Maze/floodfill/`. They came across essentially unchanged:

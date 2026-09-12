@@ -23,6 +23,24 @@
  * would return the same thing at several hundred milliseconds a time. The
  * host test asserts the two produce identical decisions.
  *
+ * WHERE THAT ONE READ COMES FROM IS THE MOTION LAYER'S BUSINESS. With chained
+ * cells it was taken on the way in, at speed, and costs nothing at all; only
+ * when too few samples landed does the robot stop and vote. The distinction is
+ * invisible from here and from the algorithm, which is the point.
+ *
+ * ---------------------------------------------------------------------------
+ * A TURN DOES NOT NEED A NEW READING
+ * ---------------------------------------------------------------------------
+ * The snapshot is robot-relative, so a pivot invalidates it -- but not the
+ * underlying fact. The algorithm has already written this cell's walls into
+ * v_walls/h_walls through its own updateWalls(), which runs before the turn,
+ * so the rotated view can be read straight back out of the map.
+ *
+ * That is worth having: re-observing after every pivot cost a settle and a
+ * five-vote sweep, better than a second per turn, to rediscover something
+ * already written down. The fourth side -- the one behind -- is the cell the
+ * robot drove in from, which is open, and the map says so.
+ *
  * ---------------------------------------------------------------------------
  * A FAILED TURN IS REPORTED ONE CALL LATE
  * ---------------------------------------------------------------------------
@@ -69,7 +87,11 @@ static void ensureCell(void)
 {
     if (s_cell_valid) return;
 
-    CellMotion_Observe(&s_cell, 0U);
+    /* Free if the way in gathered enough; a stop and a five-vote sweep if it
+     * did not. Never a guess. */
+    if (!CellMotion_FlightWalls(&s_cell)) {
+        CellMotion_Observe(&s_cell, 0U);
+    }
 
     /* The algorithm writes the walls itself, through its own updateWalls(),
      * into the same arrays. But it knows nothing about the visited bitmap the
@@ -145,6 +167,52 @@ int API_moveForward(void)
 }
 
 
+/* Re-express the cached reading for the heading the robot has just turned to.
+ *
+ * The pose belongs to the algorithm and is not updated until after this call
+ * returns, so the new heading is computed here rather than read. This still
+ * touches nothing it does not own: it reads mouse_x/y/dir and writes only the
+ * local snapshot and the published distances. */
+static void rotateCell(uint8_t turned_left)
+{
+    if (!s_cell_valid) return;
+
+    const Direction dir = (Direction)((mouse_dir + (turned_left ? 3 : 1)) % 4);
+
+    uint8_t f = 0U, l = 0U, r = 0U;
+
+    MazeMap_CellWalls((int16_t)mouse_x, (int16_t)mouse_y, dir, &f, &l, &r);
+
+    s_cell.front = f;
+    s_cell.left  = l;
+    s_cell.right = r;
+
+    /* THE DISTANCES HAVE TO TURN WITH THE FLAGS, or the per-cell trace records
+     * a front wall beside a left-hand distance and the next person to read a
+     * log spends an hour on it.
+     *
+     * The side the robot has turned AWAY from becomes the side behind it,
+     * which no sensor has measured from here -- so it is reported as what it
+     * is, unmeasured, rather than filled in with a number that means something
+     * else. The flag for that side still comes from the map above, which does
+     * know. */
+    const uint16_t front = wall_front_mm;
+    const uint16_t left  = wall_left_mm;
+    const uint16_t right = wall_right_mm;
+
+    if (turned_left) {
+        wall_front_mm = left;
+        wall_right_mm = front;
+        wall_left_mm  = TOF_DISTANCE_INVALID;
+    }
+    else {
+        wall_front_mm = right;
+        wall_left_mm  = front;
+        wall_right_mm = TOF_DISTANCE_INVALID;
+    }
+}
+
+
 void API_turnLeft(void)
 {
     if (s_turn_failed) return;
@@ -158,7 +226,8 @@ void API_turnLeft(void)
      * worth seeing in the trace as one about-turn rather than two pivots. */
     s_pending_action = (s_pending_action == NAV_ACT_LEFT) ? NAV_ACT_AROUND
                                                           : NAV_ACT_LEFT;
-    s_cell_valid = 0U;
+
+    rotateCell(1U);
 }
 
 
@@ -173,7 +242,8 @@ void API_turnRight(void)
 
     s_pending_action = (s_pending_action == NAV_ACT_RIGHT) ? NAV_ACT_AROUND
                                                            : NAV_ACT_RIGHT;
-    s_cell_valid = 0U;
+
+    rotateCell(0U);
 }
 
 

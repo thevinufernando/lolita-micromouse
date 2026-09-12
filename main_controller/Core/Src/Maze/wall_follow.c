@@ -53,6 +53,26 @@ void WallFollow_Reset(void)
 }
 
 
+/* A NEW SEGMENT OF THE SAME MOVE, not a new move.
+ *
+ * Chained cell motion splits a corridor into segments that hand over at
+ * cruise, and travelled distance restarts at zero in each one. That single
+ * fact has to be told to the movement detector, or the first update of every
+ * segment sees the distance jump backwards by a whole cell and reads it as the
+ * robot sprinting.
+ *
+ * EVERYTHING ELSE IS DELIBERATELY KEPT. The robot has not stopped, has not
+ * turned, and is still beside the same walls -- so the side it is following
+ * and the lean it currently holds are as valid as they were a millisecond ago.
+ * Calling WallFollow_Reset() here instead would drop the reference and step
+ * the tilt to zero at every cell boundary, which is the exact discontinuity
+ * the slew limit exists to prevent. */
+void WallFollow_NewSegment(void)
+{
+    s_last_travel_cm = -1.0f;
+}
+
+
 void WallFollow_SetCells(const WallFollowCells_t *cells)
 {
     if (cells) {

@@ -106,8 +106,27 @@
 
 /* Pause before each wall reading, in ms. Lets the chassis settle so the
  * sensors are not measuring during a rock, and so the encoder reading at the
- * end of a move is unambiguous. */
+ * end of a move is unambiguous.
+ *
+ * This is the EXPENSIVE one and it used to be paid at every cell. With chained
+ * motion the walls are read on the way in and the stationary read is the
+ * fallback, so a generous figure now costs almost nothing -- and the times it
+ * is reached are exactly the times the robot could not get a confident answer
+ * any other way, which is when it should be careful. */
 #define NAV_SETTLE_MS 800U
+
+/* Pause after a pivot, in ms. SEPARATE FROM THE ABOVE, because it is on the
+ * critical path of every turn and it is not guarding the same thing.
+ *
+ * The wall-reading pause exists so five sensor votes are not taken during a
+ * rock. This one exists so the next move does not begin while the chassis is
+ * still swinging -- and the turn controller has already waited
+ * TURN_PROFILE_SETTLE_MS with the yaw rate under TURN_SETTLE_RATE_DPS before
+ * it returned, so most of that has happened already.
+ *
+ * It was 800 by sharing the constant above, which cost two thirds of a second
+ * per pivot to re-confirm something the turn controller had just confirmed. */
+#define NAV_PIVOT_SETTLE_MS 150U
 
 /* Hard bound on the run, counted in CELLS ENTERED. A wall follower in an open
  * area circles forever, and a bench arena has no outer boundary to stop it, so

@@ -260,6 +260,103 @@ int main(void)
               MotionProfile_Velocity(&q, 0.0f), 0.0f, 1e-6f);
     }
 
+    /* ---------------------------------------------------------------------
+     * A MOVE THAT ENDS AT SPEED
+     *
+     * This is what chained cell motion is built on, and it is the one place a
+     * mistake would be invisible on the bench and expensive in the maze: a
+     * profile that quietly decelerated to rest anyway would simply look like
+     * the robot being slow, while one that overshot its distance would put it
+     * past the point it can still stop at before a turn.
+     * ------------------------------------------------------------------- */
+    printf("\n TEST 8: a segment that hands over still moving\n");
+    {
+        const float V = 14.0f, A = 28.0f, D = 19.2f;
+        MotionProfile_t q;
+
+        check_true("a cruise-to-cruise segment fits",
+                   MotionProfile_InitFromTo(&q, D, V, V, V, A) == 1U, "feasible");
+        check("it starts at cruise",  MotionProfile_Velocity(&q, 0.0f), V, 1e-4f);
+        check("and ENDS at cruise",   MotionProfile_Velocity(&q, q.t_total), V, 1e-4f);
+        check("landing exactly on target",
+              MotionProfile_Position(&q, q.t_total), D, 1e-3f);
+        check("velocity still integrates to position",
+              integrate(&q, q.t_total, 1e-5f), D, 0.02f);
+
+        /* No ramps at all: at constant speed the whole segment is cruise, and
+           its duration is the distance over the speed and nothing else. */
+        check("no acceleration phase", q.t_ramp,  0.0f, 1e-6f);
+        check("no deceleration phase", q.t_decel, 0.0f, 1e-6f);
+        check("so it takes exactly distance/speed",
+              MotionProfile_Duration(&q), D / V, 1e-4f);
+
+        /* And it beats the rest-to-rest move it replaces, which is the entire
+           justification for any of this. */
+        MotionProfile_t rest;
+        MotionProfile_Init(&rest, D, V, A);
+        check_true("and beats the same cell driven from rest to rest",
+                   MotionProfile_Duration(&q) < MotionProfile_Duration(&rest),
+                   "faster");
+    }
+
+    printf("\n TEST 9: the two ends of a chained corridor\n");
+    {
+        const float V = 14.0f, A = 28.0f;
+        MotionProfile_t q;
+
+        /* Leaving a cell centre: accelerate to cruise and hand over there. */
+        const float lead_in = 19.2f - 5.0f;
+        check_true("the first segment fits",
+                   MotionProfile_InitFromTo(&q, lead_in, 0.0f, V, V, A) == 1U,
+                   "feasible");
+        check("starts from rest",     MotionProfile_Velocity(&q, 0.0f), 0.0f, 1e-6f);
+        check("hands over at cruise", MotionProfile_Velocity(&q, q.t_total), V, 1e-4f);
+        check("it accelerates and never decelerates", q.t_decel, 0.0f, 1e-6f);
+        check("lands on target", MotionProfile_Position(&q, q.t_total), lead_in, 1e-3f);
+
+        /* Arriving at one: the braking offset, cruise down to rest. */
+        const float lead_out = (V * V) / (2.0f * A) + 1.5f;
+        check_true("and the stop that follows a turn request fits",
+                   MotionProfile_InitFromTo(&q, lead_out, V, 0.0f, V, A) == 1U,
+                   "feasible");
+        check("it comes to rest", MotionProfile_Velocity(&q, q.t_total), 0.0f, 1e-6f);
+        check("exactly at the cell centre",
+              MotionProfile_Position(&q, q.t_total), lead_out, 1e-3f);
+        check_true("with room to spare, which is the margin",
+                   q.t_cruise > 0.0f, "did not need the whole segment to brake");
+    }
+
+    printf("\n TEST 10: a speed change with no room for it is refused\n");
+    {
+        /* The failure that matters: being asked to reach the cell centre from
+           cruise in less than the braking distance. There is no profile for
+           it, and inventing one that reverses would be worse than saying so. */
+        const float V = 14.0f, A = 28.0f;
+        const float d_brake = (V * V) / (2.0f * A);
+        MotionProfile_t q;
+
+        check_true("too short to shed the speed is reported",
+                   MotionProfile_InitFromTo(&q, 0.5f * d_brake, V, 0.0f, V, A) == 0U,
+                   "reported");
+        check("and what is built is the hardest stop, not a reversal",
+              MotionProfile_Position(&q, q.t_total), d_brake, 1e-3f);
+        check_true("which never runs backwards",
+                   MotionProfile_Position(&q, q.t_total * 0.5f) > 0.0f, "monotonic");
+
+        /* The mirror: too short to GAIN the speed asked for. */
+        check_true("too short to reach the exit speed is reported too",
+                   MotionProfile_InitFromTo(&q, 0.5f * d_brake, 0.0f, V, V, A) == 0U,
+                   "reported");
+        check("and it still ends at the speed it promised",
+              MotionProfile_Velocity(&q, q.t_total), V, 1e-4f);
+
+        /* An exit speed pointing backwards is as unmodellable as a v0 that
+           does, and must be read the same way. */
+        (void)MotionProfile_InitFromTo(&q, 10.0f, 0.0f, -5.0f, 10.0f, 20.0f);
+        check("a v_end opposing the move is treated as rest",
+              MotionProfile_Velocity(&q, q.t_total), 0.0f, 1e-6f);
+    }
+
     printf("\n===== %s (%d failures) =====\n\n",
            failures ? "FAILURES" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;

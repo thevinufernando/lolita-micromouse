@@ -116,6 +116,12 @@ void WallFollow_SetCells(const WallFollowCells_t *cells);
  * never sets one cannot inherit the previous move's. */
 void WallFollow_Reset(void);
 
+/* Per-SEGMENT reset, for chained cell motion. Tells the movement detector that
+ * travelled distance has restarted at zero, and keeps everything else: the
+ * robot has not stopped or turned, so the followed side and the current lean
+ * are still valid. See the note in wall_follow.c. */
+void WallFollow_NewSegment(void);
+
 /* Full reset, including the learned lateral bias and drift. Call ONCE at the
  * start of a run. Per move it would mean re-learning the robot's asymmetry
  * every cell and never converging on it. */

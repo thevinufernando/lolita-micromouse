@@ -15,12 +15,21 @@ void MotionProfile_Init(MotionProfile_t *p, float total, float v_max, float acce
 uint8_t MotionProfile_InitFrom(MotionProfile_t *p, float total, float v0,
                                float v_max, float accel)
 {
+    /* Ending at rest is the ordinary case, so it keeps its own name. */
+    return MotionProfile_InitFromTo(p, total, v0, 0.0f, v_max, accel);
+}
+
+
+uint8_t MotionProfile_InitFromTo(MotionProfile_t *p, float total, float v0,
+                                 float v_end, float v_max, float accel)
+{
     if (p == 0) return 0U;
 
     p->sign     = (total < 0.0f) ? -1.0f : 1.0f;
     p->distance = fabsf(total);
     p->accel    = accel;
     p->v_start  = 0.0f;
+    p->v_end    = 0.0f;
     p->v_peak   = 0.0f;
     p->t_ramp   = 0.0f;
     p->t_cruise = 0.0f;
@@ -36,66 +45,69 @@ uint8_t MotionProfile_InitFrom(MotionProfile_t *p, float total, float v0,
         return 1U;
     }
 
-    /* Taken in the direction of travel. A v0 pointing the other way is treated
-     * as rest: a trapezoid cannot describe reversing first, and pretending
+    /* Both taken in the direction of travel. One pointing the other way is
+     * treated as rest: a trapezoid cannot describe reversing, and pretending
      * otherwise would produce a profile whose velocity never matches the one
      * the caller actually has. */
-    if (v0 * total > 0.0f) {
-        p->v_start = fabsf(v0);
-    }
+    if (v0    * total > 0.0f) p->v_start = fabsf(v0);
+    if (v_end * total > 0.0f) p->v_end   = fabsf(v_end);
 
-    const float v_start  = p->v_start;
-    const float d_stop   = (v_start * v_start) / (2.0f * accel);
+    const float vs = p->v_start;
+    const float ve = p->v_end;
+
+    /* The distance the SPEED CHANGE alone needs, with no cruise and no wasted
+     * motion in between. Below this the move cannot be done at all -- not
+     * "done badly", but not done: there is no way to get from vs to ve inside
+     * it at this acceleration. */
+    const float d_min    = fabsf(vs * vs - ve * ve) / (2.0f * accel);
     uint8_t     feasible = 1U;
 
-    if (p->distance < d_stop) {
-        /* Not enough room to come to rest. Build the hardest stop available
-         * and report the shortfall: the profile stays self-consistent and
-         * simply lands beyond what was asked, which is the honest outcome and
-         * far better than a reference that reverses to make the numbers work.
-         */
-        p->distance = d_stop;
+    if (p->distance < d_min) {
+        /* Build the shortest profile that IS possible and report the
+         * shortfall. The reference stays self-consistent and simply lands
+         * beyond what was asked, which is far better than one that reverses to
+         * make the numbers work. */
+        p->distance = d_min;
         feasible    = 0U;
     }
 
-    if (v_start >= v_max) {
-        /* Already at or above the limit, so there is nothing to accelerate.
-         * Hold and then brake. */
-        const float d_down = (v_start * v_start) / (2.0f * accel);
+    /* Where the two ramps meet if they meet before v_max:
+     *
+     *     (v^2 - vs^2) / 2a  +  (v^2 - ve^2) / 2a  =  distance
+     *
+     * which is never below max(vs, ve) once the distance clears d_min above,
+     * so the ramp times below cannot come out negative. */
+    float   v_peak  = sqrtf((2.0f * accel * p->distance + vs * vs + ve * ve) * 0.5f);
+    uint8_t cruises = 0U;
 
-        p->v_peak   = v_start;
-        p->t_ramp   = 0.0f;
-        p->t_cruise = (p->distance - d_down) / v_start;
-        p->t_decel  = v_start / accel;
-    }
-    else {
-        /* Distance spent climbing to v_max and then braking from it. */
-        const float d_up   = (v_max * v_max - v_start * v_start) / (2.0f * accel);
-        const float d_down = (v_max * v_max) / (2.0f * accel);
+    if (v_peak > v_max) { v_peak = v_max; cruises = 1U; }   /* room to cruise */
 
-        if (d_up + d_down <= p->distance) {
-            /* Long enough to reach the speed limit: trapezoid. */
-            p->v_peak   = v_max;
-            p->t_ramp   = (v_max - v_start) / accel;
-            p->t_cruise = (p->distance - d_up - d_down) / v_max;
-            p->t_decel  = v_max / accel;
-        }
-        else {
-            /* Too short: still accelerating when braking has to begin, so the
-             * profile peaks early and never cruises. The peak is where the two
-             * ramps meet --
-             *
-             *     (v^2 - v_start^2) / 2a  +  v^2 / 2a  =  distance
-             *
-             * -- and it can never come out below v_start, because that would
-             * require distance < d_stop, which the branch above already took.
-             */
-            p->v_peak   = sqrtf((2.0f * accel * p->distance
-                                 + v_start * v_start) * 0.5f);
-            p->t_ramp   = (p->v_peak - v_start) / accel;
-            p->t_cruise = 0.0f;
-            p->t_decel  = p->v_peak / accel;
-        }
+    /* A speed limit below a speed the caller already has is not a limit this
+     * generator can impose -- the robot is doing it. Honour the endpoints and
+     * let the cruise fall out as zero. */
+    if (v_peak < vs) v_peak = vs;
+    if (v_peak < ve) v_peak = ve;
+
+    const float d_up   = (v_peak * v_peak - vs * vs) / (2.0f * accel);
+    const float d_down = (v_peak * v_peak - ve * ve) / (2.0f * accel);
+
+    p->v_peak   = v_peak;
+    p->t_ramp   = (v_peak - vs) / accel;
+    p->t_decel  = (v_peak - ve) / accel;
+
+    /* WHEN THE RAMPS MEET BELOW v_max THERE IS NO CRUISE, and that is known
+     * from the shape rather than from the arithmetic. Computing it instead
+     * leaves a few hundred nanoseconds of "cruise" behind, because v_peak came
+     * out of a square root and v_peak^2 does not land back exactly on the
+     * distance it was derived from. A triangular profile must report a cruise
+     * of exactly zero, not nearly zero. */
+    p->t_cruise = cruises ? (p->distance - d_up - d_down) / v_peak : 0.0f;
+
+    if (p->t_cruise < 0.0f) {
+        /* Only reachable when v_max is below a speed the caller already has,
+         * so the endpoints had to override it above. */
+        p->t_cruise = 0.0f;
+        feasible    = 0U;
     }
 
     p->t_total = p->t_ramp + p->t_cruise + p->t_decel;
@@ -129,12 +141,14 @@ float MotionProfile_Position(const MotionProfile_t *p, float t)
     }
     else {
         /* Measured BACK FROM THE END rather than forward from the cruise, and
-         * that is load-bearing: the move always finishes at rest, so this form
-         * lands exactly on `distance` instead of accumulating rounding error
-         * across three segments. It is also why the deceleration needs no
-         * v_start term -- it is the same ramp whatever the move began at. */
+         * that is load-bearing: it lands exactly on `distance` instead of
+         * accumulating rounding error across three segments. It is also why
+         * the deceleration carries v_end rather than v_start -- this ramp is
+         * the same whatever the move began at, and depends only on what it is
+         * heading for. */
         float remaining = p->t_total - t;
-        s = p->distance - 0.5f * p->accel * remaining * remaining;
+        s = p->distance - (p->v_end * remaining
+                           + 0.5f * p->accel * remaining * remaining);
     }
 
     return p->sign * s;
@@ -152,7 +166,7 @@ float MotionProfile_Velocity(const MotionProfile_t *p, float t)
      * cycle of a retargeted move, which is the cycle it matters most. For a
      * move that begins at rest this is unchanged. */
     if (t <= 0.0f)       return p->sign * p->v_start;
-    if (t >= p->t_total) return 0.0f;
+    if (t >= p->t_total) return p->sign * p->v_end;
 
     float v;
 
@@ -163,7 +177,7 @@ float MotionProfile_Velocity(const MotionProfile_t *p, float t)
         v = p->v_peak;
     }
     else {
-        v = p->accel * (p->t_total - t);
+        v = p->v_end + p->accel * (p->t_total - t);
     }
 
     return p->sign * v;

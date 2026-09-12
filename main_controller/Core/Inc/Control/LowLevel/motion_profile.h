@@ -47,6 +47,23 @@
  * triangle, peaking at sqrt(accel * distance). That case is handled rather
  * than clamped, because short moves are the common case in a maze.
  *
+ * ---------------------------------------------------------------------------
+ * A MOVE MAY ALSO END AT SPEED
+ * ---------------------------------------------------------------------------
+ * The third corner is optional. A profile built with a non-zero `v_end` stops
+ * decelerating when it gets there and hands the robot over still moving:
+ *
+ *     v |      ______________
+ *       |     /              \____   v_end
+ *       |    /
+ *       +---/------------------------> t
+ *
+ * That is what makes continuous cell-to-cell running possible. A maze move
+ * that is going to be followed by another maze move has no business braking
+ * to rest in between, and a profile that always ends at zero leaves the
+ * caller no way to say so. The ramps are then not symmetric, which is why
+ * t_ramp and t_decel have been separate fields since v_start arrived.
+ *
  * A trapezoid has a discontinuous acceleration at the corners, which shows up
  * as a jerk. That is acceptable here and an S-curve is the upgrade if the
  * chassis ever complains about it.
@@ -58,6 +75,7 @@ typedef struct {
   float distance; /* |total|                                            */
   float accel;    /* units/s^2, positive                                */
   float v_start;  /* speed at t = 0; zero for a move that starts at rest */
+  float v_end;    /* speed at t_total; zero for a move that ends at rest  */
   float v_peak;   /* actually reached; < v_max when the move is short   */
   float t_ramp;   /* ACCELERATION phase only -- zero when already fast  */
   float t_cruise; /* zero for a triangular profile                      */
@@ -91,6 +109,26 @@ void MotionProfile_Init(MotionProfile_t *p, float total, float v_max, float acce
  * the retarget. */
 uint8_t MotionProfile_InitFrom(MotionProfile_t *p, float total, float v0,
                                float v_max, float accel);
+
+/* The general form: start at `v0`, end at `v_end`, and say whether it fits.
+ *
+ * THIS EXISTS FOR CHAINED CELL MOVES. Stopping at every cell centre costs a
+ * deceleration and an acceleration the robot did not need, and the settle that
+ * follows costs more than either. A move that is going to be followed by
+ * another move in the same direction should arrive still travelling, and this
+ * is the only place that can be expressed.
+ *
+ * Both speeds are magnitudes taken in the direction of `total`; a negative one
+ * is treated as zero. The two ramps are independent, so the shape is a
+ * trapezoid with unequal sides, or a triangle when there is no room to reach
+ * v_max in between.
+ *
+ * RETURNS 0 WHEN THE MOVE DOES NOT FIT -- when `total` is shorter than
+ * |v0^2 - v_end^2| / (2 * accel), which is the distance the speed change alone
+ * requires. The profile is then built over that minimum distance instead, so
+ * it stays self-consistent and simply lands beyond what was asked. */
+uint8_t MotionProfile_InitFromTo(MotionProfile_t *p, float total, float v0,
+                                 float v_end, float v_max, float accel);
 
 /* Reference position at time t, clamped to [0, total] outside the move. */
 float MotionProfile_Position(const MotionProfile_t *p, float t);

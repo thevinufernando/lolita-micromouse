@@ -268,6 +268,17 @@ volatile float    sl_ref_cm;
 volatile float    sl_align_delta_cm;
 volatile uint8_t  sl_align_applied;
 volatile uint32_t sl_breakaway_count;
+volatile uint8_t  sl_flight_samples;
+volatile uint8_t  sl_flight_front;
+volatile uint8_t  sl_flight_left;
+volatile uint8_t  sl_flight_right;
+volatile uint8_t  sl_flight_front_votes;
+volatile uint8_t  sl_flight_left_votes;
+volatile uint8_t  sl_flight_right_votes;
+volatile uint16_t sl_flight_front_mm;
+volatile uint16_t sl_flight_left_mm;
+volatile uint16_t sl_flight_right_mm;
+
 volatile float    sl_entry_err_mm;
 volatile uint8_t  sl_entry_valid;
 volatile uint8_t  sl_stall_abort;
@@ -292,6 +303,130 @@ volatile uint32_t        tm_sl_trace_count;
  * when it is going fastest and needs it most. Reducing the COMMON MODE
  * instead preserves the differential, so the robot gives up speed rather
  * than giving up steering. */
+/* ======================= READING WALLS WHILE MOVING ======================
+ *
+ * The stationary read votes five independent sweeps standing at a cell centre,
+ * and costs the 800 ms settle that has to precede it. This does the same
+ * counting from samples taken on the way in, over the stretch of the move
+ * where the sensors are looking at the cell being entered.
+ *
+ * SAMPLED ONCE PER ROUND-ROBIN ROTATION, from the caller's ToF rotation, so
+ * every sensor contributes one reading per sample and no reading is counted
+ * twice. Polling faster would recount held values and make a handful of
+ * measurements look like a landslide.
+ *
+ * AN INVALID READING VOTES "NO WALL". That is not a shortcut -- it is what the
+ * stationary read does, and the two must agree or the map would depend on
+ * whether the robot happened to be moving when it looked. A side sensor in an
+ * open cell legitimately returns nothing at all, which is a real answer. */
+static struct {
+    uint8_t  samples;
+    uint8_t  votes[TOF_SENSOR_COUNT];
+    uint16_t valid[TOF_SENSOR_COUNT];
+    int32_t  sum_mm[TOF_SENSOR_COUNT];
+} s_flight;
+
+
+static void flightReset(void)
+{
+    s_flight.samples = 0U;
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        s_flight.votes[i]  = 0U;
+        s_flight.valid[i]  = 0U;
+        s_flight.sum_mm[i] = 0;
+    }
+
+    sl_flight_samples     = 0U;
+    sl_flight_front       = 0U;
+    sl_flight_left        = 0U;
+    sl_flight_right       = 0U;
+    sl_flight_front_votes = 0U;
+    sl_flight_left_votes  = 0U;
+    sl_flight_right_votes = 0U;
+    sl_flight_front_mm    = TOF_DISTANCE_INVALID;
+    sl_flight_left_mm     = TOF_DISTANCE_INVALID;
+    sl_flight_right_mm    = TOF_DISTANCE_INVALID;
+}
+
+
+/* One rotation's worth. `remaining_cm` is how much further the robot has to go
+ * before it reaches the centre of the cell being read -- positive, and it is
+ * what makes the front sensor comparable with a stationary reading. */
+static void flightSample(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+                         float remaining_cm)
+{
+    if (s_flight.samples >= 250U) return;   /* counters are 8-bit */
+
+    s_flight.samples++;
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+
+        const uint8_t ok = (m[i].valid && m[i].distance_mm != TOF_DISTANCE_INVALID);
+
+        /* THE FRONT SENSOR IS LOOKING PAST THE CELL CENTRE, by however far the
+         * robot still has to travel, so its raw reading says nothing directly.
+         * What decides a front wall is what it WILL read on arrival -- and
+         * subtracting the remaining travel is exact, because the sensor and
+         * the wall are both on the axis the robot is moving along.
+         *
+         * Without this a chained move, which deliberately ends short of the
+         * centre, would miss every front wall: one at the far side of the next
+         * cell reads about 190 mm from where the segment ends, against a
+         * 150 mm threshold meant for a robot standing at the centre. */
+        int32_t mm = ok ? (int32_t)m[i].distance_mm : 0;
+
+        if (i == TOF_FRONT && ok) {
+            mm -= (int32_t)(remaining_cm * 10.0f);
+            if (mm < 0) mm = 0;             /* already inside it */
+        }
+
+        const int32_t threshold = (i == TOF_FRONT)
+                                ? (int32_t)WALL_FRONT_THRESHOLD_MM
+                                : (int32_t)WALL_SIDE_THRESHOLD_MM;
+
+        if (ok) {
+            s_flight.valid[i]++;
+            s_flight.sum_mm[i] += mm;
+
+            if (mm <= threshold) s_flight.votes[i]++;
+        }
+    }
+}
+
+
+/* Decide, and publish. Strict majority of the samples taken, which on an even
+ * split answers "no wall" -- the safe direction to be wrong in, because a
+ * missed wall is seen again from the next cell whereas a phantom one is never
+ * cleared. Identical to the rule WallSense_ReadCell() uses. */
+static void flightPublish(void)
+{
+    sl_flight_samples = s_flight.samples;
+
+    const uint8_t n = s_flight.samples;
+
+    sl_flight_front_votes = s_flight.votes[TOF_FRONT];
+    sl_flight_left_votes  = s_flight.votes[TOF_LEFT];
+    sl_flight_right_votes = s_flight.votes[TOF_RIGHT];
+
+    sl_flight_front = (s_flight.votes[TOF_FRONT] * 2U > n) ? 1U : 0U;
+    sl_flight_left  = (s_flight.votes[TOF_LEFT]  * 2U > n) ? 1U : 0U;
+    sl_flight_right = (s_flight.votes[TOF_RIGHT] * 2U > n) ? 1U : 0U;
+
+    /* Mean of the VALID samples only, so one dropped reading does not drag the
+     * reported distance toward zero. */
+    sl_flight_front_mm = s_flight.valid[TOF_FRONT]
+        ? (uint16_t)(s_flight.sum_mm[TOF_FRONT] / s_flight.valid[TOF_FRONT])
+        : TOF_DISTANCE_INVALID;
+    sl_flight_left_mm  = s_flight.valid[TOF_LEFT]
+        ? (uint16_t)(s_flight.sum_mm[TOF_LEFT]  / s_flight.valid[TOF_LEFT])
+        : TOF_DISTANCE_INVALID;
+    sl_flight_right_mm = s_flight.valid[TOF_RIGHT]
+        ? (uint16_t)(s_flight.sum_mm[TOF_RIGHT] / s_flight.valid[TOF_RIGHT])
+        : TOF_DISTANCE_INVALID;
+}
+
+
 static void allocate(float base, float steer, float *left, float *right)
 {
     if (steer >  STRAIGHT_YAW_LIMIT) steer =  STRAIGHT_YAW_LIMIT;
@@ -319,23 +454,52 @@ static void allocate(float base, float steer, float *left, float *right)
 }
 
 
-/* Shared implementation of every fused straight move.
- *
- * `front_target_mm` is the front-sensor reading the move should END at, or 0
- * to run on odometry alone. See the FRONT-WALL ALIGNMENT block in
- * control_config.h for what it is for. */
-static uint8_t runFused(float distance_cm, float front_target_mm)
+/* Shared implementation of every fused straight move. See StraightMove_t. */
+uint8_t runForwardMove(const StraightMove_t *mv)
 {
-    if (controller.state != STRAIGHTLINE_IDLE) {
+    if (mv == 0 || controller.state != STRAIGHTLINE_IDLE) {
         return 0;
     }
 
+    const float distance_cm     = mv->distance_cm;
+    const float front_target_mm = mv->front_target_mm;
+
+    /* A SEGMENT THAT ENDS AT SPEED IS NOT FINISHED WHEN IT RETURNS. It hands
+     * the robot over still moving, so it must not brake, must not wait for a
+     * settle, and must not zero its own command on the way out. */
+    const uint8_t chaining = (mv->exit_speed_cms > 0.0f) && (distance_cm > 0.0f);
+
     /* Encoders FIRST, then re-base the estimator onto the current yaw. REBASE,
      * not reset: the heading this move inherits from the last turn is exactly
-     * what it exists to correct. See yaw_estimator.h. */
-    Encoders_Reset();
-    YawEstimator_RebaseEncoders();
-    WallFollow_Reset();
+     * what it exists to correct. See yaw_estimator.h.
+     *
+     * THE RESET IS SKIPPED WHEN THE CALLER TRACKS ITS OWN POSITION, and that
+     * is not a saving -- it is what keeps a run on ONE distance axis. See
+     * keep_odometry in straightline_controller.h. */
+    if (!mv->keep_odometry) {
+        Encoders_Reset();
+
+        /* !! THE REBASE BELONGS TO THE RESET AND NOTHING ELSE !!
+         *
+         * YawEstimator_RebaseEncoders() pins the encoder-yaw channel to
+         * wherever the estimate currently is, because zeroing the wheels
+         * would otherwise move that measurement out from under it. It adds
+         * the current yaw to an origin whose "since reset" term it ASSUMES is
+         * now zero.
+         *
+         * Call it without having reset and it double-counts: the differential
+         * travel accumulated so far is still in the sum, so the encoder
+         * channel jumps by the whole heading the robot has turned through
+         * since the last real reset. The EKF then either rejects every
+         * encoder update or, worse, believes some of them. A chained segment
+         * must leave the channel exactly as it found it. */
+        YawEstimator_RebaseEncoders();
+    }
+
+    const float odo0 = Encoder_getAverageDistance();
+
+    if (mv->keep_wall_follow) WallFollow_NewSegment();
+    else                      WallFollow_Reset();
 
     PIDController_Init(&controller.distance_pid);
     PIDController_Init(&yaw_pid);
@@ -360,8 +524,15 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     tm_sl_trace_count = 0U;
 
     MotionProfile_t dist_profile;
-    MotionProfile_Init(&dist_profile, distance_cm,
-                       STRAIGHT_PROFILE_MAX_CMS, STRAIGHT_PROFILE_ACCEL_CMS2);
+    (void)MotionProfile_InitFromTo(&dist_profile, distance_cm,
+                                   mv->entry_speed_cms, mv->exit_speed_cms,
+                                   STRAIGHT_PROFILE_MAX_CMS,
+                                   STRAIGHT_PROFILE_ACCEL_CMS2);
+
+    /* The in-flight wall reading belongs to this segment and nothing else, so
+     * it is cleared here whether or not the segment is going to take one. A
+     * stale answer served to the next cell is worse than no answer at all. */
+    flightReset();
 
     /* The endpoint, which front-wall alignment may move once.
      *
@@ -424,6 +595,9 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
         if (now - start_ms >= CONTROL_MOVE_TIMEOUT_MS) {
             Motor_Brake();
+            /* The robot is not where this segment was aiming, so whatever the
+             * sensors saw on the way belongs to no cell anyone can name. */
+            flightReset();
             controller.state = STRAIGHTLINE_IDLE;
             return 0;
         }
@@ -464,7 +638,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
         YawEstimator_Correct();
         YawEstimator_PublishTelemetry();
 
-        float measured   = Encoder_getAverageDistance();
+        float measured   = Encoder_getAverageDistance() - odo0;
         float elapsed_s  = (float)(now - start_ms) * 0.001f;
 
         /* HOW FAST THE ROBOT IS ACTUALLY GOING, measured once and used by
@@ -512,21 +686,44 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * -- eventually backwards, on a breakaway pulse, which is the one
          * direction this chassis has no lateral sensing for. Latching turns
          * "close enough" into a decision made once. */
-        if (!arriving && fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
-            arriving = 1U;
-        }
+        /* A CHAINED SEGMENT IS FINISHED WHEN IT GETS THERE, full stop.
+         *
+         * None of the arrival machinery below applies: it is all about coming
+         * to rest at a point, and this segment is meant to be travelling when
+         * it reaches one. There is no band either -- the handover point is
+         * taken exactly, and whatever lag the robot has at that moment is
+         * measured and absorbed by the next segment rather than waited out.
+         *
+         * NO BRAKE ON THE WAY OUT. The motors keep their last command while
+         * the caller decides what happens next, which is the whole mechanism:
+         * see MAZE_CONTINUOUS_CELLS. */
+        if (chaining) {
 
-        if (arriving && speed_cms < STRAIGHT_SETTLE_SPEED_CMS) {
-
-            settle_counter++;
-            if (settle_counter >= CONTROL_SETTLE_CYCLES) {
-                Motor_Brake();
+            if (measured >= target_cm) {
+                flightPublish();
                 controller.state = STRAIGHTLINE_IDLE;
                 return 1;
             }
         }
         else {
-            settle_counter = 0;
+
+            if (!arriving && fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
+                arriving = 1U;
+            }
+
+            if (arriving && speed_cms < STRAIGHT_SETTLE_SPEED_CMS) {
+
+                settle_counter++;
+                if (settle_counter >= CONTROL_SETTLE_CYCLES) {
+                    Motor_Brake();
+                    flightPublish();
+                    controller.state = STRAIGHTLINE_IDLE;
+                    return 1;
+                }
+            }
+            else {
+                settle_counter = 0;
+            }
         }
 
         /* ONE SENSOR EVERY CYCLE, rather than three every fourth.
@@ -571,6 +768,18 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
              * those are, and what the map knows about them, is the navigator's
              * business. */
             tilt_deg = WallFollow_Update(m, tof_dt_s, measured);
+
+            /* ONE ROTATION, ONE VOTE. Every sensor has been refreshed exactly
+             * once since the last time round, which is what makes these
+             * samples independent -- the same argument that makes the
+             * stationary read vote fresh sweeps rather than re-reads. */
+            if (mv->wall_window_cm >= 0.0f && measured >= mv->wall_window_cm) {
+                float remaining = mv->wall_centre_cm - measured;
+
+                if (remaining < 0.0f) remaining = 0.0f;
+
+                flightSample(m, remaining);
+            }
 
             /* THE LATERAL ERROR THIS MOVE INHERITED, captured on the first
              * sweep that has a reference at all.
@@ -743,7 +952,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * in sign. Written that way rather than as `ref_acc >= 0` because the
          * two are equivalent going forwards and only one of them stays true if
          * this ever has to run a move in the other direction. */
-        if (arriving) {
+        if (arriving && !chaining) {
             /* Committed to stopping, so stop driving. Keyed on the latch and
              * not on the band, so a robot that has coasted a little past does
              * not get commanded back into it. */
@@ -817,6 +1026,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
             }
             else if (now - stall_since_ms >= STRAIGHT_STALL_ABORT_MS) {
                 Motor_Brake();
+                flightReset();
                 sl_stall_abort = 1U;
                 controller.state = STRAIGHTLINE_IDLE;
                 return 0;
@@ -853,6 +1063,21 @@ uint8_t runForwardFused(float distance_cm)
 {
     /* Aims to finish WALL_FRONT_ALIGN_MM from a wall ahead, when there is one.
      * With no wall in range the alignment never fires and the move is exactly
-     * what it was before: odometry against a trapezoidal profile. */
-    return runFused(distance_cm, WALL_FRONT_ALIGN_MM);
+     * what it was before: odometry against a trapezoidal profile.
+     *
+     * Every option at its default -- rest to rest, no in-flight reading -- so
+     * this is the move the robot has always made, expressed in the new form
+     * rather than reimplemented alongside it. */
+    StraightMove_t mv = {
+        .distance_cm      = distance_cm,
+        .front_target_mm  = WALL_FRONT_ALIGN_MM,
+        .entry_speed_cms  = 0.0f,
+        .exit_speed_cms   = 0.0f,
+        .keep_wall_follow = 0U,
+        .keep_odometry    = 0U,
+        .wall_window_cm   = -1.0f,
+        .wall_centre_cm   = 0.0f,
+    };
+
+    return runForwardMove(&mv);
 }

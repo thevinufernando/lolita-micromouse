@@ -12,6 +12,48 @@
 #include "main.h"
 
 volatile float   tm_maze_residual_cm;
+volatile uint32_t tm_chain_gap_ms_max;
+volatile uint32_t tm_chain_segments;
+volatile uint32_t tm_chain_flight_reads;
+volatile uint32_t tm_chain_stop_reads;
+
+/* ---- WHERE THE ROBOT IS BETWEEN CELLS ----
+ *
+ * s_rolling says the robot is sitting at a DECISION POINT --
+ * CELL_DECISION_OFFSET_CM short of a cell centre, still travelling at cruise,
+ * with the motors holding their last command while the solver thinks.
+ *
+ * s_chain_ref_cm is the reading the odometer WOULD have at the centre of the
+ * cell the pose names. The robot has usually not reached it (that is the whole
+ * point) and may never reach it exactly, which is why every segment's length
+ * is worked out from this against the live odometer rather than accumulated.
+ * Lag, open-loop travel during the gap and a front-wall correction all land in
+ * the same place and are all absorbed the same way.
+ *
+ * The old per-move residual is still published, because it is the clearest
+ * single number for whether the robot is keeping its place along a corridor --
+ * it is now derived from this rather than carried separately. */
+static uint8_t s_rolling;
+static float   s_chain_ref_cm;
+static uint32_t s_gap_mark_ms;
+
+/* Walls read on the way into the cell the robot is now in, and whether enough
+ * of them arrived to be worth believing.
+ *
+ * COPIED, NOT REFERENCED. The straight controller's sl_flight_* globals belong
+ * to the LAST SEGMENT IT RAN, and the segment that stops the robot at a cell
+ * centre is a later one -- it clears them on the way in. In the speed-run
+ * phase, where the solver never asks for walls until after it has turned, that
+ * is exactly the order things happen in, and reading them late would report
+ * every distance as absent. */
+static struct {
+    WallReading_t w;
+    uint16_t      front_mm, left_mm, right_mm;
+    uint8_t       front_votes, left_votes, right_votes;
+    uint8_t       samples;
+} s_flight;
+
+static uint8_t s_flight_ok;
 volatile uint8_t tm_maze_tof_start_fail;
 volatile uint8_t tm_maze_tof_stop_fail;
 
@@ -76,7 +118,13 @@ void CellMotion_Record(float move_error_cm, uint8_t move_ok,
  * An unknown next cell leaves next_known at 0, which contributes no opinion
  * and leaves the follower exactly as it behaves without any of this. That is
  * the common case on a first pass and it is meant to be. */
-static void setCellContext(void)
+/* Defined below, beside the chained forward it is the other half of. Declared
+ * here because everything that needs the robot standing still calls it, and
+ * those come first in the file. */
+static uint8_t stopAtCell(void);
+
+
+static void setCellContext(float start_offset_cm)
 {
     WallFollowCells_t c;
     uint8_t f;
@@ -103,7 +151,12 @@ static void setCellContext(void)
      * the robot does. Derived rather than configured: it is a consequence of
      * the cell pitch and where the sensors are bolted, and two constants that
      * can disagree about the same fact is one too many. */
-    c.cross_cm = NAV_CELL_CM * 0.5f - TOF_SIDE_AHEAD_CM;
+    /* `start_offset_cm` is how far BEFORE this cell's centre the segment
+     * begins, which is CELL_DECISION_OFFSET_CM on a chained move and zero from
+     * a standstill. It has to be added, because every distance the follower is
+     * given is measured from the start of the segment and the boundary is not
+     * where it would be if the robot had started at the centre. */
+    c.cross_cm = start_offset_cm + NAV_CELL_CM * 0.5f - TOF_SIDE_AHEAD_CM;
 
     WallFollow_SetCells(&c);
 }
@@ -117,6 +170,17 @@ static void setCellContext(void)
  * as a decision trace rather than a list of places the robot happened to be. */
 void CellMotion_Observe(WallReading_t *w, uint8_t write_map)
 {
+    /* The vote only means anything standing still: five sweeps taken while
+     * moving are five different places, not five looks at one. A driver that
+     * calls this is asking for the careful answer and is going to pay for it.
+     *
+     * This is also what keeps the reactive navigator on the old behaviour
+     * without a line of change -- it observes at every cell, so it never
+     * chains, which is exactly what it did before. */
+    (void)stopAtCell();
+
+    tm_chain_stop_reads++;
+
     Motor_Brake();
     HAL_Delay(NAV_SETTLE_MS);
 
@@ -143,6 +207,18 @@ static void afterTurn(void)
 {
     ToF_ResetFilterAll();
     WallFollow_Reset();
+
+    /* turnLeftAngle()/turnRightAngle() reset the encoders, so the distance
+     * axis the chain measures against has just been rebuilt underneath it.
+     * Re-anchor on the new one: the robot is standing at a cell centre, which
+     * is the one place this can be stated rather than estimated.
+     *
+     * The in-flight reading goes with it. It is in robot-relative terms --
+     * front, left, right -- and the robot no longer faces the way it did when
+     * they were taken. */
+    s_rolling      = 0U;
+    s_flight_ok    = 0U;
+    s_chain_ref_cm = Encoder_getAverageDistance();
 
     /* The carried residual is an error ALONG the direction of travel. A pivot
      * makes that axis the new lateral axis, where this number means nothing --
@@ -171,11 +247,26 @@ void CellMotion_BeginRun(void)
     TurnController_ResetYaw();   /* start of run: heading origin is here */
 
     tm_maze_residual_cm = 0.0f;
+
+    /* TurnController_ResetYaw() resets the encoders, so the run's distance
+     * axis starts here and the robot is standing at the origin cell's centre
+     * by definition. */
+    s_rolling             = 0U;
+    s_flight_ok           = 0U;
+    s_chain_ref_cm        = Encoder_getAverageDistance();
+    s_gap_mark_ms         = HAL_GetTick();
+    tm_chain_gap_ms_max   = 0U;
+    tm_chain_segments     = 0U;
+    tm_chain_flight_reads = 0U;
+    tm_chain_stop_reads   = 0U;
 }
 
 
 void CellMotion_EndRun(void)
 {
+    /* However the run ended, it must not end with the robot still rolling. */
+    (void)stopAtCell();
+
     Motor_Brake();
 
 #if MAZE_TOF_CONTINUOUS
@@ -186,10 +277,16 @@ void CellMotion_EndRun(void)
 
 uint8_t CellMotion_TurnLeft(void)
 {
+    /* A PIVOT FROM A ROLLING START IS AN ARC, and an arc through a maze cell
+     * ends in a wall. Chained motion leaves the robot travelling at every cell
+     * it does not need to stop at, so this is where "it turns out we do need
+     * to stop" gets acted on. Costs nothing when the robot is already still. */
+    if (!stopAtCell()) return 0U;
+
     if (!turnLeftAngle(90.0f)) return 0U;
 
     Motor_Brake();
-    HAL_Delay(NAV_SETTLE_MS);
+    HAL_Delay(NAV_PIVOT_SETTLE_MS);
     afterTurn();
 
     return 1U;
@@ -198,11 +295,129 @@ uint8_t CellMotion_TurnLeft(void)
 
 uint8_t CellMotion_TurnRight(void)
 {
+    if (!stopAtCell()) return 0U;
+
     if (!turnRightAngle(90.0f)) return 0U;
 
     Motor_Brake();
-    HAL_Delay(NAV_SETTLE_MS);
+    HAL_Delay(NAV_PIVOT_SETTLE_MS);
     afterTurn();
+
+    return 1U;
+}
+
+
+/* ==================== COMING TO REST AT A CELL CENTRE ====================
+ *
+ * The other half of chained motion. A chained forward deliberately stops
+ * driving CELL_DECISION_OFFSET_CM short of the centre and hands the robot over
+ * still moving; this drives that last stretch and stops.
+ *
+ * IT IS CALLED FROM EVERYTHING THAT NEEDS THE ROBOT STILL -- both pivots,
+ * CellMotion_Observe(), and the end of a run -- rather than from the drivers,
+ * so no caller can forget. A pivot from a rolling start would carve an arc
+ * through a wall, and there is no sensible way to recover from that.
+ *
+ * THE DISTANCE IS MEASURED, NOT ASSUMED. Whatever the robot did during the
+ * solver's think-time has already happened and is already in the odometer, so
+ * asking where it is now is both simpler and more honest than budgeting for
+ * it. If it has somehow gone past the centre there is nothing useful to do --
+ * this chassis has no reverse -- so it stops where it is and lets the residual
+ * carry say so. */
+static uint8_t stopAtCell(void)
+{
+    if (!s_rolling) return 1U;
+
+    s_rolling = 0U;
+
+    /* Count the open-loop stretch the solver cost, as the number that says
+     * whether CELL_DECISION_MARGIN_CM is still buying enough. */
+    const uint32_t gap = HAL_GetTick() - s_gap_mark_ms;
+
+    if (gap > tm_chain_gap_ms_max) tm_chain_gap_ms_max = gap;
+
+    const float remaining = s_chain_ref_cm - Encoder_getAverageDistance();
+    uint8_t     ok        = 1U;
+
+    if (remaining > 0.1f) {
+
+        StraightMove_t mv = {
+            .distance_cm      = remaining,
+            /* NO ALIGNMENT HERE. The long segment that preceded this one owns
+             * the front-wall correction and has already applied it; a second
+             * one over the last few centimetres would correct the same error
+             * twice. There is no room for it either -- braking from cruise
+             * takes most of this distance. */
+            .front_target_mm  = 0.0f,
+            .entry_speed_cms  = CELL_CHAIN_SPEED_CMS,
+            .exit_speed_cms   = 0.0f,
+            .keep_wall_follow = 1U,
+            .keep_odometry    = 1U,
+            .wall_window_cm   = -1.0f,
+            .wall_centre_cm   = 0.0f,
+        };
+
+        /* The robot is standing one braking offset short of THIS cell's
+         * centre, which is what the follower needs in order to work out when
+         * its side sensors cross into the next one. They will not, over a
+         * stretch this short -- and saying so correctly is cheaper than
+         * relying on it. */
+        setCellContext(CELL_DECISION_OFFSET_CM);
+
+        ok = runForwardMove(&mv);
+    }
+
+    Motor_Brake();
+
+    /* The stop segment ends on a settle check -- five cycles under
+     * STRAIGHT_SETTLE_SPEED_CMS -- so the robot is stopped, but a light
+     * chassis is still swinging on its wheels for a moment after that, and a
+     * pivot is usually the next thing to happen. */
+    HAL_Delay(NAV_PIVOT_SETTLE_MS);
+
+    /* Standing at the centre by definition now: whatever gap is left is error
+     * the next move inherits, and it is reported the same way it always was. */
+    tm_maze_residual_cm = s_chain_ref_cm - Encoder_getAverageDistance();
+
+    if (tm_maze_residual_cm >  NAV_RESIDUAL_LIMIT_CM)
+        tm_maze_residual_cm =  NAV_RESIDUAL_LIMIT_CM;
+    if (tm_maze_residual_cm < -NAV_RESIDUAL_LIMIT_CM)
+        tm_maze_residual_cm = -NAV_RESIDUAL_LIMIT_CM;
+
+    s_chain_ref_cm = Encoder_getAverageDistance() + tm_maze_residual_cm;
+
+    return ok;
+}
+
+
+uint8_t CellMotion_StopAtCell(void)
+{
+    return stopAtCell();
+}
+
+
+uint8_t CellMotion_FlightWalls(WallReading_t *w)
+{
+    if (!s_flight_ok || w == 0) return 0U;
+
+    *w = s_flight.w;
+
+    /* PUBLISH THEM WHERE THE STATIONARY READ PUBLISHES ITS OWN, so the per-cell
+     * trace records the same three columns whichever path produced them and a
+     * log can be read without knowing which. The vote counts are rescaled to
+     * the stationary read's five, because that is what the trace's three-bit
+     * fields hold and what every existing log means by them. */
+    wall_front_mm = s_flight.front_mm;
+    wall_left_mm  = s_flight.left_mm;
+    wall_right_mm = s_flight.right_mm;
+
+    const uint8_t n = s_flight.samples ? s_flight.samples : 1U;
+
+    wall_front_votes = (uint8_t)((s_flight.front_votes * WALL_SENSE_SAMPLES) / n);
+    wall_left_votes  = (uint8_t)((s_flight.left_votes  * WALL_SENSE_SAMPLES) / n);
+    wall_right_votes = (uint8_t)((s_flight.right_votes * WALL_SENSE_SAMPLES) / n);
+
+    tm_chain_flight_reads++;
 
     return 1U;
 }
@@ -210,20 +425,93 @@ uint8_t CellMotion_TurnRight(void)
 
 uint8_t CellMotion_Forward(void)
 {
-    /* Aim at one cell pitch PLUS whatever the last move left short, so the
-     * shortfall is corrected instead of accumulating. */
-    const float target_cm = NAV_CELL_CM + tm_maze_residual_cm;
+#if MAZE_CONTINUOUS_CELLS
 
-    setCellContext();
+    /* WHERE THIS SEGMENT MUST END, on the run's own odometer: the decision
+     * point of the cell being entered, which is one cell pitch past this
+     * cell's centre less the braking offset.
+     *
+     * Written this way -- one expression, valid whether the robot is standing
+     * at a centre or already rolling -- because the two cases differ only in
+     * where the robot happens to be now, and that is already in the odometer.
+     * Spelling them out separately is how the two get to disagree. */
+    if (s_rolling) {
+        /* Open-loop for as long as the solver took. Harmless between two
+         * forwards -- the segment length below is worked out from where the
+         * robot actually is, so the travel is absorbed rather than lost -- but
+         * it is the same clock that decides whether there is room to stop, so
+         * it is worth seeing either way. */
+        const uint32_t gap = HAL_GetTick() - s_gap_mark_ms;
 
-    const uint8_t ok = runForwardFused(target_cm);
+        if (gap > tm_chain_gap_ms_max) tm_chain_gap_ms_max = gap;
+    }
+
+    const float end_cm   = s_chain_ref_cm + NAV_CELL_CM - CELL_DECISION_OFFSET_CM;
+    const float start_cm = Encoder_getAverageDistance();
+
+    float distance = end_cm - start_cm;
+
+    /* A move that has been asked for something absurd -- a residual that ran
+     * away, an odometer that jumped -- drives a sane cell instead of whatever
+     * the arithmetic said. The clamp is the same one the residual carry has
+     * always had, applied to the same quantity. */
+    const float nominal = NAV_CELL_CM - (s_rolling ? 0.0f : CELL_DECISION_OFFSET_CM);
+
+    if (distance > nominal + NAV_RESIDUAL_LIMIT_CM)
+        distance = nominal + NAV_RESIDUAL_LIMIT_CM;
+    if (distance < nominal - NAV_RESIDUAL_LIMIT_CM)
+        distance = nominal - NAV_RESIDUAL_LIMIT_CM;
+
+    const float start_offset = s_rolling ? CELL_DECISION_OFFSET_CM : 0.0f;
+
+    setCellContext(start_offset);
+
+    StraightMove_t mv = {
+        .distance_cm      = distance,
+        /* The segment ends short of the centre, so the wall it is aiming to
+         * finish in front of is that much further away than the figure the
+         * stationary alignment uses. */
+        .front_target_mm  = WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM * 10.0f,
+        .entry_speed_cms  = s_rolling ? CELL_CHAIN_SPEED_CMS : 0.0f,
+        .exit_speed_cms   = CELL_CHAIN_SPEED_CMS,
+        .keep_wall_follow = s_rolling,
+        /* ALWAYS, including the segment that starts from rest: the chain's
+         * distance axis spans a whole corridor and is only re-anchored by a
+         * pivot, which resets the encoders itself. */
+        .keep_odometry    = 1U,
+        /* Sampling starts where the side sensors cross into the cell being
+         * entered -- the same boundary the follower's cell veto uses, and half
+         * a centimetre past it so no sample straddles the gap in the wall. */
+        .wall_window_cm   = start_offset + NAV_CELL_CM * 0.5f
+                            - TOF_SIDE_AHEAD_CM + 0.5f,
+        .wall_centre_cm   = distance + CELL_DECISION_OFFSET_CM,
+    };
+
+    const uint8_t ok = runForwardMove(&mv);
+
+    tm_chain_segments++;
+
+    if (!ok) {
+        Motor_Brake();
+        s_rolling      = 0U;
+        s_flight_ok    = 0U;
+        s_chain_ref_cm = Encoder_getAverageDistance();
+        tm_maze_residual_cm = 0.0f;
+        return 0U;
+    }
+
+    s_rolling     = 1U;
+    s_gap_mark_ms = HAL_GetTick();
+
+    /* The cell the pose is about to name has moved on by one pitch. */
+    s_chain_ref_cm += NAV_CELL_CM;
 
     /* !! THE TWO CORRECTIONS MUST NOT BOTH FIRE !!
      *
      * The carry exists because the encoders quietly lose ground every move.
      * The front-wall alignment exists because the encoders cannot know where
-     * the cell boundaries are. When the alignment fires it has ALREADY put the
-     * robot where it belongs, measured against a wall -- so the gap the
+     * the cell boundaries are. When the alignment has fired it has ALREADY put
+     * the robot where it belongs, measured against a wall -- so the gap the
      * encoders report is not an error left over, it IS the correction, and
      * carrying it into the next move applies the same correction twice.
      *
@@ -231,7 +519,57 @@ uint8_t CellMotion_Forward(void)
      * against an 87 mm target, so within a millimetre of perfect, while
      * reporting 2.18 and 3.00 cm of shortfall. Both were carried forward, the
      * next move overran by that much, and after the following turn it came
-     * back as lateral error. */
+     * back as lateral error.
+     *
+     * Chained, "believe the wall" means re-anchoring the whole distance axis
+     * on where the robot actually is, which is what this does. */
+    const float here = Encoder_getAverageDistance() + CELL_DECISION_OFFSET_CM;
+
+    if (sl_align_applied) {
+        s_chain_ref_cm      = here;
+        tm_maze_residual_cm = 0.0f;
+    }
+    else {
+        float err = s_chain_ref_cm - here;
+
+        if (err >  NAV_RESIDUAL_LIMIT_CM) err =  NAV_RESIDUAL_LIMIT_CM;
+        if (err < -NAV_RESIDUAL_LIMIT_CM) err = -NAV_RESIDUAL_LIMIT_CM;
+
+        s_chain_ref_cm      = here + err;
+        tm_maze_residual_cm = err;
+    }
+
+    /* The walls of the cell just entered, if enough rotations landed inside
+     * the window. Too few is not a reason to guess -- the caller falls back to
+     * stopping and voting, which is slow and right. */
+    s_flight_ok = (sl_flight_samples >= WALL_FLIGHT_MIN_SAMPLES) ? 1U : 0U;
+
+    if (s_flight_ok) {
+        s_flight.w.front    = sl_flight_front;
+        s_flight.w.left     = sl_flight_left;
+        s_flight.w.right    = sl_flight_right;
+        s_flight.front_mm   = sl_flight_front_mm;
+        s_flight.left_mm    = sl_flight_left_mm;
+        s_flight.right_mm   = sl_flight_right_mm;
+        s_flight.front_votes = sl_flight_front_votes;
+        s_flight.left_votes  = sl_flight_left_votes;
+        s_flight.right_votes = sl_flight_right_votes;
+        s_flight.samples     = sl_flight_samples;
+    }
+
+    return 1U;
+
+#else
+
+    /* Aim at one cell pitch PLUS whatever the last move left short, so the
+     * shortfall is corrected instead of accumulating. */
+    const float target_cm = NAV_CELL_CM + tm_maze_residual_cm;
+
+    setCellContext(0.0f);
+
+    const uint8_t ok = runForwardFused(target_cm);
+
+    /* !! THE TWO CORRECTIONS MUST NOT BOTH FIRE !! -- see the note above. */
     float left_over = sl_align_applied
                     ? 0.0f
                     : (target_cm - Encoder_getAverageDistance());
@@ -242,4 +580,6 @@ uint8_t CellMotion_Forward(void)
     tm_maze_residual_cm = left_over;
 
     return ok;
+
+#endif /* MAZE_CONTINUOUS_CELLS */
 }
