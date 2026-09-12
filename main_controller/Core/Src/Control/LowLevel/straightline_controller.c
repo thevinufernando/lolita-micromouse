@@ -360,11 +360,29 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
     MotionProfile_Init(&dist_profile, distance_cm,
                        STRAIGHT_PROFILE_MAX_CMS, STRAIGHT_PROFILE_ACCEL_CMS2);
 
-    /* The endpoint, which front-wall alignment may move once. align_offset_cm
-     * translates the profile by the same amount so its ramps still land on the
-     * new endpoint; translation leaves velocity and acceleration untouched. */
+    /* The endpoint, which front-wall alignment may move once.
+     *
+     * THE PROFILE IS REBUILT, NOT TRANSLATED, and the difference is not
+     * cosmetic. The old version added the correction to the profile's output,
+     * which moves its ORIGIN by the same amount as its endpoint -- so a
+     * correction that shortens the move commands the robot BACKWARDS before it
+     * has gone anywhere. Measured: a -2.70 cm correction started the reference
+     * at -2.58, the command sat at -45 for 300 ms, and stiction held the robot
+     * still for 800.
+     *
+     * Standing still is not the expensive part. The lateral loop ramps its
+     * tilt during those 800 ms, and a heading correction with no forward
+     * motion is not a translation, it is a PIVOT -- the robot turned 1.6
+     * degrees on the spot and entered the cell already yawed, which is the
+     * opposite of what the alignment exists to achieve.
+     *
+     * So the new endpoint gets a new profile, anchored at the reference
+     * position the move has already reached. align_base_cm is where that
+     * profile starts and align_t0_s is when, and both are zero until the
+     * alignment fires. */
     float   target_cm        = distance_cm;
-    float   align_offset_cm  = 0.0f;
+    float   align_base_cm    = 0.0f;
+    float   align_t0_s       = 0.0f;
     uint8_t align_tried      = (front_target_mm > 0.0f) ? 0U : 1U;
 
     sl_align_delta_cm = 0.0f;
@@ -440,9 +458,14 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
         float measured   = Encoder_getAverageDistance();
         float elapsed_s  = (float)(now - start_ms) * 0.001f;
-        float ref_pos    = MotionProfile_Position(&dist_profile, elapsed_s)
-                           + align_offset_cm;
-        float ref_vel    = MotionProfile_Velocity(&dist_profile, elapsed_s);
+
+        /* Profile time, which is move time until the alignment rebuilds the
+         * profile and restarts its clock. */
+        float prof_t_s   = elapsed_s - align_t0_s;
+
+        float ref_pos    = align_base_cm
+                           + MotionProfile_Position(&dist_profile, prof_t_s);
+        float ref_vel    = MotionProfile_Velocity(&dist_profile, prof_t_s);
 
         sl_ref_cm = ref_pos;
 
@@ -522,9 +545,37 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
                     float new_target = measured + to_go_cm;
                     float delta      = new_target - target_cm;
 
-                    if (fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM) {
-                        target_cm        += delta;
-                        align_offset_cm  += delta;
+                    /* What is left to travel from where the REFERENCE has
+                     * reached, not from where the robot has. Anchoring on the
+                     * reference is what keeps it continuous: anchoring on the
+                     * robot would step the reference back by however far it
+                     * currently lags, which is the same defect in a smaller
+                     * size. */
+                    float remaining = new_target - ref_pos;
+
+                    /* Refuse a correction that would make the rest of the move
+                     * run backwards. It cannot happen from the first quarter
+                     * of a move with a 4 cm limit, but a reference that has
+                     * already passed the new endpoint has nothing useful to
+                     * do with this and reversing is never the answer. */
+                    if (fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM
+                        && remaining * distance_cm > 0.0f) {
+
+                        target_cm = new_target;
+
+                        /* New profile from here, and a clock to match. Its
+                         * velocity restarts from zero, which is why the
+                         * alignment is confined to the opening of the move --
+                         * there the reference is barely moving and the
+                         * discontinuity is in a term the position loop covers
+                         * easily. Position itself never jumps. */
+                        align_base_cm = ref_pos;
+                        align_t0_s    = elapsed_s;
+
+                        MotionProfile_Init(&dist_profile, remaining,
+                                           STRAIGHT_PROFILE_MAX_CMS,
+                                           STRAIGHT_PROFILE_ACCEL_CMS2);
+
                         sl_align_delta_cm = delta;
                         sl_align_applied  = 1U;
                         align_tried       = 1U;
@@ -568,7 +619,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
          * is precisely when flooring is most harmful. turn_controller already
          * guards this with TURN_PROFILE_FLOOR_DPS; the straight path never got
          * the same gate. */
-        float ref_acc = MotionProfile_Acceleration(&dist_profile, elapsed_s);
+        float ref_acc = MotionProfile_Acceleration(&dist_profile, prof_t_s);
 
         /* The rule is "floor the command unless the profile is braking", and
          * braking is exactly when reference velocity and acceleration disagree
@@ -598,7 +649,7 @@ static uint8_t runFused(float distance_cm, float front_target_mm)
 
         prev_measured = measured;
 
-        const uint8_t profile_done = (elapsed_s >= MotionProfile_Duration(&dist_profile));
+        const uint8_t profile_done = (prof_t_s >= MotionProfile_Duration(&dist_profile));
         const uint8_t short_of_it  = (fabsf(measured - target_cm) >= DISTANCE_TOLERANCE_CM);
 
         if (profile_done && short_of_it && travelled < still_threshold) {

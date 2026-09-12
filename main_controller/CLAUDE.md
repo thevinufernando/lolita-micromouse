@@ -528,6 +528,53 @@ accident.
 
 ## Change log
 
+### 2026-09-12 (head) - The alignment was commanding the robot backwards
+
+The round-robin poll did what it was meant to: every cycle 10-13 ms, nothing
+over 25, the loop running free for a whole move. The run reached 43 cells
+against 29 the time before and failed only on its last turn. Front-wall stops
+held at 73-91 mm, mean 85, across 19 cells.
+
+**With the loop fast, a defect that had always been there became visible.** The
+front-wall alignment added its correction to the profile's OUTPUT, which moves
+the origin by the same amount as the endpoint. A correction that shortens the
+move therefore commands the robot backwards before it has gone anywhere:
+
+    t(ms)   ref_cm   act_cm    base   steer      yaw
+      110    -2.58     0.00   -45.0   -12.3  -1444.71
+      322    -1.66     0.01    45.0   -35.6  -1444.85
+      832     3.12     0.24   137.6   -33.4  -1446.29
+
+Standing still was not the expensive part -- stiction held the robot, so it
+never actually reversed. The expensive part is that the lateral loop ramps its
+tilt through those 800 ms, and a heading correction with no forward motion is
+not a translation, it is a PIVOT. The robot turned 1.6 degrees on the spot and
+entered the cell already yawed, which is the opposite of what the alignment
+exists to do. It bites on every negative correction, and therefore on the turn
+cells, which are the ones with a front wall to align against.
+
+The profile is now REBUILT rather than translated: a new profile for what
+remains, anchored at the reference position the move has already reached, with
+a clock to match. Anchoring on the reference rather than on the robot is the
+part worth stating -- anchoring on the robot would step the reference back by
+however far it currently lags, which is the same defect in a smaller size.
+
+Its velocity restarts from zero, which is why the alignment stays confined to
+the opening of a move: there the reference is barely moving and the
+discontinuity lands in a term the position loop covers easily. Position itself
+never jumps, and that is the property the distance loop actually closes on.
+
+`motion_profile_host_test.c` pins it, including a check that reproduces the old
+translation and asserts it does step backwards, so the defect cannot return
+quietly.
+
+Still open after this run: the robot ran 23-28 mm toward the left wall for six
+cells in the bottom-left corridor and could not recover inside a cell, with the
+loop holding -5.76 of learned drift plus a pinned -10 of tilt. The 16 degree
+heading errors there are the commanded state, not error. And 11 stale ToF drops
+appeared for the first time -- a sensor going 120 ms without producing, 11 times
+in about 25000 reads.
+
 ### 2026-09-12 (current) - A taper instead of a cliff, and the poll unbunched
 
 The anti-windup worked: the integral stayed between +0.92 and -2.14 across 28

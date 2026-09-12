@@ -108,6 +108,57 @@ int main(void)
     check_true("zero accel is not NaN", !isnan(MotionProfile_Position(&p, 1.0f)), "handled");
     check_true("NULL is safe", MotionProfile_Position(0, 1.0f) == 0.0f, "returns 0");
 
+    /* ---- RETARGETING MID-MOVE: rebuild, never translate ----
+     *
+     * The front-wall alignment moves a move's endpoint once it can see the
+     * wall. The obvious implementation adds the correction to the profile's
+     * output, and it is wrong: that shifts the ORIGIN by the same amount as
+     * the endpoint, so a correction that SHORTENS the move commands the robot
+     * backwards before it has gone anywhere. Measured on the robot: a -2.70 cm
+     * correction started the reference at -2.58 and the command sat at -45 for
+     * 300 ms.
+     *
+     * Rebuilding from the reference position already reached keeps the
+     * reference continuous, which is the property that actually matters --
+     * the position loop closes on it, and a step backwards in it is a command
+     * to reverse. */
+    {
+        const float V = 10.0f, A = 20.0f;
+        const float original = 19.2f, correction = -2.70f;
+
+        MotionProfile_Init(&p, original, V, A);
+
+        const float t_align  = 0.11f;                        /* as observed */
+        const float ref_at   = MotionProfile_Position(&p, t_align);
+        const float new_end  = original + correction;
+
+        /* The rejected approach, for the record. */
+        const float translated = MotionProfile_Position(&p, 0.0f) + correction;
+        check_true("translating the profile does step the reference back",
+                   translated < 0.0f, "reproduces the defect");
+
+        /* The rebuild. */
+        MotionProfile_t q;
+        MotionProfile_Init(&q, new_end - ref_at, V, A);
+
+        check("rebuilt reference starts exactly where it was",
+              ref_at + MotionProfile_Position(&q, 0.0f), ref_at, 1e-6f);
+        check_true("and never goes backwards from there",
+                   ref_at + MotionProfile_Position(&q, 0.01f) >= ref_at,
+                   "monotonic");
+        check("and still lands on the corrected endpoint",
+              ref_at + MotionProfile_Position(&q, MotionProfile_Duration(&q)),
+              new_end, 1e-3f);
+
+        /* A correction that LENGTHENS the move must work the same way. */
+        MotionProfile_t r;
+        const float longer = original + 2.74f;
+        MotionProfile_Init(&r, longer - ref_at, V, A);
+        check("a lengthening correction lands too",
+              ref_at + MotionProfile_Position(&r, MotionProfile_Duration(&r)),
+              longer, 1e-3f);
+    }
+
     printf("\n===== %s (%d failures) =====\n\n",
            failures ? "FAILURES" : "ALL CHECKS PASSED", failures);
     return failures ? 1 : 0;
