@@ -571,12 +571,6 @@ uint8_t runForwardMove(const StraightMove_t *mv)
     float   align_t0_s       = 0.0f;
     uint8_t align_tried      = (front_target_mm > 0.0f) ? 0U : 1U;
 
-    /* Corroboration state for the front-wall alignment: the previous reading
-     * and how many consecutive samples have agreed with each other. Per-move,
-     * because the alignment is per-move. */
-    uint16_t align_prev_mm    = 0U;
-    uint8_t  align_prev_valid = 0U;
-    uint8_t  align_agree_n    = 0U;
 
     sl_align_delta_cm = 0.0f;
     sl_align_applied  = 0U;
@@ -893,56 +887,39 @@ uint8_t runForwardMove(const StraightMove_t *mv)
 
                 uint16_t f = m[TOF_FRONT].distance_mm;
 
-                /* ONE READING MUST NOT DECIDE WHERE THE MOVE ENDS.
+                /* REVERTED 2026-09-19: a consecutive-agreement gate was
+                 * tried here and KILLED the alignment outright --
+                 * sl_align_applied read 0 for a whole run and the robot drove
+                 * into front walls. Kept as a comment because the reasoning
+                 * looked sound and someone will think of it again.
                  *
-                 * The alignment fires ONCE per move and permanently moves the
-                 * endpoint, so a single bad front sample is not averaged away
-                 * by anything -- it is committed. That is the mechanism behind
-                 * "sometimes it stops well, sometimes far too close": the
-                 * stop point is set by whichever sample happened to arrive at
-                 * the moment every gate opened.
+                 * It required two successive front readings within 12 mm. That
+                 * fails for reasons that are not about noise at all:
                  *
-                 * The reading is already median+EMA filtered, but that is not
-                 * enough here for two reasons. Approaching at cruise the true
-                 * distance moves several mm between updates, so the EMA is
-                 * always trailing a moving target rather than settling on a
-                 * static one. And the filter's jump detector deliberately
-                 * SNAPS to the raw value on a large step -- which is exactly
-                 * what a front wall coming into range looks like -- so the
-                 * sample available right then can be unfiltered.
+                 *  - The check runs once per ToF rotation (50 ms) and the robot
+                 *    closes ~7 mm in that time, so the reading is SUPPOSED to
+                 *    change between samples. Agreement and approach are in
+                 *    direct conflict.
+                 *  - TOF_FILTER_EMA_ALPHA is 0.2, so on a ramp the filtered
+                 *    value lags far behind and its per-update step keeps
+                 *    changing as the EMA catches up.
+                 *  - The filter's jump detector SNAPS to the raw value on a
+                 *    large step, which is exactly what a front wall entering
+                 *    range looks like -- resetting the agreement count at the
+                 *    one moment the alignment most needs to fire.
                  *
-                 * So require CONSECUTIVE readings that agree. Two samples
-                 * within WALL_FRONT_ALIGN_AGREE_MM of each other cannot both
-                 * be the same outlier, and at a 50 ms update the corroboration
-                 * costs one cycle -- about 7 mm of approach, which the room
-                 * test already has margin for. A disagreement resets the
-                 * count, so a noisy patch simply defers the alignment to a
-                 * calmer sample rather than acting on the noise. */
-                uint8_t agrees = 0U;
-
-                if (m[TOF_FRONT].valid && f != TOF_DISTANCE_INVALID) {
-                    if (align_prev_valid
-                        && fabsf((float)f - (float)align_prev_mm)
-                               <= (float)WALL_FRONT_ALIGN_AGREE_MM) {
-                        if (align_agree_n < 255U) align_agree_n++;
-                    } else {
-                        align_agree_n = 1U;   /* this sample is the new first */
-                    }
-
-                    align_prev_mm    = f;
-                    align_prev_valid = 1U;
-                } else {
-                    /* An invalid reading breaks the chain: the next good one
-                     * has nothing to be corroborated against. */
-                    align_agree_n    = 0U;
-                    align_prev_valid = 0U;
-                }
-
-                agrees = (align_agree_n >= WALL_FRONT_ALIGN_AGREE_N) ? 1U : 0U;
+                 * The gate therefore opened only late and slow, when the
+                 * demanded correction had grown past WALL_FRONT_ALIGN_MAX_CM,
+                 * so it was then refused as SL_ALIGN_BIG_DELTA. Net effect:
+                 * no alignment at all, on any cell, for the entire run.
+                 *
+                 * If single-sample noise is ever worth attacking again, do it
+                 * where the SAMPLE is produced -- a dedicated front-sensor
+                 * filter tuned for a closing target -- not by gating the one
+                 * decision that has to happen while the robot is moving. */
 
                 if (m[TOF_FRONT].valid
                     && f != TOF_DISTANCE_INVALID
-                    && agrees
                     && f <= WALL_FRONT_ALIGN_RANGE_MM) {
 
                     /* Signed travel still needed for the sensor to read the

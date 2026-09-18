@@ -1509,7 +1509,7 @@
  * holding measure, and past about 85 the robot stops so far short that the
  * following move's odometry error becomes the larger problem.
  */
-#define WALL_FRONT_ALIGN_MM 70.0f
+#define WALL_FRONT_ALIGN_MM 80.0f
 
 /* Only align when the front reading is at or below this.
  *
@@ -1519,30 +1519,13 @@
  * 350 the first engages and the second does not, with wide margin either
  * side, so no extra logic is needed to decide whether the wall is in the cell
  * the robot is entering. */
-/* ---- Corroboration before the alignment commits ----
- *
- * The alignment fires ONCE per move and permanently moves the endpoint, so a
- * single bad front sample is committed rather than averaged away. That is the
- * mechanism behind stops that are sometimes good and sometimes far too close:
- * the endpoint is set by whichever sample arrived when every gate opened.
- *
- * Filtering alone does not cover it. Approaching at cruise the true distance
- * moves several mm per update, so the EMA trails a moving target; and the
- * filter's jump detector SNAPS to the raw value on a large step, which is
- * exactly what a front wall entering range looks like.
- *
- * So require consecutive readings that agree. Two samples within
- * WALL_FRONT_ALIGN_AGREE_MM cannot both be the same outlier.
- *
- * COST: one extra update, ~7 mm of approach at cruise, which the room test
- * already has margin for. A disagreement resets the count, so a noisy patch
- * defers the alignment to a calmer sample rather than acting on noise.
- *
- * RAISE _AGREE_N for more confidence at the cost of aligning later. RAISE
- * _AGREE_MM if the alignment stops firing at all (sl_align_reason will say
- * SL_ALIGN_TOO_FAR or NO_ROOM because the window closed while waiting). */
-#define WALL_FRONT_ALIGN_AGREE_N  2U
-#define WALL_FRONT_ALIGN_AGREE_MM 12U
+/* A corroboration gate on the front reading (two consecutive samples within
+ * 12 mm before the alignment may commit) was added and REVERTED on
+ * 2026-09-19. It killed the alignment outright -- sl_align_applied was 0 for a
+ * whole run and the robot drove into front walls. The reasoning and the
+ * arithmetic that defeats it are recorded at the call site in
+ * straightline_controller.c and pinned by wall_follow_host_test.c. */
+
 
 #define WALL_FRONT_ALIGN_RANGE_MM 350U
 

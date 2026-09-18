@@ -625,6 +625,61 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (newest) - I killed the front alignment. Reverted.
+
+The corroboration gate added earlier today made front-wall behaviour WORSE,
+exactly as reported. The logs say so without ambiguity:
+
+```
+sl_align_applied   0        <- it never fired, on any cell, all run
+sl_align_delta_cm  0.00
+sl_align_reason    4        = SL_ALIGN_BIG_DELTA
+tm_maze_trace_count 22 cells, wedged at (6,8) with front = 256 mm
+```
+
+**Why the gate could never work**, and it is not about noise:
+
+- The align check runs once per ToF rotation (50 ms) and the robot closes
+  ~7 mm in that time. The reading is SUPPOSED to change between samples, so
+  "consecutive readings must agree" is in direct conflict with approaching.
+- `TOF_FILTER_EMA_ALPHA` is 0.2, so on a ramp the filtered value lags by
+  roughly step/alpha -- about 35 mm here -- and its per-update step keeps
+  changing as the EMA catches up. Nothing settles while closing.
+- The filter's jump detector SNAPS to the raw value on a large step, which is
+  precisely what a front wall entering range looks like. It resets any
+  agreement count at the one moment the alignment most needs to fire.
+
+So the gate opened only late and slow, by which point the demanded correction
+had grown past `WALL_FRONT_ALIGN_MAX_CM` and was refused as `BIG_DELTA`. Net
+effect: plain odometry into every front wall, landing wherever accumulated
+error put it.
+
+**Reverted.** The call site keeps the reasoning as a comment and
+`wall_follow_host_test.c` now pins the arithmetic that defeats it -- the
+closing distance per check, the EMA lag exceeding the jump threshold -- so the
+idea is not re-derived from scratch. **If single-sample front noise is ever
+worth attacking again, do it where the sample is PRODUCED** (a front-specific
+filter tuned for a closing target), not by gating the one decision that has to
+happen while the robot is moving.
+
+**A compounding factor, not mine:** `WALL_FRONT_ALIGN_MM` is committed at 70,
+down from the 80 set on 2026-09-18. At 70 the pivot centre sits 108.7 mm from
+the wall face against a 77.8 mm half-diagonal -- 30.9 mm of clearance, still
+positive, so a well-placed stop clears. But with the alignment dead the stop
+was never well-placed. No alignment plus a tighter target is what produced
+contact. 70 is left as the deliberate choice it appears to be; if contact
+continues once the alignment is working again, 80 buys 10 mm back.
+
+**What this run did confirm:** the axis clamp is active -- `sl_axis_clamped`
+shows it engaging -- and the 18-degree crab did not recur.
+
+**What it did NOT fix: reference thrashing.** 41 switches over 22 cells is
+1.86 per cell, against 53 over 29 (1.83) before. Unchanged. The clamp bounds
+how far a bad reference can steer the robot; it does nothing about how often
+the reference changes. That remains the outstanding item, and hysteresis on
+the selection is the next thing to try once the alignment is confirmed
+working again.
+
 ### 2026-09-19 (newest) - It was never the turn. It was an 18 degree crab.
 
 Best run yet: 29 cells, reached the goal, identified it, blinked. Then a turn

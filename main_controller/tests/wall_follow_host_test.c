@@ -708,31 +708,39 @@ int main(void){
           "the 18 deg lean from the wedged run is now clamped away");
   }
 
-  /* ========== ONE FRONT READING MUST NOT DECIDE THE STOP POINT =========
-     The alignment fires once per move and permanently moves the endpoint, so
-     a single noisy front sample is committed rather than averaged away --
-     the reason stops were sometimes good and sometimes far too close. */
+  /* ====== WHY THERE IS NO CORROBORATION GATE ON THE ALIGNMENT ========
+     A "two consecutive front readings must agree" gate was added on
+     2026-09-19 and reverted the same day: it made sl_align_applied read 0 for
+     an entire run. These pin the arithmetic that makes such a gate
+     unworkable, so the idea is not re-tried from scratch. */
   {
-    CHECK(WALL_FRONT_ALIGN_AGREE_N >= 2U,
-          "at least two readings must agree before the endpoint moves");
-
-    /* The agreement window has to be wider than the distance the robot
-       actually closes between two updates, or no two samples ever agree and
-       the alignment never fires. */
-    const float closing_mm_per_update =
+    /* The align check runs once per ToF rotation, and the robot closes real
+       distance in that time -- the reading is SUPPOSED to change. Any
+       agreement window must therefore exceed the closing distance, which
+       immediately makes it too wide to reject the noise it was meant to
+       catch. */
+    const float closing_per_check =
         STRAIGHT_PROFILE_MAX_CMS * 10.0f * WALL_FOLLOW_UPDATE_S;
-    CHECK((float)WALL_FRONT_ALIGN_AGREE_MM > closing_mm_per_update,
-          "the agreement window exceeds the distance closed between updates");
 
-    /* But tight enough to actually reject an outlier worth rejecting. */
-    CHECK((float)WALL_FRONT_ALIGN_AGREE_MM < WALL_FRONT_ALIGN_MAX_CM * 10.0f,
-          "and is tighter than the correction the alignment may apply");
+    CHECK(closing_per_check > 5.0f,
+          "the front reading moves several mm between align checks by design");
 
-    /* The corroboration delay must not eat the approach window. */
-    const float delay_mm =
-        (float)(WALL_FRONT_ALIGN_AGREE_N - 1U) * closing_mm_per_update;
-    CHECK(delay_mm < WALL_FRONT_ALIGN_BEST_MARGIN_MM * 0.5f,
-          "and waiting for agreement costs far less than the align window");
+    /* And the filter cannot smooth that away: on a ramp an EMA lags by
+       roughly step/alpha, which here is many times the noise amplitude. */
+    const float ema_lag = closing_per_check / TOF_FILTER_EMA_ALPHA;
+    CHECK(ema_lag > 20.0f,
+          "and the EMA lags a closing target by more than any sane window");
+
+    /* Worse, the EMA lag itself exceeds the jump threshold, so when the
+       filter finally snaps to raw the output moves further in one sample
+       than any usable agreement window -- resetting the count at exactly the
+       moment the alignment most needs to fire. */
+    CHECK(ema_lag > (float)TOF_FILTER_JUMP_THRESHOLD_MM,
+          "the EMA lag exceeds the jump threshold, so a snap breaks any agreement run");
+
+    /* The guard that then refuses the late, large correction. */
+    CHECK(WALL_FRONT_ALIGN_MAX_CM > 0.0f && WALL_FRONT_ALIGN_MAX_CM < 8.0f,
+          "so a gate that only opens late gets refused as BIG_DELTA");
   }
 
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
