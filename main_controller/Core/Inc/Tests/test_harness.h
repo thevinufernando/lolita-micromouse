@@ -39,7 +39,7 @@
 #define TEST_TOF_LIVE 17         /* No motion. All 5, continuous, FOREVER.  */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_TOF_LIVE
+#define ACTIVE_TEST TEST_FLOODFILL_RUN
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */

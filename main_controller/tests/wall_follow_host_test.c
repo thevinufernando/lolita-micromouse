@@ -14,12 +14,18 @@ static float err_right(float R){ return -(R-WALL_FOLLOW_SETPOINT_RIGHT_MM); }
 /* Mirrors the WALL_FOLLOW_ANGLED branch. */
 static float err_angled(float L45,float R45){
     return (L45-R45)*0.5f*TOF_ANGLED_LATERAL_GAIN; }
-/* Forward model: what the angled pair reads for a lateral offset e (mm,
-   positive = robot displaced RIGHT) in a corridor of inner width W. */
+/* Forward model: what the angled pair READS for a lateral offset e (mm,
+   positive = robot displaced RIGHT) in a corridor of inner width W.
+   Includes TOF_NEAR_FIELD_BIAS_MM, because TOF_OFFSET_* are 0 so every
+   reading the firmware sees carries it -- and every constant compared against
+   a reading must therefore be in the same space. */
+#define TOF_NEAR_FIELD_BIAS_MM 17.0f
 static float a_left (float e){ return ((MAZE_CORRIDOR_INNER_MM*0.5f)
-    + (-(TOF_SIDE_SPAN_MM*0.5f - TOF_ANGLED_INBOARD_MM)) + e)/TOF_ANGLED_COS45; }
+    + (-(TOF_SIDE_SPAN_MM*0.5f - TOF_ANGLED_INBOARD_MM)) + e)/TOF_ANGLED_COS45
+    + TOF_NEAR_FIELD_BIAS_MM; }
 static float a_right(float e){ return ((MAZE_CORRIDOR_INNER_MM*0.5f)
-    - ( (TOF_SIDE_SPAN_MM*0.5f - TOF_ANGLED_INBOARD_MM)) - e)/TOF_ANGLED_COS45; }
+    - ( (TOF_SIDE_SPAN_MM*0.5f - TOF_ANGLED_INBOARD_MM)) - e)/TOF_ANGLED_COS45
+    + TOF_NEAR_FIELD_BIAS_MM; }
 /* Mirrors far_confidence() in wall_follow.c: 1.0 at or inside the setpoint,
    falling linearly to the floor at the usable gate. */
 static float conf_of(float reading,float setpoint){
@@ -57,15 +63,36 @@ int main(void){
   CHECK(fabsf(err_both(62,62)
               - (WALL_FOLLOW_SETPOINT_RIGHT_MM - WALL_FOLLOW_SETPOINT_LEFT_MM)*0.5f)
         < 0.01f, "both: equal readings -> ~the sensor trim");
-  /* The setpoints and the span are two views of the SAME measurement, so a
-     robot centred by the setpoints must be accepted by the pair test. Guards
-     against one being re-measured and the other left behind. */
-  CHECK(pair_ok(WALL_FOLLOW_SETPOINT_LEFT_MM, WALL_FOLLOW_SETPOINT_RIGHT_MM),
-        "setpoints and span must describe the same cell");
+  /* !! THE SETPOINTS AND THE SPAN ARE NO LONGER IN THE SAME SPACE !!
+     Until 2026-09-18 both were measured READINGS, so a robot centred by the
+     setpoints summed to the span and this test asserted exactly that. The
+     setpoints are now the TRUE geometric centre (35 mm) while the span is
+     still reading-space (104 mm), because the raw-reading thresholds have not
+     been re-derived yet -- see the note at WALL_FOLLOW_SETPOINT_LEFT_MM.
+
+     What must still hold is that a real centred robot, whose SENSORS read
+     about 52 each, is accepted by the pair test. That is the property the
+     span actually guards, and it is unaffected by where the setpoint aims. */
+  {
+    const float reads_when_centred =
+        (MAZE_CORRIDOR_INNER_MM - TOF_SIDE_SPAN_MM) * 0.5f + 17.0f;
+
+    CHECK(pair_ok(reads_when_centred, reads_when_centred),
+          "a centred robot's READINGS are still accepted by the span check");
+
+    /* Span and setpoints are BOTH reading-space, so half the span is the
+       setpoint. They were briefly in different spaces and that is exactly the
+       bug this file now guards against. */
+    CHECK(fabsf((WALL_FOLLOW_SPAN_MM * 0.5f)
+                - WALL_FOLLOW_SETPOINT_LEFT_MM) < 2.0f,
+          "half the span equals the setpoint: both are readings");
+  }
   /* Single wall corrects only AWAY from a wall that is too close; a long
      reading is ambiguous at a junction and must produce no command. */
-  CHECK(err_left(40)<0,  "left only: too close to left -> move right");
-  CHECK(err_right(40)>0, "right only: too close to right -> move left");
+  CHECK(err_left(WALL_FOLLOW_SETPOINT_LEFT_MM - 12.0f)<0,
+        "left only: too close to left -> move right");
+  CHECK(err_right(WALL_FOLLOW_SETPOINT_RIGHT_MM - 12.0f)>0,
+        "right only: too close to right -> move left");
   /* CONFIDENCE IS A RAMP, and its two ends are the two things already known. */
   CHECK(conf_of(63.0f, 63.0f) == 1.0f,
         "a reading at the setpoint is certain");
@@ -137,10 +164,19 @@ int main(void){
         "both: a common +27mm over-read cancels exactly");
   CHECK(fabsf(err_left(30)-err_left(30+27))>20.0f,
         "left only: the same bias does NOT cancel");
+  /* And that non-cancelling bias is exactly what put the setpoint 17 mm out
+     until 2026-09-18 -- see the block at the end of this file. */
 
   /* the tilt always points the way the correction needs to go */
-  CHECK(tilt(err_left(40))<0, "too close to the left -> nose right");
-  CHECK(tilt(err_right(40))>0, "too close to the right -> nose left");
+  /* EXPRESSED RELATIVE TO THE SETPOINT, not as a literal. These used to say
+     40 mm, which meant "too close" only while the setpoint was 52; when it
+     moved to 35 the literal silently started meaning "too far" and the tests
+     failed for the right reason. Same rot Hiruna hit with the hard-coded
+     94 mm usable-gate case. */
+  CHECK(tilt(err_left(WALL_FOLLOW_SETPOINT_LEFT_MM - 12.0f))<0,
+        "too close to the left -> nose right");
+  CHECK(tilt(err_right(WALL_FOLLOW_SETPOINT_RIGHT_MM - 12.0f))>0,
+        "too close to the right -> nose left");
   CHECK(tilt(err_both(90,34))>0, "closer to the right wall -> nose left");
   /* THE CASCADE RULE, in symbols rather than in numbers, so the two constants
      can never drift apart again. The outer loop's output is the inner loop's
@@ -264,7 +300,8 @@ int main(void){
   /* The two freezes are independent and both must hold. A single wall reading
      SHORT is unambiguous, so it is not single_far -- only the clamp can stop
      it there, which is exactly the case above. */
-  CHECK(err_left(40) < 0.0f && err_left(90) > 0.0f,
+  CHECK(err_left(WALL_FOLLOW_SETPOINT_LEFT_MM - 12.0f) < 0.0f &&
+        err_left(WALL_FOLLOW_SETPOINT_LEFT_MM + 38.0f) > 0.0f,
         "short reads negative and long reads positive on a left wall");
 
   /* ---- THE MAP'S VETO ----
@@ -460,8 +497,8 @@ int main(void){
     }
 
     /* HEADROOM -- the whole claim of the change, both halves. */
-    CHECK(a_right(20.0f) > 30.0f,
-          "at 20 mm off centre the near ANGLED reading is still above the floor");
+    CHECK(a_right(20.0f) - TOF_NEAR_FIELD_BIAS_MM > 30.0f,
+          "at 20 mm off centre the near ANGLED beam is still above the floor");
     CHECK((MAZE_CORRIDOR_INNER_MM*0.5f) - (TOF_SIDE_SPAN_MM*0.5f) - 20.0f < 30.0f,
           "while the near SIDE reading is already below it");
 
@@ -491,6 +528,111 @@ int main(void){
           "the poll rotation covers all five sensors");
     CHECK(WALL_FOLLOW_UPDATE_S * 1000.0f < (float)TOF_MAX_SAMPLE_AGE_MS,
           "and a full rotation still completes inside the staleness cap");
+  }
+
+  /* ============ EVERYTHING THE LOOP COMPARES IS A READING ==============
+     Rewritten 2026-09-19 after the previous version asserted the opposite and
+     cost half a run.
+
+     wf_error_mm = reading - setpoint, and the readings are RAW: TOF_OFFSET_*
+     are all 0, so every reading carries the sensor's ~17 mm near-field
+     over-read. Both sides of that subtraction must live in the same space.
+     The setpoints are therefore MEASURED READINGS (52 mm), not true gaps
+     (35 mm) -- with 35 a centred robot reads 52, is told it is 17 mm too far
+     from the wall, and drives into it. That is what took 26 cells down to
+     13. */
+  {
+    const float reads_when_centred = 52.0f;   /* measured, robot centred */
+    const float true_centred =
+        (MAZE_CORRIDOR_INNER_MM - TOF_SIDE_SPAN_MM) * 0.5f;   /* 35 */
+
+    CHECK(fabsf(WALL_FOLLOW_SETPOINT_LEFT_MM - reads_when_centred) < 2.0f,
+          "left setpoint is a READING, matching what a centred robot sees");
+    CHECK(fabsf(WALL_FOLLOW_SETPOINT_RIGHT_MM - reads_when_centred) < 2.0f,
+          "and so is the right setpoint");
+
+    /* The trap, pinned so it cannot be re-introduced. */
+    CHECK(fabsf(WALL_FOLLOW_SETPOINT_LEFT_MM - true_centred) > 10.0f,
+          "the setpoint is NOT the true gap -- that mixes reading and true space");
+
+    /* A centred robot must be told it is centred. */
+    CHECK(fabsf(err_left(reads_when_centred)) < 2.0f,
+          "a centred robot following the LEFT wall reads ~zero error");
+    CHECK(fabsf(err_right(reads_when_centred)) < 2.0f,
+          "and ~zero following the RIGHT wall");
+
+    /* The bias must cancel, which is the entire reason for reading-space. */
+    CHECK(fabsf(err_left(true_centred + 17.0f)) < 2.0f,
+          "a true 35 mm gap reads 52 and still gives zero error");
+
+    /* Setpoints equal, so the two-wall difference path is untouched. */
+    CHECK(fabsf(WALL_FOLLOW_SETPOINT_LEFT_MM - WALL_FOLLOW_SETPOINT_RIGHT_MM)
+              < 0.01f,
+          "the setpoints stay equal, so the two-wall difference is unchanged");
+    CHECK(fabsf(err_both(50.0f, 30.0f) - 10.0f) < 0.01f,
+          "and the two-wall error is still half the raw difference");
+
+    /* The span check and the setpoints are both reading-space again, so a
+       centred robot's readings must satisfy both. */
+    CHECK(pair_ok(WALL_FOLLOW_SETPOINT_LEFT_MM, WALL_FOLLOW_SETPOINT_RIGHT_MM),
+          "setpoints and span describe the same cell once more");
+  }
+
+  /* ============ THE ANGLED CONSTANTS ARE READING-SPACE TOO ==============
+     Same bug, same fix. TOF_ANGLED_NOMINAL_MM was 70.7 (true geometry) while
+     the beams actually read ~88, so the pair summed to ~175 against a window
+     centred on 141 -- it sat on the very edge and was usually rejected. That
+     is why wf_side never once showed ANGLED in a real run. */
+  {
+    const float true_nominal =
+        ((MAZE_CORRIDOR_INNER_MM * 0.5f)
+         - (TOF_SIDE_SPAN_MM * 0.5f - TOF_ANGLED_INBOARD_MM)) / TOF_ANGLED_COS45;
+
+    CHECK(fabsf(TOF_ANGLED_NOMINAL_MM - (true_nominal + TOF_NEAR_FIELD_BIAS_MM)) < 2.0f,
+          "angled nominal is a READING: true geometry plus the over-read");
+    CHECK(fabsf(TOF_ANGLED_SPAN_MM - 2.0f * TOF_ANGLED_NOMINAL_MM) < 2.0f,
+          "and the angled span is twice it, so the two agree");
+
+    /* A centred robot's actual angled readings must pass the span check with
+       margin -- not sit on its edge, which is what failed before. */
+    const float centred_read = a_left(0.0f);
+    const float margin =
+        TOF_ANGLED_SPAN_TOL_MM - fabsf(2.0f * centred_read - TOF_ANGLED_SPAN_MM);
+    CHECK(margin > 20.0f,
+          "a centred robot clears the angled span check by a wide margin");
+
+    /* The pair difference is bias-immune -- the reason angled centring works
+       without any offset calibration. Both beams gain the same 17 mm. */
+    for (float e = -25.0f; e <= 25.0f; e += 5.0f) {
+      CHECK(fabsf(err_angled(a_left(e), a_right(e)) - e) < 0.05f,
+            "the angled difference still reports true lateral offset with bias");
+    }
+
+    /* Single-beam readings across the working range must sit inside the
+       one-beam window, or the new single-angled fallback never engages. */
+    for (float e = -25.0f; e <= 25.0f; e += 5.0f) {
+      CHECK(a_left(e)  >= (float)TOF_ANGLED_MIN_MM &&
+            a_left(e)  <= (float)TOF_ANGLED_MAX_MM &&
+            a_right(e) >= (float)TOF_ANGLED_MIN_MM &&
+            a_right(e) <= (float)TOF_ANGLED_MAX_MM,
+            "single angled readings stay inside the one-beam window");
+    }
+  }
+
+  /* ============ THE NEAR-FIELD GATE ON SIDE SENSORS ==================== */
+  {
+    CHECK(WALL_FOLLOW_USABLE_MIN_MM > 30U,
+          "the side floor sits ABOVE the sensor's 30 mm limit, not at it");
+    CHECK((float)WALL_FOLLOW_USABLE_MIN_MM < WALL_FOLLOW_SETPOINT_LEFT_MM,
+          "but below the setpoint, so a centred robot is never rejected");
+
+    /* The 5 mm reading that ended a run must now be refused outright. */
+    CHECK(5U < WALL_FOLLOW_USABLE_MIN_MM,
+          "the 5 mm reading from the stuck run is now rejected");
+
+    /* And the angled beam that replaces it is nowhere near its own floor. */
+    CHECK(TOF_ANGLED_NOMINAL_MM > 2.0f * 30.0f,
+          "the angled reference sits at more than twice the sensor floor");
   }
 
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);

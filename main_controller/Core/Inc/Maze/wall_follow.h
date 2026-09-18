@@ -56,7 +56,9 @@ typedef enum {
   WALL_FOLLOW_LEFT = 1,  /* one wall, measured against its setpoint     */
   WALL_FOLLOW_RIGHT = 2,
   WALL_FOLLOW_BOTH = 3,  /* centred on (L - R)/2 -- the side pair        */
-  WALL_FOLLOW_ANGLED = 4 /* centred on (L45 - R45)/2 -- PREFERRED        */
+  WALL_FOLLOW_ANGLED = 4, /* centred on (L45 - R45)/2 -- PREFERRED       */
+  WALL_FOLLOW_L45 = 5,   /* one angled beam, left  -- beats a side wall  */
+  WALL_FOLLOW_R45 = 6    /* one angled beam, right                       */
 } WallFollowSide_t;
 
 /*

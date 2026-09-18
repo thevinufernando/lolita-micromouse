@@ -134,7 +134,8 @@ void WallFollow_ResetBias(void)
  * the reading stops being used at all. The two ends of the ramp are therefore
  * the two things already known to be true, and the middle is interpolation
  * rather than invention. */
-static float far_confidence(float reading_mm, float setpoint_mm)
+static float far_confidence_to(float reading_mm, float setpoint_mm,
+                               float gate_mm)
 {
     const float far_mm = reading_mm - setpoint_mm;
 
@@ -142,7 +143,7 @@ static float far_confidence(float reading_mm, float setpoint_mm)
         return 1.0f;
     }
 
-    const float span_mm = (float)WALL_FOLLOW_USABLE_MAX_MM - setpoint_mm;
+    const float span_mm = gate_mm - setpoint_mm;
 
     if (span_mm <= 0.0f) {
         return WALL_FOLLOW_FAR_CONF_FLOOR;   /* degenerate config */
@@ -155,10 +156,36 @@ static float far_confidence(float reading_mm, float setpoint_mm)
     return 1.0f - t * (1.0f - WALL_FOLLOW_FAR_CONF_FLOOR);
 }
 
+/* The side-sensor form: ramps to the side usable gate. Kept as a wrapper so
+ * every existing call reads unchanged. */
+static float far_confidence(float reading_mm, float setpoint_mm)
+{
+    return far_confidence_to(reading_mm, setpoint_mm,
+                             (float)WALL_FOLLOW_USABLE_MAX_MM);
+}
 
+
+/* Is a SIDE reading trustworthy?
+ *
+ * The upper bound rejects a wall too far to be this cell's. The lower bound is
+ * new (2026-09-19) and is the more interesting one: the VL53L0X stops being
+ * accurate below about 30 mm, and its failure mode there is not a short
+ * reading but an ERRATIC one -- it can report well above 30 mm, differently
+ * each sample, for a target that is actually touching.
+ *
+ * That matters because a robot pressed against a wall is exactly when the
+ * follower must not be lied to. A run ended with the right sensor reporting
+ * 5 mm while the robot was against that wall; the loop was steering on a
+ * number that meant nothing.
+ *
+ * WALL_FOLLOW_USABLE_MIN_MM sits ABOVE the datasheet floor, not at it,
+ * because a reading a few mm above the floor is already in the regime where
+ * accuracy is degrading. Rejecting it costs nothing now that the angled pair
+ * can carry the correction on its own -- see angled_single_error(). */
 static uint8_t usable(const ToF_Measurement_t *m)
 {
     return (m->valid && m->distance_mm != TOF_DISTANCE_INVALID &&
+            m->distance_mm >= WALL_FOLLOW_USABLE_MIN_MM &&
             m->distance_mm <= WALL_FOLLOW_USABLE_MAX_MM) ? 1U : 0U;
 }
 
@@ -233,6 +260,24 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_TOTAL],
                     ? 1U : 0U;
     }
 
+    /* ONE ANGLED BEAM, when the pair is not available but a side wall is.
+     *
+     * This is the case a corridor with a doorway on one side produces, and it
+     * used to fall all the way through to single-wall SIDE following -- which
+     * is the weakest reference the robot has, because its setpoint carries the
+     * sensor bias and it goes unreliable exactly when the robot is closest.
+     *
+     * A single angled beam is strictly better there. It reads ~88 mm centred
+     * where the side sensor reads ~52, so it is nowhere near the near-field
+     * floor, and its sensitivity to lateral movement is 1.414x the side
+     * sensor's. It still needs a setpoint -- one beam cannot cancel its own
+     * bias -- but it is a setpoint held far from the floor.
+     *
+     * Preferred side matches whichever side wall the robot can actually see,
+     * so the two references agree about which wall is being followed. */
+    uint8_t l45_ok = angled_usable(&m[TOF_LEFT_45]);
+    uint8_t r45_ok = angled_usable(&m[TOF_RIGHT_45]);
+
     /* BOTH WALLS BEAT EITHER ONE, and it is not a small difference.
      *
      * With one wall the robot holds a measured distance from it, so the
@@ -275,8 +320,17 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_TOTAL],
     /* Angled outranks everything: it is the only reference that stays valid
      * through the lateral errors that actually need correcting. See the note
      * on WALL_FOLLOW_ANGLED in wall_follow.h. */
+    /* PREFERENCE ORDER, best reference first.
+     *
+     * Both angled beams, then both side walls, then ONE angled beam, then one
+     * side wall. The single-angled tier sits above single-side deliberately:
+     * both need a setpoint and carry the sensor bias, but the angled beam
+     * holds its reference ~88 mm out instead of ~52, well clear of the
+     * near-field floor where the side sensor becomes erratic. */
     if (angled_ok)                                         want = WALL_FOLLOW_ANGLED;
     else if (pair_ok)                                      want = WALL_FOLLOW_BOTH;
+    else if (l45_ok && left_ok)                            want = WALL_FOLLOW_L45;
+    else if (r45_ok && right_ok)                           want = WALL_FOLLOW_R45;
     else if (active_side == WALL_FOLLOW_LEFT && left_ok)   want = WALL_FOLLOW_LEFT;
     else if (active_side == WALL_FOLLOW_RIGHT && right_ok) want = WALL_FOLLOW_RIGHT;
     else if (left_ok)                                      want = WALL_FOLLOW_LEFT;
@@ -345,6 +399,40 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_TOTAL],
         wf_error_mm = ((float)m[TOF_LEFT_45].distance_mm
                        - (float)m[TOF_RIGHT_45].distance_mm)
                       * 0.5f * TOF_ANGLED_LATERAL_GAIN;
+    }
+    else if (active_side == WALL_FOLLOW_L45 || active_side == WALL_FOLLOW_R45) {
+        /* ONE angled beam against its setpoint, mirroring the single-side
+         * branches below.
+         *
+         * The reading is along the 45-degree beam, so the deviation from
+         * nominal has to be projected onto the lateral axis the same way the
+         * two-beam branch does -- multiply by cos(45). Without it this term
+         * runs 41% hot relative to every other branch, and the shared
+         * WALL_FOLLOW_KP_DEG_PER_MM no longer means the same thing in each.
+         *
+         * TOF_ANGLED_NOMINAL_MM is reading-space, so the sensor's bias
+         * cancels in the subtraction exactly as it does for the side
+         * setpoints. That is the whole reason it is expressed as a reading.
+         *
+         * Sign: a LEFT beam reading longer than nominal means the robot has
+         * drifted right, and positive error means "move left" -- so the left
+         * branch takes the difference directly and the right branch negates,
+         * matching the single-side convention. */
+        const float beam_mm = (active_side == WALL_FOLLOW_L45)
+                            ? (float)m[TOF_LEFT_45].distance_mm
+                            : (float)m[TOF_RIGHT_45].distance_mm;
+
+        const float dev = (beam_mm - TOF_ANGLED_NOMINAL_MM)
+                          * TOF_ANGLED_LATERAL_GAIN;
+
+        wf_error_mm = (active_side == WALL_FOLLOW_L45) ? dev : -dev;
+
+        /* Same far-reading doubt as a single side wall, measured on the beam's
+         * own scale. A long angled return is ambiguous for the same reason a
+         * long side return is: it cannot distinguish an off-centre robot from
+         * a wall that has ended. */
+        conf = far_confidence_to(beam_mm, TOF_ANGLED_NOMINAL_MM,
+                                 (float)TOF_ANGLED_MAX_MM);
     }
     else if (active_side == WALL_FOLLOW_BOTH) {
         /* Half the difference is the offset from centre. The setpoint term is

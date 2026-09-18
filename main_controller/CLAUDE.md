@@ -607,6 +607,146 @@ accident.
 
 ## Change log
 
+### 2026-09-19 - Everything the loop compares is a READING. I got that wrong.
+
+The 52 -> 35 setpoint change from 2026-09-18 was **wrong and made the robot
+worse**: 26 cells became 13, ending pressed against a wall with `wf_side` at
+NONE. Reverted.
+
+**Why it was wrong.** The follower computes
+
+```
+wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM
+```
+
+and `left_mm` is a RAW READING -- `TOF_OFFSET_*` are all 0, so it carries the
+full ~17 mm near-field over-read. Both sides of that subtraction have to be in
+the same space. A setpoint of 52 is what the sensor ACTUALLY SAYS when the
+robot is centred, so the bias cancels and a centred robot is told zero error. A
+setpoint of 35 mixes a biased reading with a true distance: the centred robot
+reads 52, is told it is 17 mm too FAR, and drives 17 mm INTO the wall. The
+original comment defending 52 was correct; the reasoning that replaced it was
+not.
+
+**The same mistake was in the angled constants, and it explains why angled
+centring almost never engaged.** `TOF_ANGLED_NOMINAL_MM` was 70.7 -- true
+geometry -- but the angled beams carry the same over-read, so a centred robot
+reads ~88 and the pair sums to ~175 against a window centred on 141.4. The sum
+sat 1 mm inside the tolerance edge, so any noise rejected it. `wf_side` never
+showed ANGLED in any logged run. Now reading-space throughout:
+
+| constant | was | now |
+|---|---|---|
+| `TOF_ANGLED_NOMINAL_MM` | 70.7 | **87.7** |
+| `TOF_ANGLED_SPAN_MM` | 141.4 | **175.4** |
+| `TOF_ANGLED_MIN/MAX_MM` | 25 / 130 | **35 / 150** |
+
+The lateral error maths needed no change: `(L45-R45)/2 * cos45` is a
+difference, so the bias cancels exactly. Only the acceptance windows were wrong.
+
+**Two real improvements, both from the user's suggestion to lean on the angled
+pair:**
+
+1. **`WALL_FOLLOW_USABLE_MIN_MM` (32 mm)** -- side readings below this are now
+   refused. The VL53L0X does not merely read short below ~30 mm, it reads
+   ERRATICALLY: the stuck run had the right sensor reporting 5 mm with the
+   robot against that wall. The loop was steering on noise. Set above the
+   datasheet floor, not at it, because accuracy is already degrading there.
+
+2. **`WALL_FOLLOW_L45` / `_R45` -- a single angled beam now outranks a single
+   side wall.** Both need a setpoint and carry the bias, but the angled beam
+   holds its reference ~88 mm out instead of ~52, far from the floor, and is
+   1.414x more sensitive per mm of lateral movement. Preference order is now:
+   angled pair, side pair, one angled beam, one side wall.
+
+`far_confidence()` gained an explicit gate argument, because ramping the angled
+beam to the SIDE gate (110) gave it a 22 mm ramp that bottomed out well inside
+its own 150 mm window. The side wrapper is unchanged.
+
+**The lesson, worth stating plainly:** with `TOF_OFFSET_*` at 0 every distance
+constant compared against a reading must be expressed as a reading. Constants
+derived from maze geometry are in a different space and cannot be mixed. The
+one exception is any DIFFERENCE between two same-side-bias sensors, where the
+bias cancels -- which is why the two-wall and two-angled paths are immune and
+were never affected by either bug.
+
+The host suite now pins this: it asserts the setpoints are readings, that they
+are NOT the true gap, and that a centred robot clears the angled span check by
+a wide margin rather than sitting on its edge.
+
+### 2026-09-18 (SUPERSEDED - see 2026-09-19) - The setpoint change that failed
+
+A 26-cell run reached the goal and stuck on the way back, at pose (7,7). The
+suspicion was the VL53L0X near-field floor -- side readings below ~30 mm going
+unusable. **The logs say otherwise.** Read back over SWD:
+
+```
+rec  pose   F L R   front  left  right    wf_side
+22  (8,8)   0 1 0     200    87   ----    LEFT
+23  (8,7)   0 1 0     391   113   ----    LEFT
+24  (7,7)   0 1 0     310    44    300    LEFT
+25  (7,7)   0 1 0     170    36    307    LEFT   <- stuck
+```
+
+Every side reading is ABOVE 36 mm, so the floor was never reached. And
+`wf_side` is 1 (LEFT), not 4 (ANGLED) -- correctly, because the right wall is
+307 mm away and does not exist there, so the angled span check refused the pair
+and fell back to single-wall following. Both subsystems did exactly the right
+thing.
+
+**The bug is that single-wall following was aiming at the wrong place.**
+`wf_error_mm` read -16.0, which is exactly `36 - WALL_FOLLOW_SETPOINT_LEFT_MM`
+with that setpoint at 52. A robot 1 mm from centre was being told it was 16 mm
+too close to the left wall and asked to move right -- into a wall it could not
+see. With a 55 mm half-width in a 180 mm corridor, holding 52 on one side
+leaves 18 mm on the other.
+
+**Why 52 was wrong, and why the argument for it was subtly wrong too.** The
+comment above those constants said a measured reading makes the sensor's
+over-read "cancel exactly". That holds for keeping a CONSTANT DISTANCE from a
+wall. It does not hold for keeping the robot CENTRED, because the centre is
+defined by the corridor geometry and the bias sits between the reading and the
+geometry. Holding a biased reading holds a biased position. Section 9's
+noise-vs-bias rule applied one level up and was missed.
+
+Geometry: `(180 - 110) / 2 = 35 mm`. The measured 52 is that 35 plus ~17 mm of
+per-sensor over-read.
+
+**THIS ALSO RESOLVES THE 104.3 vs 124 CONFLICT** flagged when the angled pair
+went in. Hiruna's stationary `L + R = 104.3` and the geometric prediction of
+~124 were never contradictory: 2 x 52.1 = 104.3 is the same 34 mm of total bias
+seen from the other side. Both numbers were reading-space; neither was the true
+gap. The angled centring was deliberately derived from mounting geometry alone
+so it never depended on either, which is why it works.
+
+`WALL_FOLLOW_SETPOINT_LEFT_MM` / `_RIGHT_MM` 52 -> 35.
+
+Two consequences, both accepted:
+
+- **The two-wall path is untouched.** It uses only `(LEFT - RIGHT)`, and both
+  moved equally, so the difference is identical. Only the single-wall path --
+  the one that failed -- behaves differently.
+- `far_confidence()` ramps from the setpoint, so lowering it widens the ramp
+  and trims gain slightly at a given reading (44 mm: 1.00 -> 0.92). Mild and
+  arguably more honest. If single-wall correction turns sluggish, raise
+  `WALL_FOLLOW_FAR_CONF_FLOOR` rather than putting the setpoint back.
+
+**This is option 2 of two, chosen for blast radius.** The proper fix is
+`TOF_OFFSET_LEFT_MM`/`_RIGHT_MM` = -17, making every reading a true distance
+and removing this class of error everywhere -- but every other side-distance
+constant (`WALL_SIDE_THRESHOLD_MM`, `WALL_FOLLOW_USABLE_MAX_MM`,
+`WALL_FOLLOW_SPAN_MM`, the angled window) was tuned against raw readings and
+must move together. Do it as one deliberate change. **Until then the setpoints
+are true-space and the thresholds are reading-space, and that split is a trap
+for the next reader** -- it is called out at both constants.
+
+Three host tests had hard-coded 40 mm as an example of "too close", true only
+while the setpoint was 52; they failed correctly when it moved and are now
+expressed relative to the setpoint. Same rot Hiruna hit with the 94 mm
+usable-gate case. One test asserted setpoints and span describe the same cell,
+which is deliberately no longer true -- it now checks the property that still
+holds, that a centred robot's READINGS pass the span check.
+
 ### 2026-09-18 (later) - A ToF test that does not stop
 
 Selecting `TEST_TOF_CONTINUOUS` to watch the sensors gave readings for a few
@@ -642,7 +782,7 @@ The LED still toggles once per cycle. A fast blink means the loop is alive; if
 this test ever shows the slow 1 Hz blink, something called the halt, and that
 WOULD be a real fault.
 
-### 2026-09-18 (newest) - The side pair goes blind exactly where it is needed
+### 2026-09-18 (earlier) - The side pair goes blind exactly where it is needed
 
 An arena run traversed the outer corridors well and turned the corners, then
 entered each following corridor off-centre and never recovered, accumulating

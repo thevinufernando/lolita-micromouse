@@ -634,7 +634,36 @@
  * exactly, and so does any error in the corridor width. These full values are
  * used only on the single-wall path, where nothing cancels. Measured over one
  * run, L + R came to 121-129 mm with a mean of 124 across every genuine pair,
- * which is what makes the difference trustworthy. */
+ * which is what makes the difference trustworthy.
+ *
+ * ===========================================================================
+ * REVERTED TO 52 ON 2026-09-19. 35 WAS WRONG AND COST HALF A RUN.
+ * ===========================================================================
+ * They were briefly set to 35 -- the TRUE geometric gap, (180-110)/2 -- on the
+ * argument that holding a biased reading holds a biased position. That
+ * argument is wrong HERE, and the run that followed proved it: 26 cells became
+ * 13, and the robot ended pressed against a wall.
+ *
+ * WHY IT IS WRONG. The comparison is
+ *
+ *     wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM
+ *
+ * and left_mm is a RAW READING -- TOF_OFFSET_*_MM are still 0, so it carries
+ * the full ~17 mm near-field over-read. Both sides of that subtraction have to
+ * live in the same space. A setpoint of 52 is what the sensor ACTUALLY SAYS
+ * when the robot is centred, so the bias cancels in the subtraction and a
+ * centred robot is correctly told its error is zero. A setpoint of 35 mixes a
+ * biased reading with a true distance: the centred robot reads 52, is told it
+ * is 17 mm too FAR from the wall, and drives 17 mm INTO it.
+ *
+ * The original comment above was right and the reasoning that replaced it was
+ * not. A setpoint expressed as a measured reading is not "a biased target" --
+ * it is the correct target in the only space the controller can measure.
+ *
+ * 35 becomes correct ONLY if TOF_OFFSET_LEFT_MM/_RIGHT_MM are set to about
+ * -17 at the same time, so that left_mm is a true distance too. Those two
+ * changes are a matched pair; doing either alone breaks the loop.
+ */
 #define WALL_FOLLOW_SETPOINT_LEFT_MM 52.0f
 #define WALL_FOLLOW_SETPOINT_RIGHT_MM 52.0f
 
@@ -731,6 +760,25 @@
  * is roughly double the correction rate. 110 is still far below the 192 mm
  * floor of the opening cluster, so nothing that is not a wall gets in, and the
  * map veto and the span check are both unchanged behind it. */
+/* Smallest side reading the follower will TRUST, in mm.
+ *
+ * The VL53L0X degrades below about 30 mm, and its failure there is not a
+ * short reading -- it is an ERRATIC one. It can report anything, varying
+ * sample to sample, for a target that is effectively touching. A run ended
+ * with the right sensor reporting 5 mm while the robot was pressed against
+ * that wall.
+ *
+ * Set ABOVE the datasheet floor rather than at it, because a reading a few mm
+ * above the floor is already degrading. This costs nothing now that a single
+ * angled beam outranks a single side wall: when the near side sensor drops
+ * out, the angled beam on that side takes over, and it holds its reference
+ * ~88 mm out where the sensor is entirely happy.
+ *
+ * RAISE if the robot still acts on nonsense when close to a wall. LOWER only
+ * if genuine close approaches are being rejected and tm_wf telemetry shows the
+ * follower going to NONE rather than to an angled reference. */
+#define WALL_FOLLOW_USABLE_MIN_MM 32U
+
 #define WALL_FOLLOW_USABLE_MAX_MM 110U
 
 /* ONE-SIDED SINGLE-WALL CORRECTION.
@@ -1759,7 +1807,13 @@
  *   = (90 - 40) / 0.7071 = 70.7 mm
  * Used only for the plausibility window below; the centring itself never needs
  * it, because the difference cancels it. */
-#define TOF_ANGLED_NOMINAL_MM 70.7f
+/* !! READING-SPACE, like WALL_FOLLOW_SETPOINT_*. Was 70.7 (true geometry),
+ * which was a bug: the angled sensors carry the same ~17 mm near-field
+ * over-read as the side pair, so a centred robot READS about 87.7, not 70.7.
+ * Every window below is derived from this, and with the true value they sat
+ * about 17 mm low -- which is why the pair was being rejected and wf_side
+ * never showed ANGLED in any run. */
+#define TOF_ANGLED_NOMINAL_MM 87.7f
 
 /* Plausibility window on a single angled reading, mm.
  *
@@ -1771,8 +1825,12 @@
  * TIGHTEN if phantom corrections appear at junctions. LOOSEN if the follower
  * keeps dropping to the side pair in ordinary corridors -- tm_wf_src says
  * which reference it actually used. */
-#define TOF_ANGLED_MIN_MM 25U
-#define TOF_ANGLED_MAX_MM 130U
+/* Reading-space window on ONE angled beam. Centred reads ~88; at 30 mm of
+ * lateral error the near beam reads ~45 and the far one ~130. The bounds sit
+ * outside that range with margin, so an honest beam is never rejected -- only
+ * one that has left the corridor entirely. */
+#define TOF_ANGLED_MIN_MM 35U
+#define TOF_ANGLED_MAX_MM 150U
 
 /* Consistency check on the PAIR, mm.
  *
@@ -1786,8 +1844,12 @@
  * the tolerance too tight and genuine pairs get rejected into the fallback
  * path. Hiruna's note on that constant records half of all two-wall cells
  * being thrown away exactly that way, so this starts deliberately loose. */
-#define TOF_ANGLED_SPAN_MM 141.4f
-#define TOF_ANGLED_SPAN_TOL_MM 35.0f
+/* Reading-space, = 2 * TOF_ANGLED_NOMINAL_MM. Was 141.4 (true geometry)
+ * against a real sum of ~175, so the pair sat 1 mm inside the window's edge
+ * and any noise pushed it out. That single constant is why the angled
+ * centring almost never engaged. */
+#define TOF_ANGLED_SPAN_MM 175.4f
+#define TOF_ANGLED_SPAN_TOL_MM 40.0f
 
 /* ========================= Completion criteria =========================== */
 
