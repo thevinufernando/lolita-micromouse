@@ -152,6 +152,14 @@ extern volatile uint8_t tm_maze_tof_stop_fail;
  * in-flight window or WALL_FLIGHT_MIN_SAMPLES is why. */
 extern volatile uint32_t tm_chain_gap_ms_max;
 extern volatile uint32_t tm_chain_segments;
+
+/* Segments that gave up their cruise exit because a front wall was already
+ * too close to brake from. Each one is a stop the robot would have had to
+ * make anyway, taken while it was still affordable. Zero in open corridors;
+ * roughly one per cell that ends at a wall. A run with front-wall collisions
+ * and this at zero means the guard is not seeing the wall -- check the front
+ * reading rather than this counter. */
+extern volatile uint32_t tm_chain_wall_stops;
 extern volatile uint32_t tm_chain_flight_reads;
 extern volatile uint32_t tm_chain_stop_reads;
 

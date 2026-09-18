@@ -1389,6 +1389,24 @@
  * WALL_FLIGHT_MIN_SAMPLES. */
 #define CELL_DECISION_MARGIN_CM 3.0f
 
+/* Slack on the chained front-wall guard, mm.
+ *
+ * The guard projects the front reading to where this segment will END and
+ * forces a rest exit if the wall would be inside the chained target. A wall
+ * exactly TWO cells ahead projects to exactly that target -- the boundary --
+ * and such a segment can safely keep its cruise exit, because the next segment
+ * re-evaluates one cell closer with a better reading and still inherits the
+ * full braking offset.
+ *
+ * Without this margin the boundary case decides on floating-point equality,
+ * and a wall anywhere in sight two cells out costs a full stop. That is most
+ * of a maze, and chaining would be off in all but name.
+ *
+ * RAISE if the robot stops more often than there are walls ahead of it
+ * (tm_chain_wall_stops climbing far past the number of wall-ended cells).
+ * LOWER if it still fails to stop for a wall one cell ahead. */
+#define CELL_CHAIN_WALL_MARGIN_MM 15.0f
+
 /* How far short of the cell centre a chained forward ends, cm.
  *
  * DERIVED, NOT CONFIGURED. It is the distance needed to brake from cruise at

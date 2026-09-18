@@ -311,15 +311,34 @@ void API_clearWall(int x, int y, char direction) { (void)x; (void)y; (void)direc
  * move sets -- at that point 'G' can only mean "came back". Without it the
  * robot blinks the return pattern before it has moved at all.
  *
- * BLOCKING, deliberately. The robot is standing at a cell centre when a
- * milestone fires, motors already braked by the move that brought it there,
- * and the flood fill has not yet decided where to go next. There is no move
- * in flight for this to delay and no control loop to starve -- the blocking
- * blink sits in exactly the same gap NAV_SETTLE_MS already occupies. */
+ * !! IT MUST STOP THE ROBOT FIRST, AND THE FIRST VERSION DID NOT !!
+ *
+ * The original note here claimed the robot was "standing at a cell centre,
+ * motors already braked". That is true only WITHOUT cell chaining. With
+ * MAZE_CONTINUOUS_CELLS a forward move ends early and returns with the robot
+ * STILL ROLLING AT CRUISE, precisely so the next move can continue without
+ * stopping -- and the milestone fires on that path too.
+ *
+ * Measured: tm_chain_gap_ms_max read 4226 ms against a 4200 ms goal pattern.
+ * The blink WAS the gap. The motors held their last command open-loop for the
+ * whole 4.2 s, which at CELL_CHAIN_SPEED_CMS is about 59 cm of travel with no
+ * control loop running -- three cells, blind, from a robot that thought it was
+ * celebrating.
+ *
+ * So the robot is brought to rest first. CellMotion_StopAtCell() does nothing
+ * when it is already stopped, so the unchained path is unaffected; on the
+ * chained path it drives the remaining decision offset and brakes, which is
+ * exactly what a turn would have done. After that the blocking blink is
+ * genuinely safe, and sits in the same gap NAV_SETTLE_MS already occupies. */
 void API_setColor(int x, int y, char color)
 {
     (void)x;
     (void)y;
+
+    /* Nothing below may run while the robot is moving. */
+    if (color == 'R' || (color == 'G' && s_run_started)) {
+        (void)CellMotion_StopAtCell();
+    }
 
     if (color == 'R') {
         /* GOAL. Long-short-short, repeated: a RHYTHM, which is the one thing

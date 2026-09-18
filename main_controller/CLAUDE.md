@@ -625,6 +625,187 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (newest) - A loose wheel, and a guard asking the question at the wrong moment
+
+**The hardware was the dominant variable all along.** A wheel was loose for
+every run in this series, which is why run length swung 57 / 13 / 57 with no
+code change that explained it. With it fixed:
+
+```
+tm_maze_moves         82        (was 12 on the previous run)
+tm_maze_complete      1         reached the goal and identified it
+tm_maze_trace_count   64        THE TRACE BUFFER FILLED
+tm_chain_gap_ms_max   4 ms      the blink stop is working
+tof_stale_drops       0         12388 fresh / 47346 cached
+```
+
+82 moves against a 64-record buffer, so the last 18 are unrecorded. The
+recorded tail is healthy -- every move `ok`, backtracking down the west wall
+toward (0,0).
+
+**The failure is at the very end:** `tm_maze_abort_reason` = 6
+(`NAV_END_STALLED`), phase still `EXPLORE_TO_START`, live pose (4,9) EAST with
+`wall_front_mm` = **39 mm**. Nose against a wall, commanded hard, going
+nowhere.
+
+**And `tm_chain_wall_stops` was 0 again -- the guard has never once fired.**
+The gating fix from earlier today was correct and was in the flashed build, but
+it exposed a second, larger error underneath it: **the guard asks its question
+at the one moment it cannot be true.**
+
+It runs at the START of a segment, standing at the previous cell's decision
+point, which is a full cell pitch from the wall the segment will finish in
+front of. The reading there is ~192 mm LARGER than the threshold by
+construction:
+
+```
+wall 1 cell ahead  -> front reads 135 mm at the decision point  (threshold 135)
+wall 2 cells ahead -> front reads 327 mm
+```
+
+So "is the wall close now" is guaranteed to answer no. The question that
+matters is where the sensor will read **when this segment ends**, which is the
+reading now less the distance the segment is about to cover:
+
+```
+front_at_end_mm = front_now_mm - distance_cm * 10
+```
+
+With that projection the geometry works out exactly as intended: a wall one
+cell ahead projects to -57 mm and forces a rest exit; two cells ahead projects
+to 135 mm and correctly keeps its cruise exit, because the next segment
+re-evaluates one cell closer and still inherits the full braking offset.
+
+`CELL_CHAIN_WALL_MARGIN_MM` (15 mm) keeps that two-cell boundary on the cruise
+side rather than resolving it by floating-point equality. Without it, a wall
+anywhere in sight two cells out costs a full stop -- most of a maze, and
+chaining would be off in all but name.
+
+**The lesson, and it has now cost three runs:** a guard that reads a sensor
+must be evaluated where the reading MEANS something. Twice in this series the
+logic was right and the evaluation point was wrong -- the corroboration gate
+sampled while the distance was changing by design, and this one sampled while
+the wall was a cell away by design. `tm_chain_wall_stops` reading 0 is the
+symptom to watch; it should now be roughly one per wall-ended cell.
+
+**Trace capacity is now the binding constraint on diagnosis.** 64 records
+against 82 moves means the failure was invisible in the trace and had to be
+reconstructed from live globals. Worth raising `MAZE_TRACE_CAPACITY` before the
+next long run -- at 56 bytes a record, 128 records is 7 KB of a 128 KB part.
+
+### 2026-09-19 (newest) - The chain guard was dead on arrival
+
+The front-wall chain guard added earlier today **never fired once**:
+
+```
+tm_chain_wall_stops   0        over 12 chained segments
+tm_chain_gap_ms_max   3 ms     (the blink fix DID work -- was 4226)
+tm_maze_abort_reason  2        MOVE_FAILED
+sl_stall_abort        1        commanded hard, went nowhere
+```
+
+**The bug was the precondition I wrote**, not the threshold:
+
+```c
+if (ToF_ReadAllLatest(fm, ...) == TOF_OK && fm[TOF_FRONT].valid && ...)
+```
+
+`ToF_ReadAllLatest()` returns `TOF_OK` only when **all three** navigation
+sensors serve a fresh reading. A side sensor looking at an opening makes it
+return `TOF_ERROR` -- and that is most corridors. This run's rec 11 had the
+right sensor at 701 mm and rec 10 had it invalid outright. The `&&`
+short-circuited and the front reading was never examined.
+
+Whether the FRONT reading is usable is a per-sensor question that
+`fm[TOF_FRONT].valid` already answers exactly. The aggregate return is about
+the other two, which this decision does not care about. The check is now
+`(void)`-called for its side effect and gated on the per-sensor flag alone.
+
+Also fixed: the array was declared `fm[TOF_SENSOR_TOTAL]` while
+`ToF_ReadAllLatest()` fills only `TOF_SENSOR_COUNT`, leaving the angled entries
+uninitialised for anyone who later read them.
+
+With the fix, this run's own numbers show the guard working: the approach went
+front 264 -> 84 mm, and the chained target is 135 mm, so the segment would have
+been forced to a rest exit well before 84.
+
+**The 13-cell run was NOT a regression from these changes.** The guard was
+inert, and the blink stop only fires at the goal, which this run never reached.
+The failure at rec 12 -- pose (2,10), `left = 24 mm` (below
+`WALL_FOLLOW_USABLE_MIN_MM`, correctly rejected), `wf_side = L45`,
+`sl_stall_abort` set -- is the long-standing lateral one: jammed against a side
+wall while steering on a single angled beam. Different failure from the
+57-cell run, which could not STOP for a front wall it had detected.
+
+Run length is swinging widely (57, then 13) on a mechanism that has not
+changed. `wf_switches` was 1.31/cell here against 2.1/cell in the 57-cell run,
+so the thrashing metric does not track run length either. **Reference
+selection remains the outstanding problem** and is now the only significant one
+left in the wall follower.
+
+### 2026-09-19 (newest) - Two ways to drive blind into a detected wall
+
+57 cells, goal reached and identified, clean backtracking. Then the robot hit
+a front wall. **It had detected that wall perfectly** -- rec 55 shows the front
+flag set with 5 of 5 votes at 81 mm. Nothing was wrong with the sensing. Two
+separate defects let it drive in anyway, and one of them was mine.
+
+**1. The goal blink ran while the robot was rolling.**
+
+```
+tm_chain_gap_ms_max   4226 ms
+goal blink pattern    4200 ms
+```
+
+Those are the same number. The comment I wrote when adding the indicator
+claimed the robot was "standing at a cell centre, motors already braked". That
+is true only WITHOUT cell chaining -- and `MAZE_CONTINUOUS_CELLS` is 1, so a
+forward move ends early and returns with the robot STILL AT CRUISE so the next
+move can continue. The milestone fires on that path too. The motors held their
+last command open-loop for the whole 4.2 s: about 59 cm, three cells, blind.
+
+`API_setColor()` now calls `CellMotion_StopAtCell()` first. That does nothing
+when the robot is already at rest, so the unchained path is unchanged; on the
+chained path it drives the remaining decision offset and brakes, exactly as a
+turn would.
+
+**2. Chaining committed to a cruise exit it could not brake from.**
+
+A chained segment aims to finish when the front sensor reads
+`WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM*10` = 70 + 65 = **135 mm**, the
+offset being the distance needed to stop from cruise. At the decision point the
+front read **81 mm** -- already 54 mm past the distance at which the segment is
+able to finish. There was nowhere to put the deceleration, so it drove to 38 mm
+and the move failed (`tm_maze_abort_reason` = MOVE_FAILED).
+
+The offset is correctly sized; nothing was CHECKING it against the front wall
+before committing to chain. Now `CellMotion_Forward()` reads the cached front
+distance before building the segment, and if it is at or inside the chained
+target the segment exits AT REST instead of at cruise. Costs nothing in an open
+corridor (the reading is out of range and the check is skipped) and costs one
+stop where there is a wall -- the stop the robot had to make anyway, taken
+while it is still affordable. `s_rolling` follows the actual exit speed, or the
+next segment would build its feedforward for a cruise entry it does not have.
+
+`tm_chain_wall_stops` counts it. Zero in open corridors; roughly one per cell
+that ends at a wall. **Front-wall collisions WITH this at zero would mean the
+guard is not seeing the wall** -- look at the front reading, not this counter.
+
+**Two diagnostic traps worth recording**, both of which cost time here:
+
+- `sl_align_reason` is a LIVE global. A cell ending in a turn runs a second
+  segment that overwrites it, so its value describes some later move, not the
+  cell being examined. It read BIG_DELTA for a cell whose actual delta was
+  1.1 cm.
+- The trace's `left_mm`/`right_mm` are IN-FLIGHT readings, taken while the side
+  sensors lead the axle by `TOF_SIDE_AHEAD_CM` and are already looking into the
+  next cell. At rec 55 they read 166/135 against wall flags that were set --
+  not a contradiction, just a different measurement. The FLAGS are the vote;
+  the distances are not.
+
+**Still open:** `wf_switches` was 121 over 57 cells, 2.1 per cell, worse than
+the 1.86 before. Reference thrashing remains unaddressed.
+
 ### 2026-09-19 (newest) - I killed the front alignment. Reverted.
 
 The corroboration gate added earlier today made front-wall behaviour WORSE,

@@ -743,5 +743,103 @@ int main(void){
           "so a gate that only opens late gets refused as BIG_DELTA");
   }
 
+  /* ===== A CHAINED SEGMENT MUST BE ABLE TO STOP FOR A FRONT WALL =====
+     A 57-cell run ended by driving into a wall it had detected correctly --
+     5 of 5 front votes at 81 mm. Chaining had committed the segment to exit
+     at cruise, and the chained front target is
+     WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM*10 = 135 mm, so at 81 mm
+     the segment was already 54 mm past the point where it could finish. */
+  {
+    const float offset_cm =
+        (CELL_CHAIN_SPEED_CMS * CELL_CHAIN_SPEED_CMS)
+            / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)
+        + CELL_DECISION_MARGIN_CM;
+
+    const float chained_target_mm = WALL_FRONT_ALIGN_MM + offset_cm * 10.0f;
+
+    /* The offset really is a braking distance, not a fudge. */
+    CHECK(offset_cm > CELL_DECISION_MARGIN_CM,
+          "the decision offset includes a real braking distance");
+
+    /* !! THE GUARD PROJECTS TO THE END OF THE SEGMENT !!
+     *
+     * Two runs fired it ZERO times because it compared the CURRENT front
+     * reading against the target. It runs at the START of a segment, standing
+     * a full cell pitch from the wall the segment will finish at, so the
+     * reading there is ~192 mm larger than the threshold BY CONSTRUCTION.
+     * "Is the wall close now" is guaranteed to answer no at the one moment it
+     * is asked. The test is on the reading the sensor will have when the
+     * segment ENDS. */
+    const float cell_mm = NAV_CELL_CM * 10.0f;
+    const float trip    = chained_target_mm - CELL_CHAIN_WALL_MARGIN_MM;
+
+    /* What the front reads at a decision point with a wall N cells ahead. */
+    #define FRONT_AT(n) (chained_target_mm + ((float)(n) - 1.0f) * cell_mm)
+
+    /* One cell ahead: the segment ends at the wall, so it must NOT exit at
+       cruise. This is the case that drove the robot into a wall. */
+    CHECK(FRONT_AT(1) - cell_mm < trip,
+          "a wall one cell ahead forces a rest exit");
+
+    /* Two cells ahead: the next segment re-evaluates one cell closer and
+       still inherits the full braking offset, so cruising on is correct --
+       and stopping here would cost a full stop for most cells in a maze. */
+    CHECK(FRONT_AT(2) - cell_mm >= trip,
+          "but a wall two cells ahead still allows a cruise exit");
+    CHECK(FRONT_AT(3) - cell_mm > trip,
+          "and three cells ahead certainly does");
+
+    /* The margin exists so the two-cell boundary does not turn on
+       floating-point equality. */
+    CHECK(CELL_CHAIN_WALL_MARGIN_MM > 0.0f,
+          "the boundary case is resolved by a margin, not by exact equality");
+    CHECK(CELL_CHAIN_WALL_MARGIN_MM < chained_target_mm * 0.5f,
+          "and the margin is small enough not to mask a genuine wall");
+    #undef FRONT_AT
+
+    /* The threshold has to leave the following segment room to brake. */
+    CHECK(chained_target_mm - WALL_FRONT_ALIGN_MM > offset_cm * 10.0f - 1.0f,
+          "and the margin it preserves is the braking distance itself");
+
+    /* THE GUARD MUST NOT DEPEND ON THE SIDE SENSORS.
+     *
+     * The first version gated on ToF_ReadAllLatest() == TOF_OK, which is
+     * TOF_OK only when ALL THREE navigation sensors serve a fresh reading.
+     * A side sensor looking at an opening -- most corridors -- makes it
+     * return TOF_ERROR, so the && short-circuited and the front reading was
+     * never examined. tm_chain_wall_stops read 0 for a whole run while the
+     * robot drove into a wall.
+     *
+     * Expressed as the property that matters: a front wall must be actionable
+     * regardless of what the sides are doing, and the sides routinely read
+     * far beyond any wall distance. */
+    const float opening_mm = 700.0f;   /* measured: right sensor read 701 */
+    CHECK(opening_mm > WALL_SIDE_THRESHOLD_MM,
+          "a side opening reads far past the wall threshold");
+    CHECK(opening_mm > (float)WALL_FOLLOW_USABLE_MAX_MM,
+          "and past the follower's usable gate, so the sweep reports an error");
+    CHECK(chained_target_mm < opening_mm,
+          "yet the front guard must still act -- it cannot depend on that sweep");
+  }
+
+  /* ======== A BLOCKING INDICATOR MUST NOT RUN WHILE ROLLING ==========
+     The goal LED pattern blocked for 4.2 s. With chaining the robot is still
+     at cruise when the milestone fires, so tm_chain_gap_ms_max measured
+     4226 ms of open-loop travel -- about 59 cm, three cells, blind. */
+  {
+    const float blink_ms =
+        (float)MAZE_GOAL_BLINK_REPEATS
+        * (float)(MAZE_GOAL_BLINK_LONG_MS + MAZE_GOAL_BLINK_GAP_MS
+                  + 2U * (MAZE_GOAL_BLINK_SHORT_MS + MAZE_GOAL_BLINK_GAP_MS)
+                  + MAZE_GOAL_BLINK_PAUSE_MS);
+
+    const float open_loop_cm = CELL_CHAIN_SPEED_CMS * blink_ms * 0.001f;
+
+    CHECK(open_loop_cm > NAV_CELL_CM,
+          "the blink is long enough to cross a cell -- so it must stop first");
+    CHECK(blink_ms > 1000.0f,
+          "and is far longer than any gap the chain margin can absorb");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

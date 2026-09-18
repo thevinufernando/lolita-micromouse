@@ -14,6 +14,7 @@
 volatile float   tm_maze_residual_cm;
 volatile uint32_t tm_chain_gap_ms_max;
 volatile uint32_t tm_chain_segments;
+volatile uint32_t tm_chain_wall_stops;
 volatile uint32_t tm_chain_flight_reads;
 volatile uint32_t tm_chain_stop_reads;
 
@@ -297,6 +298,7 @@ void CellMotion_BeginRun(void)
     s_gap_mark_ms         = HAL_GetTick();
     tm_chain_gap_ms_max   = 0U;
     tm_chain_segments     = 0U;
+    tm_chain_wall_stops   = 0U;
     tm_chain_flight_reads = 0U;
     tm_chain_stop_reads   = 0U;
 }
@@ -539,6 +541,98 @@ uint8_t CellMotion_Forward(void)
 
     const float start_offset = s_rolling ? CELL_DECISION_OFFSET_CM : 0.0f;
 
+    /* ===== A SEGMENT MAY ONLY EXIT AT CRUISE IF IT CAN STILL STOP =====
+     *
+     * Chaining ends a segment CELL_DECISION_OFFSET_CM short of the next
+     * centre and hands over still rolling, so the following segment inherits
+     * enough room to brake. That is sound while the corridor continues. It is
+     * not sound when the cell being entered has a WALL AHEAD: the robot then
+     * has to stop inside that cell, and the offset it is carrying was sized
+     * for continuing, not for stopping.
+     *
+     * Measured failure: the front sensor read 81 mm at the decision point
+     * while the chained target is WALL_FRONT_ALIGN_MM + the offset = 135 mm.
+     * The segment was already 54 mm PAST the distance at which it is able to
+     * finish, so it could not stop, drove to 38 mm, and the move failed. The
+     * wall had been detected correctly -- 5 of 5 votes -- and the geometry
+     * simply gave the robot nowhere to put the deceleration.
+     *
+     * So: if the front reading says there is not room to exit at cruise, this
+     * segment exits AT REST instead. The decision costs nothing when there is
+     * no wall (the reading is out of range and this is skipped) and costs one
+     * stop when there is -- which is the stop the robot was going to have to
+     * make anyway, taken at the point where it is still affordable.
+     *
+     * The reading is taken from the cache rather than a fresh sweep: this runs
+     * between segments with the robot rolling, and a blocking read here would
+     * reintroduce exactly the open-loop gap the chain exists to avoid. */
+    float exit_speed = CELL_CHAIN_SPEED_CMS;
+
+    {
+        /* TOF_SENSOR_COUNT, not TOTAL: ToF_ReadAllLatest() fills exactly the
+         * three navigation sensors, and a larger array would leave the angled
+         * entries uninitialised for anyone who read them. */
+        ToF_Measurement_t fm[TOF_SENSOR_COUNT];
+
+        /* !! THE RETURN VALUE IS DELIBERATELY IGNORED !!
+         *
+         * ToF_ReadAllLatest() returns TOF_OK only when ALL THREE navigation
+         * sensors serve a fresh reading, so it reports TOF_ERROR whenever a
+         * SIDE sensor is looking at an opening -- which is most corridors.
+         * Gating on it made this guard dead: tm_chain_wall_stops read 0 across
+         * a whole run while the robot drove into a wall, because the right
+         * sensor happened to be reading 701 mm and the && short-circuited
+         * before the front reading was ever examined.
+         *
+         * Whether the FRONT reading is usable is a per-sensor question, and
+         * fm[TOF_FRONT].valid already answers it exactly. The aggregate return
+         * is about the other two, which this decision does not care about. */
+        (void)ToF_ReadAllLatest(fm, TOF_MAX_SAMPLE_AGE_MS);
+
+        if (fm[TOF_FRONT].valid
+            && fm[TOF_FRONT].distance_mm != TOF_DISTANCE_INVALID) {
+
+            /* !! ASK ABOUT THE END OF THE SEGMENT, NOT ABOUT NOW !!
+             *
+             * The first version compared the CURRENT front reading against the
+             * chained target, and never fired once in two runs. It could not:
+             * this code runs at the START of a segment, standing at the
+             * previous cell's decision point, which is a full cell pitch from
+             * the wall the segment is about to finish in front of. The reading
+             * there is ~192 mm larger than the threshold by construction, so
+             * "is the wall close now" is guaranteed to answer no at exactly the
+             * moment it is asked.
+             *
+             * The question that matters is where the front sensor will read
+             * WHEN THIS SEGMENT ENDS. That is the reading now, less the
+             * distance this segment is about to cover. */
+            const float chained_target_mm =
+                WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM * 10.0f;
+
+            const float front_at_end_mm =
+                (float)fm[TOF_FRONT].distance_mm - distance * 10.0f;
+
+            /* A NEGATIVE projection is the dangerous case, not a discarded
+             * one: it means the wall is nearer than the segment is long, so
+             * the robot would drive through it. Both that and merely-too-close
+             * are handled by the same test.
+             *
+             * STRICTLY LESS THAN, and the margin matters. A wall exactly two
+             * cells ahead projects to exactly the target -- the boundary case
+             * -- and that segment CAN still exit at cruise, because the next
+             * segment will inherit the full braking offset and make the same
+             * decision one cell later with better information. Using <= there
+             * would spend a full stop on every wall in sight two cells out,
+             * which is most of a maze, and chaining would effectively be off.
+             * The margin keeps the boundary case on the cruise side rather
+             * than relying on floating-point equality to fall the right way. */
+            if (front_at_end_mm < chained_target_mm - CELL_CHAIN_WALL_MARGIN_MM) {
+                exit_speed = 0.0f;
+                tm_chain_wall_stops++;
+            }
+        }
+    }
+
     StraightMove_t mv = {
         .distance_cm      = distance,
         /* The segment ends short of the centre, so the wall it is aiming to
@@ -546,7 +640,7 @@ uint8_t CellMotion_Forward(void)
          * stationary alignment uses. */
         .front_target_mm  = WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM * 10.0f,
         .entry_speed_cms  = s_rolling ? CELL_CHAIN_SPEED_CMS : 0.0f,
-        .exit_speed_cms   = CELL_CHAIN_SPEED_CMS,
+        .exit_speed_cms   = exit_speed,
         .keep_wall_follow = s_rolling,
         /* ALWAYS, including the segment that starts from rest: the chain's
          * distance axis spans a whole corridor and is only re-anchored by a
@@ -581,7 +675,13 @@ uint8_t CellMotion_Forward(void)
         return 0U;
     }
 
-    s_rolling       = 1U;
+    /* ROLLING ONLY IF THE SEGMENT ACTUALLY EXITED AT CRUISE.
+     *
+     * The front-wall guard above can force exit_speed to 0, in which case the
+     * robot is stationary here however the chain would otherwise describe it.
+     * Claiming otherwise would make the next segment build its feedforward for
+     * a cruise entry it does not have, and start by commanding a lurch. */
+    s_rolling       = (exit_speed > 0.0f) ? 1U : 0U;
     s_gap_mark_ms   = HAL_GetTick();
     /* Chained straight through, so this cell has no stop of its own. Carrying
      * the previous one forward put the same number on two rows of the trace
