@@ -68,6 +68,7 @@
 #include "navigator.h"
 #include "wall_sense.h"
 #include "straightline_controller.h"
+#include "test_harness.h"   /* LED_Blink -- the robot's only output device */
 
 /* This cell's walls, read once on arrival. */
 static WallReading_t s_cell;
@@ -75,6 +76,11 @@ static uint8_t       s_cell_valid;
 
 /* A pivot that timed out, waiting for somewhere to be reported. */
 static uint8_t s_turn_failed;
+
+/* Has the robot actually moved yet? Distinguishes the algorithm's startup
+ * API_setColor(0,0,'G') -- emitted before the first move -- from the 'G' that
+ * means "returned to the start", which is a genuine milestone. */
+static uint8_t s_run_started;
 
 /* What the last decision turned out to be, so the trace records a decision and
  * not just a list of places the robot has been. Turns arrive before the move
@@ -111,6 +117,11 @@ void MMS_ApiReset(void)
     s_cell_valid     = 0U;
     s_turn_failed    = 0U;
     s_pending_action = NAV_ACT_FORWARD;
+
+    /* NOT cleared here. MMS_ApiReset() runs between PHASES as well as at the
+     * start of a run, and the robot has certainly moved by the time the second
+     * phase begins -- clearing it would make the return-to-start 'G' silent
+     * every time. It is a run-lifetime flag, and a run begins at power-on. */
 }
 
 
@@ -144,6 +155,7 @@ int API_moveForward(void)
 
     const uint8_t ok = CellMotion_Forward();
 
+    s_run_started    = 1U;    /* any later 'G' means "came back", not "start" */
     s_cell_valid     = 0U;    /* the robot has moved; the snapshot is stale */
     s_pending_action = NAV_ACT_FORWARD;
 
@@ -263,7 +275,74 @@ void API_turnRight(void)
  * out. An empty function costs nothing and keeps the port honest. */
 void API_setWall(int x, int y, char direction)   { (void)x; (void)y; (void)direction; }
 void API_clearWall(int x, int y, char direction) { (void)x; (void)y; (void)direction; }
-void API_setColor(int x, int y, char color)      { (void)x; (void)y; (void)color; }
+
+/* ---- Except this one, which is now the MILESTONE INDICATOR ----
+ *
+ * The robot has no screen, but it has an LED, and the algorithm already marks
+ * its milestones by colouring a cell. Those calls are in the ORIGINAL, so
+ * hooking them here costs the port nothing.
+ *
+ * !! THIS IS WHY THE BLINK LIVES HERE AND NOT IN floodfill_run.c !!
+ * `tests/floodfill_diff.sh` builds the ported algorithm and the upstream
+ * MicroMouseAlgorithm copy against the same simulated maze and compares their
+ * transcripts action for action. A call added inside floodfill_run.c would
+ * make the two differ and destroy that guarantee. This file is the porting
+ * boundary and is EXPECTED to differ -- it is where "what the algorithm means"
+ * becomes "what this robot does". (The diff test links floodfill_sim_api.c,
+ * not this file, so it never sees any of it.)
+ *
+ * ---------------------------------------------------------------------------
+ * WHICH COLOURS ARE MILESTONES, AND WHICH ARE NOT
+ * ---------------------------------------------------------------------------
+ * The algorithm calls this from SIX places, and most of them are not events:
+ *
+ *   'R' at goal      -- all four centre cells confirmed visited   BLINK
+ *   'R' speed done   -- speed run reached the goal                BLINK
+ *   'G' at start     -- ONCE before the run begins, not a result  ignored
+ *   'G' back home    -- returned to start, about to speed run     blink
+ *   'B' / 'Y'        -- EVERY ORDINARY CELL of every phase        ignored
+ *
+ * That last line is the one that matters: 'B'/'Y' fires on every cell the
+ * robot enters, so blinking on anything other than an explicit milestone
+ * colour would stop the robot for a second in each of ~250 cells. Only 'R'
+ * and 'G' are handled, and everything else falls through silently.
+ *
+ * The startup 'G' is suppressed by s_run_started, which the first forward
+ * move sets -- at that point 'G' can only mean "came back". Without it the
+ * robot blinks the return pattern before it has moved at all.
+ *
+ * BLOCKING, deliberately. The robot is standing at a cell centre when a
+ * milestone fires, motors already braked by the move that brought it there,
+ * and the flood fill has not yet decided where to go next. There is no move
+ * in flight for this to delay and no control loop to starve -- the blocking
+ * blink sits in exactly the same gap NAV_SETTLE_MS already occupies. */
+void API_setColor(int x, int y, char color)
+{
+    (void)x;
+    (void)y;
+
+    if (color == 'R') {
+        /* GOAL. Long-short-short, repeated: a RHYTHM, which is the one thing
+         * no other indicator on this robot uses. Boot is 3 slow or 6 fast, a
+         * halted test is a steady 1 Hz, a running ToF test is a fast toggle --
+         * all of them are RATES, and all look alike from across a maze. */
+        for (uint8_t i = 0; i < MAZE_GOAL_BLINK_REPEATS; i++) {
+            LED_Blink(1U, MAZE_GOAL_BLINK_LONG_MS, MAZE_GOAL_BLINK_GAP_MS);
+            LED_Blink(2U, MAZE_GOAL_BLINK_SHORT_MS, MAZE_GOAL_BLINK_GAP_MS);
+            HAL_Delay(MAZE_GOAL_BLINK_PAUSE_MS);
+        }
+    }
+    else if (color == 'G' && s_run_started) {
+        /* Back at the start, about to begin the speed run. Even blinks --
+         * clearly not the goal rhythm, because two milestones that look alike
+         * are two milestones you cannot tell apart. */
+        LED_Blink(MAZE_START_BLINK_COUNT, MAZE_START_BLINK_MS,
+                  MAZE_START_BLINK_MS);
+    }
+
+    /* 'B', 'Y', and the pre-run 'G' deliberately do nothing. */
+}
+
 void API_clearColor(int x, int y)                { (void)x; (void)y; }
 void API_clearAllColor(void)                     { }
 void API_setText(int x, int y, char *str)        { (void)x; (void)y; (void)str; }

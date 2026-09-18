@@ -1881,6 +1881,35 @@
 #define TOF_ANGLED_SPAN_MM 175.4f
 #define TOF_ANGLED_SPAN_TOL_MM 40.0f
 
+/* ===================== MAZE MILESTONE LED PATTERNS ======================= */
+/* The robot has no screen. These are how it says where it is in the run.    */
+/*                                                                          */
+/* Driven from API_setColor() in mms_api.c, which the flood fill already     */
+/* calls at both milestones -- so the algorithm itself is untouched and      */
+/* tests/floodfill_diff.sh still passes.                                     */
+/*                                                                          */
+/* THEY MUST NOT LOOK LIKE THE PATTERNS ALREADY IN USE:                      */
+/*   3 slow blinks at boot       = IMU up                                    */
+/*   6 fast blinks at boot       = IMU absent, or ToF init failed (2 fast)   */
+/*   1 Hz forever (100/900 ms)   = a test halted on a full trace buffer      */
+/*   continuous fast toggle      = a ToF test running                        */
+/*                                                                          */
+/* Hence long-short-short for the goal: a rhythm, not a rate, which is the   */
+/* one thing none of the above uses and the only thing readable across a     */
+/* maze. */
+
+/* GOAL REACHED -- all four centre cells confirmed visited. */
+#define MAZE_GOAL_BLINK_REPEATS   3U
+#define MAZE_GOAL_BLINK_LONG_MS   400U
+#define MAZE_GOAL_BLINK_SHORT_MS  120U
+#define MAZE_GOAL_BLINK_GAP_MS    120U
+#define MAZE_GOAL_BLINK_PAUSE_MS  400U   /* silence between repeats */
+
+/* BACK AT THE START, about to begin the speed run. Even blinks, clearly not
+ * the goal rhythm. */
+#define MAZE_START_BLINK_COUNT    5U
+#define MAZE_START_BLINK_MS       150U
+
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */

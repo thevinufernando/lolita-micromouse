@@ -263,6 +263,24 @@ PID gains. Overshoot ⇒ the configured wheel base is too small. Same logic for
 must be still and level at power-on.** It rejects the calibration if it detects
 motion above `IMU_GYRO_BIAS_MAX_DPS`.
 
+### What the LED is telling you
+
+The robot has no screen, so every indicator is this one LED. They are
+deliberately distinguishable:
+
+| Pattern | Meaning |
+|---|---|
+| 3 slow blinks (300/300 ms) | boot: IMU up |
+| 6 fast blinks (80/80 ms) | boot: IMU not found, running encoder-only |
+| 2 fast blinks | boot: ToF init failed |
+| **long–short–short ×3** | **GOAL REACHED** (all four centre cells visited, or speed run complete) |
+| **5 even blinks (150 ms)** | **back at the start**, about to speed run |
+| steady 1 Hz (100/900 ms) forever | a test halted on a full trace buffer |
+| continuous fast toggle | a ToF test is running |
+
+The two maze milestones use a **rhythm**; everything else uses a **rate**.
+That is the point — rates all look alike from across a maze, rhythms do not.
+
 LED at boot: **3 slow blinks = IMU up**, **6 fast blinks = IMU not found,
 running encoder-only**. The turn controller degrades gracefully rather than
 failing, so a silent fallback is possible — check `tm_imu_ok`.
@@ -606,6 +624,50 @@ accident.
 ---
 
 ## Change log
+
+### 2026-09-19 (newest) - The LED says when the goal is reached
+
+The robot had no way to say it had found the goal. It does now: **long–short–
+short, three times** (~4.2 s), and **5 even blinks** on returning to the start
+before the speed run.
+
+**Hooked in `mms_api.c`, NOT in `floodfill_run.c`, and that placement is the
+whole point.** The algorithm already calls `API_setColor()` at both milestones
+-- those calls are in the upstream original -- and `API_setColor` was a no-op
+stub in the shim. So the indicator needed **zero changes to the ported
+algorithm**, and `tests/floodfill_diff.sh` keeps its guarantee that the port
+matches `MicroMouseAlgorithm` action for action. (That test links
+`floodfill_sim_api.c` rather than `mms_api.c`, so it never sees this at all.)
+`git diff` confirms `floodfill_run.c` and `maze.c` are byte-identical.
+
+**The trap worth recording: `API_setColor` is called from SIX places, and most
+are not events.**
+
+```
+'R' at goal      all four centre cells confirmed visited    BLINK
+'R' speed done   speed run reached the goal                 BLINK
+'G' at start     ONCE before the run begins, not a result   ignored
+'G' back home    returned to start, about to speed run      blink
+'B' / 'Y'        EVERY ORDINARY CELL of every phase         ignored
+```
+
+`'B'`/`'Y'` fires on every cell entered, so a naive implementation would stop
+the robot for a second in each of ~250 cells. Only `'R'` and `'G'` are handled.
+The startup `'G'` is suppressed by `s_run_started`, set on the first forward
+move -- without it the robot blinks "returned to start" before it has moved.
+That flag is deliberately NOT cleared by `MMS_ApiReset()`, which also runs
+between phases: clearing it there would silence the genuine return-to-start
+blink every time.
+
+Blocking is safe here and nowhere else: a milestone fires with the robot
+standing at a cell centre, motors already braked, before the flood fill has
+chosen its next move. The blink occupies the same gap `NAV_SETTLE_MS` already
+does -- no move is in flight and no control loop is starved.
+
+Patterns are in `control_config.h` under MAZE MILESTONE LED PATTERNS, chosen
+against the four indicators already in use (see section 6). Boot, halt and
+test-running are all RATES; the milestones are RHYTHMS, because rates are
+indistinguishable from across an arena.
 
 ### 2026-09-19 (later) - The reference selection works; the RECOVERY does not
 
