@@ -629,6 +629,111 @@ TEST_FN void Test_ToFAngled(void)
   HAL_Delay(100);
 }
 
+/* ALL FIVE SENSORS, CONTINUOUS, AND IT NEVER STOPS.
+ *
+ * The other ToF tests all call ToF_HaltIfBufferFull(), which parks in a
+ * while(1) blinking 100 ms on / 900 ms off once tm_tof_history fills -- about
+ * 200 samples, so four to eight seconds in. That halt is deliberate and worth
+ * keeping: the history buffer does not wrap, so stopping is what preserves a
+ * run for offline analysis over SWD. But it makes those tests useless for
+ * simply WATCHING the sensors, which is what this one is for.
+ *
+ * So: no flight recorder, no halt. Only the live-watch scalars are updated,
+ * and the loop runs until the robot is powered down.
+ *
+ * CONTINUOUS, and specifically through ToF_PollOneLatest(), which is the exact
+ * path the wall follower uses while driving. That matters -- reading with
+ * ToF_ReadSingle() in a loop would exercise a different code path and prove
+ * nothing about the one the robot actually runs on. It polls one sensor per
+ * call in rotation and serves the rest from the held-reading cache, so:
+ *
+ *   tof_fresh_count   climbing steadily  = sensors producing
+ *   tof_cached_count  climbing faster    = normal, the loop outruns the sensor
+ *   tof_stale_drops   ANY increase       = a sensor stopped producing. This is
+ *                                          the number worth watching; it
+ *                                          should stay at zero forever.
+ *
+ * WHAT TO LOOK AT. tm_tof_ready should read 0x1F (all five). The three
+ * navigation distances are tm_tof_front_mm / _left_mm / _right_mm and the
+ * angled pair is tm_tof_l45_mm / _r45_mm. Centred in a corridor the angled
+ * readings should sit near TOF_ANGLED_NOMINAL_MM (~70.7 mm) and the side pair
+ * near 35 mm -- and the angled pair should stay readable when you push the
+ * robot off centre, which is the whole reason they exist.
+ *
+ * The LED toggles once per cycle, so a steady fast blink means the loop is
+ * alive. If it ever goes to a slow 1 Hz blink something called the halt, which
+ * this test does not -- that would be a real fault. */
+TEST_FN void Test_ToFLive(void)
+{
+  static uint8_t started = 0;
+
+  Motor_Brake();
+
+  if (!started)
+  {
+    /* Starts only the sensors that came up; a failed one is skipped rather
+     * than retried, so this cannot stall on a dead channel. */
+    (void)ToF_StartContinuousAll();
+    started = 1;
+  }
+
+  /* Fills all five. TOF_SENSOR_TOTAL, not COUNT -- a 3-element array here
+   * would be written two elements past its end. */
+  ToF_Measurement_t m[TOF_SENSOR_TOTAL];
+
+  (void)ToF_PollOneLatest(m, TOF_MAX_SAMPLE_AGE_MS);
+
+  /* Publish all five. The driver invalidates a measurement it could not
+   * produce, so a dropped sensor shows as TOF_DISTANCE_INVALID (65535) rather
+   * than a stale value that looks plausible. */
+  tm_tof_front_mm     = m[TOF_FRONT].distance_mm;
+  tm_tof_left_mm      = m[TOF_LEFT].distance_mm;
+  tm_tof_right_mm     = m[TOF_RIGHT].distance_mm;
+
+  tm_tof_front_raw_mm = m[TOF_FRONT].raw_mm;
+  tm_tof_left_raw_mm  = m[TOF_LEFT].raw_mm;
+  tm_tof_right_raw_mm = m[TOF_RIGHT].raw_mm;
+
+  tm_tof_front_status = m[TOF_FRONT].range_status;
+  tm_tof_left_status  = m[TOF_LEFT].range_status;
+  tm_tof_right_status = m[TOF_RIGHT].range_status;
+
+  tm_tof_l45_mm       = m[TOF_LEFT_45].distance_mm;
+  tm_tof_r45_mm       = m[TOF_RIGHT_45].distance_mm;
+  tm_tof_l45_raw_mm   = m[TOF_LEFT_45].raw_mm;
+  tm_tof_r45_raw_mm   = m[TOF_RIGHT_45].raw_mm;
+  tm_tof_l45_status   = m[TOF_LEFT_45].range_status;
+  tm_tof_r45_status   = m[TOF_RIGHT_45].range_status;
+
+  tm_tof_front_jumps  = ToF_GetFilterJumpCount(TOF_FRONT);
+  tm_tof_left_jumps   = ToF_GetFilterJumpCount(TOF_LEFT);
+  tm_tof_right_jumps  = ToF_GetFilterJumpCount(TOF_RIGHT);
+
+  /* Counted here rather than by Telemetry_CaptureToF(), which also appends to
+   * the flight recorder -- the thing this test exists to avoid. */
+  if (m[TOF_FRONT].valid && m[TOF_LEFT].valid && m[TOF_RIGHT].valid &&
+      m[TOF_LEFT_45].valid && m[TOF_RIGHT_45].valid)
+  {
+    tm_tof_sample_count++;
+  }
+  else
+  {
+    tm_tof_error_count++;
+  }
+
+  /* Re-read every cycle: a sensor that drops off the bus AFTER init is
+   * exactly the failure this test should surface, and the boot latch cannot
+   * show it. */
+  TestHarness_CaptureToFReady();
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+
+  /* One control-loop period, matching how often the robot really polls. A
+   * full rotation of all five therefore takes TOF_SENSOR_TOTAL cycles, the
+   * same as when driving. */
+  HAL_Delay((uint32_t)(CONTROL_SAMPLE_TIME_S * 1000.0f));
+}
+
 TEST_FN void Test_ToFSingle(void)
 {
   Motor_Brake();
@@ -860,6 +965,10 @@ void TestHarness_RunCycle(void)
 #elif (ACTIVE_TEST == TEST_TOF_ANGLED)
   Test_ToFAngled();
   return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_TOF_LIVE)
+  Test_ToFLive();
+  return;   /* runs forever, never halts */
 
 #else
   #error "ACTIVE_TEST is not set to a valid test id"

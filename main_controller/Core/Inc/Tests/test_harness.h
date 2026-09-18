@@ -36,9 +36,10 @@
 #define TEST_MAZE_RUN 14         /* MOVES. Reactive navigation + wall map. */
 #define TEST_FLOODFILL_RUN 15    /* MOVES. The ported flood-fill solver.    */
 #define TEST_TOF_ANGLED 16       /* No motion. All 5 sensors, incl. 45s.    */
+#define TEST_TOF_LIVE 17         /* No motion. All 5, continuous, FOREVER.  */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_FLOODFILL_RUN
+#define ACTIVE_TEST TEST_TOF_LIVE
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */

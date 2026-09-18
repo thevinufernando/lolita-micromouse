@@ -218,7 +218,7 @@ There are no magic numbers scattered in the controllers. Change values there,
 rebuild, flash.
 
 `Core/Inc/Tests/test_harness.h` has an `ACTIVE_TEST` switch selecting one of
-17 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
+18 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
 rebuild, flash, and read results in live-watch.
 
 | # | Test | Purpose |
@@ -239,6 +239,7 @@ rebuild, flash, and read results in live-watch.
 | 14 | `TEST_MAZE_RUN` | **Moves.** Reactive navigation, wall map, one run |
 | 15 | `TEST_FLOODFILL_RUN` | **Moves.** The ported flood-fill solver |
 | 16 | `TEST_TOF_ANGLED` | **Run first after wiring the 45° pair** — all 5 sensors |
+| 17 | `TEST_TOF_LIVE` | All 5, continuous, **never halts** — the one for live-watching |
 
 ### Bring-up order for the IMU
 
@@ -605,6 +606,41 @@ accident.
 ---
 
 ## Change log
+
+### 2026-09-18 (later) - A ToF test that does not stop
+
+Selecting `TEST_TOF_CONTINUOUS` to watch the sensors gave readings for a few
+seconds, then the LED changed from a fast flicker to a slow 1 Hz blink and the
+distances froze.
+
+**That was not a fault.** Every ToF test except the angled one calls
+`ToF_HaltIfBufferFull()`, which parks in a `while(1)` on 100 ms / off 900 ms as
+soon as `tm_tof_history` reaches its 200 records -- four to eight seconds at a
+20 ms cycle. The halt is deliberate and stays: the history buffer does not
+wrap, so stopping is exactly what preserves a run for reading back over SWD
+afterwards. It is also what made the 47-cell maze trace recoverable.
+
+It does make those tests useless for simply watching the sensors, which is what
+`TEST_TOF_LIVE` (17) is for. No flight recorder, no halt, runs until power-off.
+
+- **Continuous, through `ToF_PollOneLatest()`** -- deliberately the same call
+  the wall follower makes while driving, rather than a loop of
+  `ToF_ReadSingle()`. A test that exercises a different path from the robot
+  proves nothing about the path the robot uses.
+- All five sensors, so `tm_tof_l45_mm` / `_r45_mm` update alongside the three
+  navigation distances. `tm_tof_ready` is re-read every cycle, so a sensor that
+  drops off the bus AFTER init is visible -- the boot latch cannot show that.
+- `tof_stale_drops` is the number worth watching: any increase means a sensor
+  stopped producing, as opposed to merely not being ready yet, and it should
+  stay at zero. `tof_fresh_count` against `tof_cached_count` says whether the
+  loop is outrunning the sensors, which at a 10 ms cycle and a 40 ms sensor it
+  should be.
+- Cycle period is `CONTROL_SAMPLE_TIME_S`, so a full rotation of five sensors
+  takes the same wall-clock time it does when driving.
+
+The LED still toggles once per cycle. A fast blink means the loop is alive; if
+this test ever shows the slow 1 Hz blink, something called the halt, and that
+WOULD be a real fault.
 
 ### 2026-09-18 (newest) - The side pair goes blind exactly where it is needed
 
