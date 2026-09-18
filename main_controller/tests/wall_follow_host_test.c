@@ -11,6 +11,15 @@ static float err_both(float L,float R){
     return ((L-R)-(WALL_FOLLOW_SETPOINT_LEFT_MM-WALL_FOLLOW_SETPOINT_RIGHT_MM))*0.5f; }
 static float err_left(float L){ return L-WALL_FOLLOW_SETPOINT_LEFT_MM; }
 static float err_right(float R){ return -(R-WALL_FOLLOW_SETPOINT_RIGHT_MM); }
+/* Mirrors the WALL_FOLLOW_ANGLED branch. */
+static float err_angled(float L45,float R45){
+    return (L45-R45)*0.5f*TOF_ANGLED_LATERAL_GAIN; }
+/* Forward model: what the angled pair reads for a lateral offset e (mm,
+   positive = robot displaced RIGHT) in a corridor of inner width W. */
+static float a_left (float e){ return ((MAZE_CORRIDOR_INNER_MM*0.5f)
+    + (-(TOF_SIDE_SPAN_MM*0.5f - TOF_ANGLED_INBOARD_MM)) + e)/TOF_ANGLED_COS45; }
+static float a_right(float e){ return ((MAZE_CORRIDOR_INNER_MM*0.5f)
+    - ( (TOF_SIDE_SPAN_MM*0.5f - TOF_ANGLED_INBOARD_MM)) - e)/TOF_ANGLED_COS45; }
 /* Mirrors far_confidence() in wall_follow.c: 1.0 at or inside the setpoint,
    falling linearly to the floor at the usable gate. */
 static float conf_of(float reading,float setpoint){
@@ -409,6 +418,79 @@ int main(void){
 
     CHECK(coast_new < coast_old * 0.25f,
           "and it cuts the distance travelled during settling by 4x or more");
+  }
+
+  /* ================= ANGLED-PAIR CENTRING (the 45 sensors) ==============
+     Added 2026-09-18. The side pair goes blind below ~30 mm and a centred
+     robot is only 35 mm from each wall, so it stops measuring exactly the
+     errors it exists to correct. These pin the geometry the new path rests
+     on -- all derived, so a wrong constant fails here and not in the arena. */
+  {
+    const float centred_side_gap =
+        (MAZE_CORRIDOR_INNER_MM - TOF_SIDE_SPAN_MM) * 0.5f;
+
+    CHECK(fabsf(centred_side_gap - 35.0f) < 0.51f,
+          "a centred robot is 35 mm from each side wall");
+    CHECK(centred_side_gap - 30.0f < 6.0f,
+          "which clears the sensor's ~30 mm floor by under 6 mm -- the problem");
+
+    CHECK(fabsf(a_left(0.0f) - TOF_ANGLED_NOMINAL_MM) < 1.0f,
+          "centred, an angled sensor reads TOF_ANGLED_NOMINAL_MM");
+    CHECK(a_left(0.0f) > 2.0f * 30.0f,
+          "which is more than twice the sensor floor");
+
+    /* ZERO WHEN CENTRED. Wrong here and the robot holds to one side of every
+       corridor, which looks like a gain problem. */
+    CHECK(fabsf(err_angled(a_left(0.0f), a_right(0.0f))) < 0.01f,
+          "centred gives exactly zero angled error");
+
+    /* SIGN. Positive must mean "move left", matching every other branch;
+       backwards makes the loop positive feedback. */
+    CHECK(err_angled(a_left(10.0f), a_right(10.0f)) > 0.0f,
+          "displaced RIGHT gives positive error (move left), as the side pair does");
+    CHECK(err_angled(a_left(-10.0f), a_right(-10.0f)) < 0.0f,
+          "and displaced LEFT gives negative");
+
+    /* THE GAIN CONVERSION -- silently 41% hot if dropped. The result must be
+       mm of LATERAL offset, not mm along the beam, so that
+       WALL_FOLLOW_KP_DEG_PER_MM carries over from the side pair unchanged. */
+    for (float e = -25.0f; e <= 25.0f; e += 5.0f) {
+      CHECK(fabsf(err_angled(a_left(e), a_right(e)) - e) < 0.05f,
+            "angled error equals true lateral offset in mm across the range");
+    }
+
+    /* HEADROOM -- the whole claim of the change, both halves. */
+    CHECK(a_right(20.0f) > 30.0f,
+          "at 20 mm off centre the near ANGLED reading is still above the floor");
+    CHECK((MAZE_CORRIDOR_INNER_MM*0.5f) - (TOF_SIDE_SPAN_MM*0.5f) - 20.0f < 30.0f,
+          "while the near SIDE reading is already below it");
+
+    /* The sum is fixed by corridor width alone, which is what lets the span
+       check reject a beam that has left the corridor. */
+    for (float e = -25.0f; e <= 25.0f; e += 12.5f) {
+      CHECK(fabsf((a_left(e) + a_right(e)) - TOF_ANGLED_SPAN_MM) < 1.0f,
+            "the angled pair sums to TOF_ANGLED_SPAN_MM at any offset");
+    }
+
+    /* Every legitimate reading must pass the window, or genuine pairs fall
+       through to the fallback -- the failure Hiruna recorded for the side
+       pair's span tolerance. */
+    for (float e = -25.0f; e <= 25.0f; e += 5.0f) {
+      CHECK(a_left(e)  >= (float)TOF_ANGLED_MIN_MM &&
+            a_left(e)  <= (float)TOF_ANGLED_MAX_MM &&
+            a_right(e) >= (float)TOF_ANGLED_MIN_MM &&
+            a_right(e) <= (float)TOF_ANGLED_MAX_MM,
+            "readings across +/-25 mm of offset sit inside the usable window");
+    }
+
+    CHECK(fabsf((MAZE_CORRIDOR_INNER_MM + MAZE_WALL_THICKNESS_MM)
+                - NAV_CELL_CM * 10.0f) < 0.1f,
+          "corridor + wall thickness equals the cell pitch");
+
+    CHECK((float)STRAIGHT_TOF_DIVIDER == 5.0f,
+          "the poll rotation covers all five sensors");
+    CHECK(WALL_FOLLOW_UPDATE_S * 1000.0f < (float)TOF_MAX_SAMPLE_AGE_MS,
+          "and a full rotation still completes inside the staleness cap");
   }
 
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);

@@ -782,7 +782,7 @@ int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
 }
 
 
-int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_TOTAL],
                       uint32_t max_age_ms)
 {
     int result = TOF_OK;
@@ -811,22 +811,30 @@ int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
     const uint8_t polled = s_poll_next;
     uint8_t       got    = 0U;
 
-    /* TOF_SENSOR_COUNT, not TOF_SENSOR_TOTAL, and deliberately so: the
-     * rotation covers only the three navigation sensors. Including the angled
-     * pair would stretch a full refresh from 3 control cycles to 5 -- spending
-     * two cycles per rotation on readings nothing consumes, and slowing the
-     * wall follower's update rate by 67% to do it. The 3-cycle rotation is
-     * tuned; see STRAIGHT_TOF_DIVIDER and its static assert.
+    /* ALL FIVE, since the angled pair became the wall follower's preferred
+     * lateral reference (2026-09-18). The rotation was 3 while they were
+     * unused.
      *
-     * The angled sensors are read individually by whoever wants them, via
-     * ToF_ReadSingle() or ToF_ReadContinuous(). */
-    s_poll_next = (uint8_t)((s_poll_next + 1U) % TOF_SENSOR_COUNT);
+     * Costs nothing in sample rate, which is the non-obvious part. The sensors
+     * free-run at TOF_INTER_MEASUREMENT_MS = 40 ms, and the control loop runs
+     * at 10 ms, so a 3-cycle rotation polled each sensor every 30 ms -- FASTER
+     * than it could produce, and three polls in four already found nothing
+     * new. At 5 cycles each sensor is polled every 50 ms, which is still
+     * comfortably inside TOF_MAX_SAMPLE_AGE_MS (120) and now roughly matches
+     * the rate the part actually delivers at. No measurement is missed; the
+     * readings are simply up to 20 ms older, which at cruise is about 3 mm of
+     * travel.
+     *
+     * STRAIGHT_TOF_DIVIDER still gates how often the wall follower RUNS, and
+     * it is a separate question from how many sensors are in the rotation --
+     * see its comment in control_config.h. */
+    s_poll_next = (uint8_t)((s_poll_next + 1U) % TOF_SENSOR_TOTAL);
 
     if (s_ready[polled]) {
         got = (ToF_PollInto(polled, &out[polled], now) == TOF_OK) ? 1U : 0U;
     }
 
-    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+    for (uint8_t i = 0; i < TOF_SENSOR_TOTAL; i++) {
         if (!s_ready[i]) {
             ToF_InvalidateMeasurement(&out[i]);
             result = TOF_ERROR;

@@ -162,8 +162,22 @@ static uint8_t usable(const ToF_Measurement_t *m)
             m->distance_mm <= WALL_FOLLOW_USABLE_MAX_MM) ? 1U : 0U;
 }
 
+/* Is one angled reading plausibly the robot's own corridor wall?
+ *
+ * Wider window than usable() because an angled reading legitimately travels a
+ * long way: 70.7 mm centred, 113 mm at 30 mm of lateral error. The lower bound
+ * is the sensor's own near-field floor -- the whole point of this pair is that
+ * it never gets near it, so a reading below TOF_ANGLED_MIN_MM means the beam
+ * found something that is not the corridor wall. */
+static uint8_t angled_usable(const ToF_Measurement_t *m)
+{
+    return (m->valid && m->distance_mm != TOF_DISTANCE_INVALID &&
+            m->distance_mm >= TOF_ANGLED_MIN_MM &&
+            m->distance_mm <= TOF_ANGLED_MAX_MM) ? 1U : 0U;
+}
 
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_TOTAL],
                         float dt_s, float travelled_cm)
 {
     /* IS THE ROBOT ACTUALLY MOVING? Sampled here, at the top, because the
@@ -189,6 +203,35 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
 
     uint8_t left_ok  = usable(&m[TOF_LEFT])  && !vetoed(1U, travelled_cm);
     uint8_t right_ok = usable(&m[TOF_RIGHT]) && !vetoed(0U, travelled_cm);
+
+    /* THE ANGLED PAIR FIRST, when both beams are on the robot's own corridor.
+     *
+     * Same consistency argument as the side pair's span check: two beams on
+     * the two walls of one corridor sum to a value fixed by the corridor width
+     * alone, because displacing the robot lengthens one path exactly as much
+     * as it shortens the other. A sum away from TOF_ANGLED_SPAN_MM means at
+     * least one beam is through an opening or down a junction, and the pair
+     * must not be used -- an angled beam that escapes reads LONG, which would
+     * be read as "too far from that wall" and steer the robot INTO the other.
+     *
+     * The map veto is deliberately NOT applied here. It exists because the
+     * side sensors sit ahead of the axle and cross into the next cell partway
+     * through a move, so a known-open next cell means their reference has
+     * expired. The angled beams strike much further forward and at an angle,
+     * so that particular distance-based expiry does not describe them, and
+     * applying it would drop a good reference for the wrong reason. The span
+     * check above is what rejects a beam that has left the corridor -- it is a
+     * direct measurement rather than an inference from the map, and it is the
+     * honest test for this pair. */
+    uint8_t angled_ok = 0U;
+
+    if (angled_usable(&m[TOF_LEFT_45]) && angled_usable(&m[TOF_RIGHT_45])) {
+        const float a_span = (float)m[TOF_LEFT_45].distance_mm
+                           + (float)m[TOF_RIGHT_45].distance_mm;
+
+        angled_ok = (fabsf(a_span - TOF_ANGLED_SPAN_MM) <= TOF_ANGLED_SPAN_TOL_MM)
+                    ? 1U : 0U;
+    }
 
     /* BOTH WALLS BEAT EITHER ONE, and it is not a small difference.
      *
@@ -229,7 +272,11 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
         }
     }
 
-    if (pair_ok)                                           want = WALL_FOLLOW_BOTH;
+    /* Angled outranks everything: it is the only reference that stays valid
+     * through the lateral errors that actually need correcting. See the note
+     * on WALL_FOLLOW_ANGLED in wall_follow.h. */
+    if (angled_ok)                                         want = WALL_FOLLOW_ANGLED;
+    else if (pair_ok)                                      want = WALL_FOLLOW_BOTH;
     else if (active_side == WALL_FOLLOW_LEFT && left_ok)   want = WALL_FOLLOW_LEFT;
     else if (active_side == WALL_FOLLOW_RIGHT && right_ok) want = WALL_FOLLOW_RIGHT;
     else if (left_ok)                                      want = WALL_FOLLOW_LEFT;
@@ -278,7 +325,28 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
 
     /* Error is POSITIVE when the robot must move LEFT, whichever reference is
      * in use, so everything downstream is direction-agnostic. */
-    if (active_side == WALL_FOLLOW_BOTH) {
+    if (active_side == WALL_FOLLOW_ANGLED) {
+        /* (L45 - R45)/2 is the offset expressed along the 45-degree beam, so
+         * it is 1/cos(45) = 1.414x the actual lateral offset. Multiplying by
+         * cos(45) converts it into the SAME MILLIMETRES the side-pair branch
+         * produces, which is what lets WALL_FOLLOW_KP_DEG_PER_MM and the
+         * integral gain carry over unchanged. Skip this and the loop runs 41%
+         * hot with no other symptom than overshoot.
+         *
+         * No setpoint term: the pair is symmetric about the centreline by
+         * construction, so centred IS zero difference. That is also why this
+         * needs no offset calibration -- any bias common to both sensors
+         * subtracts out, which is the whole reason TOF_OFFSET_*_45_MM can stay
+         * at 0.
+         *
+         * Sign: the robot displaced RIGHT lengthens the left beam and shortens
+         * the right, giving a positive difference, and positive error means
+         * "must move left" -- which matches the convention above. */
+        wf_error_mm = ((float)m[TOF_LEFT_45].distance_mm
+                       - (float)m[TOF_RIGHT_45].distance_mm)
+                      * 0.5f * TOF_ANGLED_LATERAL_GAIN;
+    }
+    else if (active_side == WALL_FOLLOW_BOTH) {
         /* Half the difference is the offset from centre. The setpoint term is
          * just the trim between the two sensors, about half a millimetre. */
         wf_error_mm = ((left_mm - right_mm)

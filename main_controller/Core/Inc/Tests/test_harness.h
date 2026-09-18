@@ -38,7 +38,7 @@
 #define TEST_TOF_ANGLED 16       /* No motion. All 5 sensors, incl. 45s.    */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_TOF_ANGLED
+#define ACTIVE_TEST TEST_FLOODFILL_RUN
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */

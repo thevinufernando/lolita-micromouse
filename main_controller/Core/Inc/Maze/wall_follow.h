@@ -55,8 +55,30 @@ typedef enum {
   WALL_FOLLOW_NONE = 0,  /* no usable wall; hold heading open-loop      */
   WALL_FOLLOW_LEFT = 1,  /* one wall, measured against its setpoint     */
   WALL_FOLLOW_RIGHT = 2,
-  WALL_FOLLOW_BOTH = 3   /* centred on (L - R)/2 -- the reference to want */
+  WALL_FOLLOW_BOTH = 3,  /* centred on (L - R)/2 -- the side pair        */
+  WALL_FOLLOW_ANGLED = 4 /* centred on (L45 - R45)/2 -- PREFERRED        */
 } WallFollowSide_t;
+
+/*
+ * WHY ANGLED OUTRANKS BOTH.
+ *
+ * The side pair is the better-tested reference but it has a hard geometric
+ * limit: in a 180 mm corridor with a 110 mm sensor span, a centred robot is
+ * 35 mm from each wall and the VL53L0X stops reading reliably below ~30 mm. So
+ * the near sensor drops out after about 10 mm of lateral error -- precisely
+ * the situation the follower exists to fix. Observed on the robot as an
+ * off-centre entry after a corner that never recovers and eventually contacts
+ * a wall.
+ *
+ * The angled pair reads 70.7 mm centred (the diagonal path is 1.414x longer),
+ * stays valid out to ~30 mm of error, and its difference is 1.41x more
+ * sensitive per mm of offset. It also cancels corridor width and common-mode
+ * bias exactly as the side difference does, so it needs no offset calibration.
+ *
+ * The side pair remains the fallback, unchanged, for when the angled beams are
+ * not on the robot's own corridor walls -- junctions, openings, and the
+ * approach to a front wall.
+ */
 
 /* Which wall is being used right now, and by how much the loop is tilting. */
 extern volatile uint8_t wf_side;
@@ -150,7 +172,13 @@ void WallFollow_ResetBias(void);
  * Returns 0 when no wall is usable, which is the correct behaviour rather
  * than a failure -- the robot then holds its heading target open-loop until a
  * wall comes back. */
-float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+/* !! TAKES ALL FIVE SENSORS, indexed by ToF_Sensor_t !!
+ *
+ * m[] must be TOF_SENSOR_TOTAL long, not TOF_SENSOR_COUNT: the angled pair at
+ * TOF_LEFT_45 / TOF_RIGHT_45 is the preferred lateral reference. A caller
+ * passing a 3-element array reads two elements off the end of its own stack,
+ * which compiles silently, so grep for callers when changing this. */
+float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_TOTAL],
                         float dt_s, float travelled_cm);
 
 /* The integral, in degrees, to be ADDED TO THE HEADING TARGET by the caller.

@@ -306,7 +306,9 @@ Currently **out of scope** unless explicitly requested:
 **No longer out of scope**, as of 2026-09-12 — earlier revisions of this file
 said all four were deliberately absent:
 
-- Wall detection — `Maze/wall_sense.c` turns distances into booleans.
+- Wall detection — `Maze/wall_sense.c` turns distances into booleans. Still
+  **front/left/right only**; the angled pair is deliberately kept out of the
+  wall/no-wall decision and is used purely for centring.
 - ToF in the straight-line controller — `runForwardFused()` centres on
   whichever side wall is in range.
 - IMU in the straight-line controller — it holds fused heading, not encoder
@@ -339,27 +341,34 @@ Three **navigation** sensors (front/left/right, orthogonal) plus a 45°
 | `TOF_FRONT` | north | 0 | navigation |
 | `TOF_LEFT` | west | 3 | navigation |
 | `TOF_RIGHT` | east | 4 | navigation |
-| `TOF_LEFT_45` | north-west | 1 | **nothing yet** |
-| `TOF_RIGHT_45` | north-east | 2 | **nothing yet** |
+| `TOF_LEFT_45` | north-west | 1 | **wall-follow centring** |
+| `TOF_RIGHT_45` | north-east | 2 | **wall-follow centring** |
 
 ⚠️ **`TOF_SENSOR_COUNT` is 3 and `TOF_SENSOR_TOTAL` is 5, and the gap is
-load-bearing.** The angled pair is initialised, readable and covered by
-`TEST_TOF_ANGLED`; nothing above the driver consumes it. Raising
-`TOF_SENSOR_COUNT` to 5 does **not** simply "enable" them — it would:
+load-bearing.** Since 2026-09-18 the angled pair IS consumed — by
+`wall_follow.c` for lateral centring — but the split remains, because the two
+counts mean different things: `TOF_SENSOR_COUNT` is *"sensors that detect
+walls"* (still front/left/right, as asked), `TOF_SENSOR_TOTAL` is *"sensors on
+the robot"*. The poll rotation and `WallFollow_Update()` use TOTAL;
+`wall_sense.c` and the maze layer use COUNT. Raising `TOF_SENSOR_COUNT` to 5
+would:
 
-1. Break the `_Static_assert` in `straightline_controller.c` requiring
-   `STRAIGHT_TOF_DIVIDER == TOF_SENSOR_COUNT`.
-2. Stretch the round-robin poll from 3 control cycles to 5, slowing the wall
-   follower's refresh by 67% — regressing timing work that took several arena
-   runs to get right (see the "poll unbunched" change-log entry).
-3. Feed 45° readings into `wall_sense.c`'s threshold tables, which have exactly
-   three positional entries.
+1. Feed 45° readings into `wall_sense.c`'s threshold tables, which have exactly
+   three positional entries — putting diagonal distances into the wall/no-wall
+   decision, which is explicitly not wanted.
+2. Break `wall_sense.c`'s `{0,0,0}` initialisers and per-sensor threshold
+   arrays.
 
-The bulk reads (`ToF_ReadAll`, `ReadAllLatest`, `PollOneLatest`,
-`ReadAllFresh`) fill a caller-supplied `out[TOF_SENSOR_COUNT]`. Every caller
-declares a 3-element array, so raising those loops writes **past the end of the
-caller's stack buffer** — silent corruption, not a compile error. Read an
-angled sensor one at a time via `ToF_ReadSingle()` / `ToF_ReadContinuous()`.
+(The poll rotation and the `STRAIGHT_TOF_DIVIDER` assert already moved to
+`TOF_SENSOR_TOTAL` when the angled pair was integrated, so those no longer
+depend on this number.)
+
+**Array sizes are a memory-safety boundary, and the four bulk reads are no
+longer uniform.** `ToF_PollOneLatest()` fills `out[TOF_SENSOR_TOTAL]` (five);
+`ToF_ReadAll`, `ReadAllLatest` and `ReadAllFresh` still fill
+`out[TOF_SENSOR_COUNT]` (three). A caller sizing its array from the wrong one
+reads or writes past the end of its own stack, which compiles silently. Check
+the prototype, not the habit.
 
 Use `ToF_NavSensorsReady()` — not `ToF_Init()`'s return — to ask whether
 navigation can run: a loose wire on an unused angled sensor must not read as a
@@ -374,10 +383,10 @@ real fusion must put both readings into a common robot frame using the offset
 **and** the rotation. Bearings are `TOF_ANGLED_*_BEARING_DEG`, signed to match
 §4's convention (positive = anticlockwise), so left-45 is +45 and right-45 −45.
 
-The angled offsets (`TOF_OFFSET_*_45_MM`) are **unmeasured, held at 0**. Don't
-assume they share the other three sensors' ~+27 mm bias: that was measured
-against a square flat target, and a 45° target returns weaker signal, which is
-what drives the VL53L0X's near-field over-read.
+The angled offsets (`TOF_OFFSET_*_45_MM`) are **unmeasured, held at 0 — and
+centring does not need them.** The error is a *difference* between the pair, so
+any bias common to both subtracts out exactly, along with corridor width. They
+would only matter if something ever used an angled reading on its own.
 
 ### The ST API is vendor code
 
@@ -596,6 +605,96 @@ accident.
 ---
 
 ## Change log
+
+### 2026-09-18 (newest) - The side pair goes blind exactly where it is needed
+
+An arena run traversed the outer corridors well and turned the corners, then
+entered each following corridor off-centre and never recovered, accumulating
+error until it contacted a wall. The user's diagnosis -- that the ToF sensors
+stop reading below about 30 mm -- is right, and the geometry says it is not
+marginal but structural:
+
+```
+corridor inner width   180 mm
+side sensor span       110 mm
+  -> centred, each side sensor sees (180-110)/2 = 35 mm
+  -> the VL53L0X floor is ~30 mm
+  -> FIVE MILLIMETRES of margin when everything is perfect
+```
+
+Ten millimetres of lateral error puts the near sensor at 25 mm and it stops
+reporting. So the follower loses its reference at exactly the error it exists
+to remove, and the offset persists into the next cell. That is the observed
+failure, and no amount of gain tuning reaches it.
+
+**The angled pair does not have the problem.** Looking diagonally the path is
+1/cos(45) = 1.414x longer, so a centred robot reads 70.7 mm -- more than twice
+the floor -- and stays valid out to ~30 mm of error, by which point the robot is
+nearly touching a wall:
+
+```
+lateral error   near side sensor   angled pair
+     0 mm            35 mm         70.7 / 70.7
+    10 mm            25 mm BLIND   84.9 / 56.6
+    20 mm            15 mm BLIND   99.0 / 42.4
+    30 mm             5 mm BLIND  113.1 / 28.3
+```
+
+**`WALL_FOLLOW_ANGLED` is now the preferred reference**, above `BOTH`. The side
+pair is untouched and remains the fallback for junctions, openings and front-wall
+approaches, where the angled beams leave the corridor.
+
+The error is `(L45 - R45)/2 * cos(45)`. Subtracting cancels corridor width, both
+mounting offsets and any common-mode bias -- the same argument that makes the
+side difference trustworthy, with a 1.41x better lever arm. **That is also why
+this works with `TOF_OFFSET_*_45_MM` still at 0**: a bias common to both sensors
+subtracts out, so the angled pair needs no calibration to centre correctly.
+
+**The `cos(45)` is a unit conversion, not a fudge.** `(L45-R45)/2` is in mm
+along the beam; multiplying by cos(45) converts to mm of lateral offset, which
+is what lets `WALL_FOLLOW_KP_DEG_PER_MM` carry over from the side pair
+unchanged. Drop it and the loop runs 41% hot with no symptom but overshoot. The
+host test sweeps +/-25 mm and asserts the reported error equals the true offset.
+
+**The poll rotation went 3 -> 5, and it costs almost nothing.** The sensors
+free-run at 40 ms and the loop runs at 10 ms, so the old 3-cycle rotation polled
+each sensor every 30 ms -- faster than it could produce, with three polls in
+four already finding nothing new. At 5 cycles each is polled every 50 ms, still
+far inside `TOF_MAX_SAMPLE_AGE_MS` (120). Readings are up to 20 ms older, about
+3 mm of travel at cruise. `STRAIGHT_TOF_DIVIDER` follows to 5 and its static
+assert now binds to `TOF_SENSOR_TOTAL`, preserving the invariant it always
+encoded: one follower update per complete rotation.
+
+`WALL_FOLLOW_UPDATE_S` derives from the divider, so it became 50 ms. **The slew
+limit is a RATE, so time-to-full-lean is unchanged at 0.50 s and the cascade
+rule is unaffected** -- that rule depends on `R * TURN_FF_GAIN /
+STRAIGHT_YAW_LIMIT`, in which the interval does not appear. Only the step
+granularity coarsens, 0.6 -> 1.0 degrees per update, which the slew limit
+bounds anyway.
+
+**Maze geometry is now stated rather than implied.** `MAZE_CORRIDOR_INNER_MM`
+(180) and `MAZE_WALL_THICKNESS_MM` (12) join `NAV_CELL_CM` (19.2), with the
+relation written down: pitch = inner + one wall. Anything counting CELLS wants
+the pitch; anything reasoning about what a SIDE SENSOR SEES wants the inner
+width, and confusing them is a 12 mm error -- most of the lateral tolerance.
+
+**Unresolved, and deliberately routed around.** The stated 110 mm span in a
+180 mm corridor predicts the side pair should read L+R ~ 124 mm with its known
++27 mm over-read, but Hiruna measured 104.3 mm stationary on 2026-09-12. Those
+cannot both be right. Rather than pick, the angled path was derived purely from
+the stated mounting geometry, so it does not depend on either figure, and
+`WALL_FOLLOW_SPAN_MM` was left alone so the side-wall fallback behaves exactly
+as before. **If the angled centring misbehaves, resolve that 20 mm discrepancy
+before tuning anything** -- it means one of the two measurements describes a
+robot or a corridor that is not the one being driven.
+
+- `wf_side` reads 4 for angled, 3 for the side pair -- added to the live-watch
+  list. If it never reaches 4 in a corridor, the span check is rejecting the
+  pair; widen `TOF_ANGLED_SPAN_TOL_MM` before suspecting the sensors.
+- Wall DETECTION is unchanged and still uses front/left/right only, as asked.
+  The IMU fusion and `yaw_estimator.c` were not touched.
+- Verified: warning-free clean build, all seven host suites pass. **Not yet run
+  on the robot.**
 
 ### 2026-09-18 - Two angled sensors, wired in but deliberately not consumed
 

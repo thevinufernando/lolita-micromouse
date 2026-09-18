@@ -287,12 +287,17 @@ volatile uint8_t  sl_entry_valid;
 volatile uint8_t  sl_stall_abort;
 
 /* The round-robin poll refreshes one sensor per control cycle, so a complete
- * rotation is exactly TOF_SENSOR_COUNT cycles -- which is when the wall
- * follower has new data on all three. If the two ever disagree the follower
- * either sees repeated samples or misses some, and neither failure announces
- * itself in the arena. */
-_Static_assert(STRAIGHT_TOF_DIVIDER == (uint32_t)TOF_SENSOR_COUNT,
-               "STRAIGHT_TOF_DIVIDER must equal TOF_SENSOR_COUNT");
+ * rotation is exactly TOF_SENSOR_TOTAL cycles -- which is when the wall
+ * follower has new data on every sensor it reads. If the two ever disagree the
+ * follower either sees repeated samples or misses some, and neither failure
+ * announces itself in the arena.
+ *
+ * TOTAL, not COUNT, since 2026-09-18: the follower now centres on the angled
+ * pair, so a "complete rotation" has to include them. The invariant is
+ * unchanged -- one follower update per full refresh -- only the number of
+ * sensors in a refresh moved. */
+_Static_assert(STRAIGHT_TOF_DIVIDER == (uint32_t)TOF_SENSOR_TOTAL,
+               "STRAIGHT_TOF_DIVIDER must equal TOF_SENSOR_TOTAL");
 
 volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];
 volatile uint32_t        tm_sl_trace_count;
@@ -759,7 +764,10 @@ uint8_t runForwardMove(const StraightMove_t *mv)
          * new the held reading is served, because handing the wall follower an
          * invalid measurement would make it drop and re-acquire its reference
          * several times a second. */
-        ToF_Measurement_t m[TOF_SENSOR_COUNT];
+        /* TOF_SENSOR_TOTAL: ToF_PollOneLatest() fills all five, and the wall
+         * follower reads the angled pair out of the upper two. Sizing this
+         * TOF_SENSOR_COUNT would overrun the stack silently. */
+        ToF_Measurement_t m[TOF_SENSOR_TOTAL];
 
         (void)ToF_PollOneLatest(m, TOF_MAX_SAMPLE_AGE_MS);
 

@@ -64,7 +64,22 @@
  * ============================================================================
  */
 
+/* ---- Maze geometry, standard competition maze ----
+ *
+ *      |<------------- 19.2 cm pitch ------------->|
+ *      #====#                                 #====#
+ *      # 1.2#<---------- 18.0 cm ------------->#1.2 #
+ *      #    #        (inner, wall face          #   #
+ *      #====#         to wall face)             #====#
+ *
+ * Pitch is measured lattice point to lattice point, so it includes one wall
+ * thickness: 18.0 + 1.2 = 19.2. Everything that counts CELLS uses the pitch;
+ * anything that reasons about what a SIDE SENSOR SEES uses the inner width,
+ * because the sensor looks at the wall face, not the lattice. Mixing the two
+ * is a 1.2 cm error, which is most of the lateral tolerance. */
 #define NAV_CELL_CM 19.2f    /* centre-to-centre cell pitch */
+#define MAZE_WALL_THICKNESS_MM 12.0f
+#define MAZE_CORRIDOR_INNER_MM 180.0f  /* = NAV_CELL_CM*10 - wall thickness */
 
 /* Where the robot is placed in the map at the start of a run.
  *

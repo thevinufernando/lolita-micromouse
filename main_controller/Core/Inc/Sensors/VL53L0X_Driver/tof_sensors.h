@@ -316,7 +316,10 @@ int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
  * The side pair stops being simultaneous, by two cycles at most. At cruise
  * that is a couple of millimetres along the corridor and a fraction of one
  * across it, well inside what the span check already tolerates. */
-int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+/* !! FILLS ALL FIVE. out[] must be TOF_SENSOR_TOTAL long. !!
+ * The rotation covers the angled pair too, since it became the wall
+ * follower's preferred lateral reference. A 3-element array here overruns. */
+int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_TOTAL],
                       uint32_t max_age_ms);
 
 /* Read all three, WAITING for a genuinely new measurement from each.

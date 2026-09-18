@@ -1133,7 +1133,7 @@
  * control loop stopped throughout: 10, 10, 10, 35 repeating, 53% of a move
  * spent not running. Spread one per cycle it is the same work, the same
  * per-sensor rate, and no cycle blocked for more than about twelve. */
-#define STRAIGHT_TOF_DIVIDER 3U
+#define STRAIGHT_TOF_DIVIDER 5U
 
 /* NOMINAL seconds between WallFollow_Update() calls -- one complete rotation
  * of the ToF poll. The real interval is MEASURED and passed in, because the
@@ -1651,6 +1651,103 @@
 #define TOF_ANGLED_INBOARD_MM 15.0f
 #define TOF_ANGLED_LEFT_BEARING_DEG 45.0f
 #define TOF_ANGLED_RIGHT_BEARING_DEG (-45.0f)
+
+/* Lateral separation of the two SIDE sensors, mm. Measured on the chassis. */
+#define TOF_SIDE_SPAN_MM 110.0f
+
+/* ================== ANGLED-SENSOR CENTRING (the 45 pair) ================= */
+/*
+ * WHY THIS EXISTS -- the side pair goes blind exactly when it is needed most.
+ *
+ * In a standard 180 mm corridor with the side sensors 110 mm apart, a perfectly
+ * centred robot leaves (180-110)/2 = 35 mm of air on each side. The VL53L0X
+ * stops reading reliably below about 30 mm. So the geometry clears the
+ * sensor's floor by FIVE MILLIMETRES when everything is perfect, and the
+ * margin is gone after 10 mm of lateral error:
+ *
+ *     lateral error   near side sensor   angled pair
+ *          0 mm            35 mm          70.7 / 70.7   both fine
+ *         10 mm            25 mm  BLIND   84.9 / 56.6   fine
+ *         20 mm            15 mm  BLIND   99.0 / 42.4   fine
+ *         30 mm             5 mm  BLIND  113.1 / 28.3   right one marginal
+ *
+ * That is the observed failure: after a corner the robot enters a corridor
+ * off-centre, the near sensor is already inside its dead zone, the follower
+ * cannot measure the error it most needs to correct, and the offset persists
+ * into the next cell and accumulates until the robot touches a wall.
+ *
+ * The angled pair does not have this problem. Looking diagonally, the path to
+ * the wall is longer by 1/cos(45) = 1.414, so a centred robot reads 70.7 mm --
+ * more than twice the floor -- and the reading stays usable out to 30 mm of
+ * error, by which point the robot is nearly touching.
+ *
+ * GEOMETRY. Robot frame, x positive to the right, origin on the centreline.
+ * The angled sensors sit TOF_ANGLED_INBOARD_MM inboard of the side sensors, so
+ * at x = -40 and +40 for a 110 mm span. Each looks 45 degrees outward-forward.
+ * For a robot displaced e to the right in a corridor of inner width W:
+ *
+ *     L45 = (W/2 + x_l45 + e) / cos(45)      x_l45 = -(SPAN/2 - INBOARD)
+ *     R45 = (W/2 - x_r45 - e) / cos(45)      x_r45 = +(SPAN/2 - INBOARD)
+ *
+ * Subtracting kills W, both mounting offsets and any common-mode bias:
+ *
+ *     (L45 - R45) / 2 = e / cos(45) = e * 1.414
+ *
+ * So the difference is a direct, 1.41x-amplified measure of lateral error that
+ * needs NO knowledge of corridor width and NO per-sensor offset calibration --
+ * which is why this works today with TOF_OFFSET_*_45_MM still at 0. It is the
+ * same argument that makes the side pair's difference trustworthy, with a
+ * better lever arm and far more headroom above the sensor floor.
+ *
+ * !! THE 1.414 IS THE SENSITIVITY, NOT A UNIT CONVERSION !!
+ * (L45-R45)/2 is in "mm of diagonal path", and dividing by 1.414 converts it
+ * to mm of lateral offset. TOF_ANGLED_LATERAL_GAIN does that, so the error
+ * this produces is in the same millimetres as the side pair's and the existing
+ * WALL_FOLLOW_KP_DEG_PER_MM applies unchanged. Drop the division and the gain
+ * is silently 41% too high.
+ */
+
+/* cos(45). The lateral error is (L45-R45)/2 divided by this. */
+#define TOF_ANGLED_COS45 0.70710678f
+
+/* Multiply (L45-R45)/2 by this to get lateral error in mm.
+ * = cos(45), i.e. divide by 1.414. */
+#define TOF_ANGLED_LATERAL_GAIN TOF_ANGLED_COS45
+
+/* What each angled sensor reads with the robot centred and square, mm.
+ *   (CORRIDOR/2 - (SPAN/2 - INBOARD)) / cos(45)
+ *   = (90 - 40) / 0.7071 = 70.7 mm
+ * Used only for the plausibility window below; the centring itself never needs
+ * it, because the difference cancels it. */
+#define TOF_ANGLED_NOMINAL_MM 70.7f
+
+/* Plausibility window on a single angled reading, mm.
+ *
+ * Rejects a beam that missed the near wall and found something further away --
+ * through a gap, or down an opening. The bound is generous because the reading
+ * legitimately moves a long way: 70.7 centred, 113 at 30 mm of error. Beyond
+ * about 130 the beam is almost certainly not on the robot's own corridor wall.
+ *
+ * TIGHTEN if phantom corrections appear at junctions. LOOSEN if the follower
+ * keeps dropping to the side pair in ordinary corridors -- tm_wf_src says
+ * which reference it actually used. */
+#define TOF_ANGLED_MIN_MM 25U
+#define TOF_ANGLED_MAX_MM 130U
+
+/* Consistency check on the PAIR, mm.
+ *
+ * Both beams hitting the two walls of one corridor sum to a value set by the
+ * corridor width alone -- 2*70.7 = 141 mm nominal -- whatever the robot's
+ * lateral position, because moving left lengthens one path exactly as much as
+ * it shortens the other. A sum far from that means at least one beam is not on
+ * the wall it is taken to be.
+ *
+ * Same idea as WALL_FOLLOW_SPAN_MM for the side pair, and the same trap: set
+ * the tolerance too tight and genuine pairs get rejected into the fallback
+ * path. Hiruna's note on that constant records half of all two-wall cells
+ * being thrown away exactly that way, so this starts deliberately loose. */
+#define TOF_ANGLED_SPAN_MM 141.4f
+#define TOF_ANGLED_SPAN_TOL_MM 35.0f
 
 /* ========================= Completion criteria =========================== */
 
