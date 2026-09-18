@@ -1365,8 +1365,48 @@
  * alignment's own correction: delta = (centre - target)/10 = -2.4 cm, against
  * a measured median demand of -3.36 cm over 32 firings. The alignment was
  * making the forward position worse, not better.
+ *
+ * ---------------------------------------------------------------------------
+ * 68 -> 80 ON 2026-09-18, for PIVOT CLEARANCE, and it is a TRADE.
+ * ---------------------------------------------------------------------------
+ * The robot was reaching too close to a front wall and contacting it on the
+ * turn. The chassis is 110 x 110 mm, so its half-diagonal -- the radius it
+ * sweeps when pivoting in place -- is 77.8 mm, and the cell centre is only
+ * 90.0 mm from the wall face (pitch/2 - wall/2 = 96 - 6).
+ *
+ *     clearance at a PERFECTLY placed pivot = 90.0 - 77.8 = 12.2 mm
+ *
+ * That 12.2 mm is the WHOLE budget and it is shared: a pivot converts forward
+ * error into lateral error almost one for one, so the same millimetres have to
+ * absorb both. Measured lateral errors on this robot have run 23-53 mm, which
+ * is several times the budget. This chassis genuinely cannot pivot at a cell
+ * centre with any meaningful position error -- the geometry, not the tuning,
+ * is what is tight.
+ *
+ * The robot drives forward until the front sensor READS this value, so a
+ * LARGER number stops it FURTHER from the wall:
+ *
+ *     target   pivot centre      clearance at the pivot
+ *      51.3    at cell centre        12.2 mm
+ *      68      17 mm short           28.9 mm     (previous)
+ *      80      29 mm short           40.9 mm     (now)
+ *
+ * WHAT IT COSTS. Stopping 29 mm short of the cell centre is a forward
+ * positioning error that the next move inherits -- exactly the error this
+ * whole section was written to remove. It buys clearance with odometry
+ * accuracy, which is why it is a trade and not a fix.
+ *
+ * THE REAL FIX IS NOT HERE. At 68 the pivot already cleared by 28.9 mm, so
+ * arriving close enough to touch means either (a) the alignment never fired
+ * and the stop was pure odometry -- check sl_align_applied and
+ * sl_align_reason -- or (b) lateral error consumed the shared budget, which
+ * points at the wall follower losing its reference in the last stretch, where
+ * a cell with a front wall often has no side walls. Those want opposite
+ * fixes. Read the telemetry before tuning this further; backing off is a
+ * holding measure, and past about 85 the robot stops so far short that the
+ * following move's odometry error becomes the larger problem.
  */
-#define WALL_FRONT_ALIGN_MM 68.0f
+#define WALL_FRONT_ALIGN_MM 75.0f
 
 /* Only align when the front reading is at or below this.
  *
