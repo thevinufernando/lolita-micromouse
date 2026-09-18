@@ -1196,6 +1196,31 @@
  *
  * It also widens the inner loop's linear range to 88/8 = 11 degrees, which
  * keeps WALL_FOLLOW_MAX_TILT_DEG comfortably inside it. */
+/* Furthest the COMMANDED heading may sit from the maze axis, degrees.
+ *
+ * The tilt and the learned drift are clamped separately -- to
+ * WALL_FOLLOW_MAX_TILT_DEG (10) and WALL_FOLLOW_KI_LIMIT_DEG (8) -- and they
+ * ADD. Nothing bounded the sum, so the commanded heading could legally reach
+ * 18 degrees off axis, and in a logged run it did: tilt pinned at -10.00,
+ * drift at -5.69, measured yaw -108.15 against a -90.00 target. The robot
+ * drove a whole corridor crabbed, pivoted from that heading, and wedged.
+ *
+ * 12 is chosen to sit ABOVE the tilt clamp and BELOW the sum. Above, because a
+ * legitimate full-authority correction must still be expressible -- clamping
+ * at or below 10 would silently cap the tilt itself and cripple ordinary
+ * cornering. Below the sum, because 18 degrees of lean is never a correct
+ * answer in a 180 mm corridor: the lateral error justifying it exceeds the
+ * corridor width.
+ *
+ * This bounds the COMMAND, not the robot. The maze is axis-aligned, which is a
+ * fact about the world rather than an assumption about the sensors, so a
+ * command further off-axis than this is wrong whatever the readings say.
+ *
+ * RAISE only if genuine corrections are being clipped -- sl_axis_clamped says
+ * how often, and in healthy cells it should read 0. LOWER if the robot still
+ * crabs far enough to clip a wall. */
+#define STRAIGHT_MAX_AXIS_LEAN_DEG 12.0f
+
 #define STRAIGHT_YAW_LIMIT 88.0f
 #define STRAIGHT_YAW_INT_LIMIT 20.0f
 
@@ -1494,6 +1519,31 @@
  * 350 the first engages and the second does not, with wide margin either
  * side, so no extra logic is needed to decide whether the wall is in the cell
  * the robot is entering. */
+/* ---- Corroboration before the alignment commits ----
+ *
+ * The alignment fires ONCE per move and permanently moves the endpoint, so a
+ * single bad front sample is committed rather than averaged away. That is the
+ * mechanism behind stops that are sometimes good and sometimes far too close:
+ * the endpoint is set by whichever sample arrived when every gate opened.
+ *
+ * Filtering alone does not cover it. Approaching at cruise the true distance
+ * moves several mm per update, so the EMA trails a moving target; and the
+ * filter's jump detector SNAPS to the raw value on a large step, which is
+ * exactly what a front wall entering range looks like.
+ *
+ * So require consecutive readings that agree. Two samples within
+ * WALL_FRONT_ALIGN_AGREE_MM cannot both be the same outlier.
+ *
+ * COST: one extra update, ~7 mm of approach at cruise, which the room test
+ * already has margin for. A disagreement resets the count, so a noisy patch
+ * defers the alignment to a calmer sample rather than acting on noise.
+ *
+ * RAISE _AGREE_N for more confidence at the cost of aligning later. RAISE
+ * _AGREE_MM if the alignment stops firing at all (sl_align_reason will say
+ * SL_ALIGN_TOO_FAR or NO_ROOM because the window closed while waiting). */
+#define WALL_FRONT_ALIGN_AGREE_N  2U
+#define WALL_FRONT_ALIGN_AGREE_MM 12U
+
 #define WALL_FRONT_ALIGN_RANGE_MM 350U
 
 /* Wall distance the alignment would PREFER to fire at, mm.

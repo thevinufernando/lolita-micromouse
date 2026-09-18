@@ -285,6 +285,7 @@ volatile float    sl_exit_err_mm;
 volatile uint8_t  sl_exit_valid;
 volatile uint8_t  sl_entry_valid;
 volatile uint8_t  sl_stall_abort;
+volatile uint8_t  sl_axis_clamped;
 
 /* The round-robin poll refreshes one sensor per control cycle, so a complete
  * rotation is exactly TOF_SENSOR_TOTAL cycles -- which is when the wall
@@ -569,6 +570,13 @@ uint8_t runForwardMove(const StraightMove_t *mv)
     float   align_base_cm    = 0.0f;
     float   align_t0_s       = 0.0f;
     uint8_t align_tried      = (front_target_mm > 0.0f) ? 0U : 1U;
+
+    /* Corroboration state for the front-wall alignment: the previous reading
+     * and how many consecutive samples have agreed with each other. Per-move,
+     * because the alignment is per-move. */
+    uint16_t align_prev_mm    = 0U;
+    uint8_t  align_prev_valid = 0U;
+    uint8_t  align_agree_n    = 0U;
 
     sl_align_delta_cm = 0.0f;
     sl_align_applied  = 0U;
@@ -885,8 +893,56 @@ uint8_t runForwardMove(const StraightMove_t *mv)
 
                 uint16_t f = m[TOF_FRONT].distance_mm;
 
+                /* ONE READING MUST NOT DECIDE WHERE THE MOVE ENDS.
+                 *
+                 * The alignment fires ONCE per move and permanently moves the
+                 * endpoint, so a single bad front sample is not averaged away
+                 * by anything -- it is committed. That is the mechanism behind
+                 * "sometimes it stops well, sometimes far too close": the
+                 * stop point is set by whichever sample happened to arrive at
+                 * the moment every gate opened.
+                 *
+                 * The reading is already median+EMA filtered, but that is not
+                 * enough here for two reasons. Approaching at cruise the true
+                 * distance moves several mm between updates, so the EMA is
+                 * always trailing a moving target rather than settling on a
+                 * static one. And the filter's jump detector deliberately
+                 * SNAPS to the raw value on a large step -- which is exactly
+                 * what a front wall coming into range looks like -- so the
+                 * sample available right then can be unfiltered.
+                 *
+                 * So require CONSECUTIVE readings that agree. Two samples
+                 * within WALL_FRONT_ALIGN_AGREE_MM of each other cannot both
+                 * be the same outlier, and at a 50 ms update the corroboration
+                 * costs one cycle -- about 7 mm of approach, which the room
+                 * test already has margin for. A disagreement resets the
+                 * count, so a noisy patch simply defers the alignment to a
+                 * calmer sample rather than acting on the noise. */
+                uint8_t agrees = 0U;
+
+                if (m[TOF_FRONT].valid && f != TOF_DISTANCE_INVALID) {
+                    if (align_prev_valid
+                        && fabsf((float)f - (float)align_prev_mm)
+                               <= (float)WALL_FRONT_ALIGN_AGREE_MM) {
+                        if (align_agree_n < 255U) align_agree_n++;
+                    } else {
+                        align_agree_n = 1U;   /* this sample is the new first */
+                    }
+
+                    align_prev_mm    = f;
+                    align_prev_valid = 1U;
+                } else {
+                    /* An invalid reading breaks the chain: the next good one
+                     * has nothing to be corroborated against. */
+                    align_agree_n    = 0U;
+                    align_prev_valid = 0U;
+                }
+
+                agrees = (align_agree_n >= WALL_FRONT_ALIGN_AGREE_N) ? 1U : 0U;
+
                 if (m[TOF_FRONT].valid
                     && f != TOF_DISTANCE_INVALID
+                    && agrees
                     && f <= WALL_FRONT_ALIGN_RANGE_MM) {
 
                     /* Signed travel still needed for the sensor to read the
@@ -1028,10 +1084,67 @@ uint8_t runForwardMove(const StraightMove_t *mv)
         /* The cascade: lateral error tilts the HEADING TARGET, and the
          * heading loop closes on that. The drift bleed rides along on the
          * same signal. */
-        float heading_target = TurnController_GetHeadingTargetDeg()
-                               + WallFollow_GetDriftDeg();
+        const float axis_deg = TurnController_GetHeadingTargetDeg();
+
+        float heading_target = axis_deg + WallFollow_GetDriftDeg();
 
         sl_yaw_target_deg = heading_target + tilt_deg;
+
+        /* ================= THE COMMANDED HEADING MAY NOT LEAVE THE AXIS ====
+         *
+         * Two corrections are added above -- the tilt (clamped to
+         * WALL_FOLLOW_MAX_TILT_DEG) and the learned drift (clamped to
+         * WALL_FOLLOW_KI_LIMIT_DEG) -- and NOTHING bounded their SUM. They are
+         * clamped separately and they add, so the commanded heading could
+         * legally sit 18 degrees off the maze axis. It did:
+         *
+         *     wf_tilt_deg   -10.00  (pinned at its clamp)
+         *     wf_drift_deg   -5.69
+         *     measured yaw  -108.15 against a -90.00 heading target
+         *
+         * The robot drove a corridor 18 degrees crabbed, pivoted from that
+         * heading -- which looks exactly like a turn overshooting by 18
+         * degrees, and was not: turn_target_yaw_deg was a clean -90.00 at
+         * every cell -- and wedged on the next wall.
+         *
+         * THE MAZE IS AXIS-ALIGNED. That is a fact about the world, not an
+         * assumption about the sensors, and it is the one thing here that
+         * cannot be wrong. A commanded heading more than
+         * STRAIGHT_MAX_AXIS_LEAN_DEG from a multiple of 90 is therefore
+         * WRONG whatever the sensors say, because no correct correction ever
+         * needs it: the lateral error that would justify such a lean is larger
+         * than the corridor.
+         *
+         * This is why the clamp goes HERE rather than on either term. Bounding
+         * the tilt alone leaves the drift free, bounding the drift alone
+         * leaves the tilt free, and either can reach the limit on its own --
+         * only their sum is the quantity that steers the robot.
+         *
+         * It is a limit, not a controller. In every healthy cell the lean is a
+         * few degrees and this does nothing at all; it exists solely to stop a
+         * loop that has lost its reference from walking the robot into a wall
+         * while faithfully doing what it was told. */
+        {
+            /* Nearest multiple of 90 -- the axis the robot is supposed to be
+             * driving along. Uses the TURN CONTROLLER'S target rather than the
+             * measured yaw: the target is where the robot is meant to be, and
+             * measuring from where it actually is would let the clamp drift
+             * along with the error it is supposed to bound. */
+            const float axis = 90.0f * roundf(axis_deg / 90.0f);
+            const float lean = sl_yaw_target_deg - axis;
+
+            if (lean > STRAIGHT_MAX_AXIS_LEAN_DEG) {
+                sl_yaw_target_deg = axis + STRAIGHT_MAX_AXIS_LEAN_DEG;
+                sl_axis_clamped   = 1U;
+            }
+            else if (lean < -STRAIGHT_MAX_AXIS_LEAN_DEG) {
+                sl_yaw_target_deg = axis - STRAIGHT_MAX_AXIS_LEAN_DEG;
+                sl_axis_clamped   = 1U;
+            }
+            else {
+                sl_axis_clamped = 0U;
+            }
+        }
 
         float yaw = YawEstimator_GetYawDeg();
 

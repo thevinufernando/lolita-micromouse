@@ -259,6 +259,12 @@ extern volatile uint8_t sl_entry_valid;
  * Cleared at the start of every move. */
 extern volatile uint8_t sl_stall_abort;
 
+/* Set while the commanded heading is being held at STRAIGHT_MAX_AXIS_LEAN_DEG
+ * from the maze axis. In a healthy cell it reads 0. Sustained 1 means the wall
+ * follower is asking for a lean the geometry says cannot be right -- check
+ * wf_side and wf_error_mm to find which reference is lying. */
+extern volatile uint8_t sl_axis_clamped;
+
 //Blocking moves. Return 1 on success, 0 if the safety timeout fired.
 uint8_t runForwardDistance(float distance_cm);
 uint8_t runBackwardDistance(float distance_cm);

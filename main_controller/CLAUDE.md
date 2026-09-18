@@ -625,6 +625,79 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (newest) - It was never the turn. It was an 18 degree crab.
+
+Best run yet: 29 cells, reached the goal, identified it, blinked. Then a turn
+that "looked like more than 90 degrees" left the robot mis-oriented and it
+wedged. **The turn was accurate.** The logs are unambiguous:
+
+```
+rec  pose   yaw_deg   heading_target   off-axis   wf_side
+25  (6,7)   -97.43      -90.00          7.4       NONE
+27  (7,8)   -97.88      -90.00          7.9       NONE
+28  (7,8)  -108.15      -90.00         18.2       L45   <- wedged
+```
+
+`heading_target` is a clean -90.00 at every single cell, so the turn
+controller is commanding exactly 90 degrees and hitting it. What the eye reads
+as an overshooting turn is a robot **pivoting from an already-crabbed
+heading**: it entered the turn 7.9 degrees off, so it left 7.9 degrees off.
+
+**Where the crab comes from.** The live wall-follow terms add up exactly:
+
+```
+wf_tilt_deg    -10.00   (PINNED at WALL_FOLLOW_MAX_TILT_DEG)
+wf_drift_deg    -5.69   (limit 8.0)
+               ------
+total lean     -15.69   commanded, not error
+wf_error_mm    -28.07   past WALL_FOLLOW_URGENT_ERR_MM, so the urgent slew
+                        was driving the tilt to its clamp as fast as allowed
+wf_switches        53   across 29 cells -- the reference changed twice a cell
+```
+
+Both corrections are added to the heading target and **nothing bounded their
+SUM**. They are clamped separately, so 10 + 8 = 18 degrees of lean was legal.
+The robot was faithfully driving where it had been told to.
+
+**Fix: `STRAIGHT_MAX_AXIS_LEAN_DEG` (12).** The commanded heading is now
+clamped to within 12 degrees of the nearest multiple of 90. The clamp goes on
+the SUM, in straightline_controller.c where the heading target is assembled,
+because bounding either term alone leaves the other free and either can reach
+the limit by itself.
+
+12 sits deliberately above `WALL_FOLLOW_MAX_TILT_DEG` (10) so full cornering
+authority survives, and below the 18 that wedged the robot. **The maze is
+axis-aligned** -- a fact about the world, not an assumption about the sensors
+-- so a command further off-axis than this is wrong whatever the readings say:
+the lateral error that would justify it is wider than the corridor.
+
+`sl_axis_clamped` is new telemetry. In a healthy cell it reads 0; sustained 1
+means the follower is asking for a lean the geometry forbids, and `wf_side`
+plus `wf_error_mm` say which reference is lying.
+
+**Second fix, for the user's observation that front-wall stops are sometimes
+good and sometimes far too close.** The alignment fires ONCE per move and
+permanently moves the endpoint, off a SINGLE front sample -- so a noisy
+reading is committed, not averaged away. Filtering does not cover this:
+approaching at cruise the true distance moves several mm per update so the EMA
+trails a moving target, and the filter's jump detector deliberately SNAPS to
+the raw value on a large step, which is exactly what a front wall entering
+range looks like.
+
+`WALL_FRONT_ALIGN_AGREE_N` (2) and `_AGREE_MM` (12): consecutive readings must
+now agree within 12 mm before the endpoint moves. Two samples cannot both be
+the same outlier. Costs one update, about 7 mm of approach, which the room
+test already has margin for; a disagreement resets the count so a noisy patch
+defers the alignment rather than acting on it.
+
+**Still open, and the likelier root cause: 53 reference switches in 29 cells.**
+Every switch changes what "centred" means, and a single-beam reference (L45,
+which was active at the wedge) holds a DISTANCE rather than a difference -- so
+if that distance is wrong the loop leans permanently to satisfy it, and the
+lean IS the heading error. The axis clamp bounds the damage; it does not stop
+the thrashing. Reference hysteresis is the next thing to try if this run still
+crabs.
+
 ### 2026-09-19 (newest) - The LED says when the goal is reached
 
 The robot had no way to say it had found the goal. It does now: **long–short–

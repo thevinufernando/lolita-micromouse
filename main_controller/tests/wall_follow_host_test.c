@@ -674,5 +674,66 @@ int main(void){
           "and below the nominal clearance, so it fires before contact");
   }
 
+  /* ======== THE COMMANDED HEADING MAY NOT LEAVE THE MAZE AXIS =========
+     The tilt and the drift are clamped separately and then ADDED, and nothing
+     bounded the sum. A logged run reached tilt -10.00 (pinned) plus drift
+     -5.69, giving a measured yaw of -108.15 against a -90.00 target: the robot
+     drove a corridor 18 degrees crabbed and wedged. It looked like a turn
+     overshooting by 18 degrees and was not -- the turn target was a clean
+     -90.00 at every cell. */
+  {
+    const float worst_sum = WALL_FOLLOW_MAX_TILT_DEG + WALL_FOLLOW_KI_LIMIT_DEG;
+
+    CHECK(worst_sum > 15.0f,
+          "tilt and drift can together ask for more than 15 deg of lean");
+    CHECK(STRAIGHT_MAX_AXIS_LEAN_DEG < worst_sum,
+          "so the axis clamp must be tighter than their sum -- that is its job");
+
+    /* Above the tilt clamp, or the clamp silently caps ordinary cornering. */
+    CHECK(STRAIGHT_MAX_AXIS_LEAN_DEG > WALL_FOLLOW_MAX_TILT_DEG,
+          "but looser than the tilt clamp, so full cornering authority survives");
+
+    /* The lean it permits must still be geometrically sane: at this angle one
+       cell of travel must not sweep the robot across the corridor. */
+    const float half_gap =
+        (MAZE_CORRIDOR_INNER_MM - TOF_SIDE_SPAN_MM) * 0.5f;
+    const float sweep =
+        NAV_CELL_CM * 10.0f * sinf(STRAIGHT_MAX_AXIS_LEAN_DEG * 3.14159265f / 180.0f);
+    CHECK(sweep < MAZE_CORRIDOR_INNER_MM,
+          "a cell at max lean does not sweep wider than the corridor");
+    CHECK(half_gap > 0.0f, "corridor geometry is sane");
+
+    /* The 18 deg that actually wedged the robot must now be refused. */
+    CHECK(18.0f > STRAIGHT_MAX_AXIS_LEAN_DEG,
+          "the 18 deg lean from the wedged run is now clamped away");
+  }
+
+  /* ========== ONE FRONT READING MUST NOT DECIDE THE STOP POINT =========
+     The alignment fires once per move and permanently moves the endpoint, so
+     a single noisy front sample is committed rather than averaged away --
+     the reason stops were sometimes good and sometimes far too close. */
+  {
+    CHECK(WALL_FRONT_ALIGN_AGREE_N >= 2U,
+          "at least two readings must agree before the endpoint moves");
+
+    /* The agreement window has to be wider than the distance the robot
+       actually closes between two updates, or no two samples ever agree and
+       the alignment never fires. */
+    const float closing_mm_per_update =
+        STRAIGHT_PROFILE_MAX_CMS * 10.0f * WALL_FOLLOW_UPDATE_S;
+    CHECK((float)WALL_FRONT_ALIGN_AGREE_MM > closing_mm_per_update,
+          "the agreement window exceeds the distance closed between updates");
+
+    /* But tight enough to actually reject an outlier worth rejecting. */
+    CHECK((float)WALL_FRONT_ALIGN_AGREE_MM < WALL_FRONT_ALIGN_MAX_CM * 10.0f,
+          "and is tighter than the correction the alignment may apply");
+
+    /* The corroboration delay must not eat the approach window. */
+    const float delay_mm =
+        (float)(WALL_FRONT_ALIGN_AGREE_N - 1U) * closing_mm_per_update;
+    CHECK(delay_mm < WALL_FRONT_ALIGN_BEST_MARGIN_MM * 0.5f,
+          "and waiting for agreement costs far less than the align window");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }
