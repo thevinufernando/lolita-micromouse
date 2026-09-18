@@ -1243,8 +1243,53 @@ uint8_t runForwardMove(const StraightMove_t *mv)
          * the front-wall alignment never gets its chance, and the run ends
          * looking like a steering fault rather than a mechanical one. Failing
          * the move says what actually happened. */
+        /* WEDGED IS NOT ALWAYS STOPPED, AND THAT COST A RUN.
+         *
+         * The test above was `speed_cms < STRAIGHT_STALL_RATE_CMS`, i.e. "is
+         * the robot stationary". A robot jammed against a wall it cannot see
+         * -- a corner, a post, contact at an angle -- does not stop dead. It
+         * CREEPS. Measured: 140 mm in 9.04 s, which is 1.55 cm/s against a
+         * 1.50 threshold. It missed by five hundredths and burned the full
+         * CONTROL_MOVE_TIMEOUT_MS grinding, with none of the ToF sensors
+         * showing anything close (front 311, left 220, right 94 mm).
+         *
+         * So the question is not "is it moving" but "is it going to finish".
+         * A move that cannot cover the distance it has left in the time it has
+         * left is over, whatever the speedometer says. The required rate is
+         * computed from what actually remains rather than from a fixed number,
+         * so it tightens naturally as the timeout approaches instead of
+         * needing a second constant that would drift away from the first.
+         *
+         * STRAIGHT_STALL_RATE_CMS is kept as the floor of that test: a move is
+         * never failed for being slower than a rate it was never asked to
+         * beat, which protects the deliberate crawl at the end of a profile.
+         * Both conditions must hold, and the breakaway must still have had its
+         * turn. */
+        const uint32_t elapsed_ms = now - start_ms;
+        const uint32_t left_ms    = (elapsed_ms >= CONTROL_MOVE_TIMEOUT_MS)
+                                      ? 0U
+                                      : (CONTROL_MOVE_TIMEOUT_MS - elapsed_ms);
+
+        /* Distance still to cover, cm, as a positive quantity. */
+        const float to_go_cm = fabsf(target_cm - measured);
+
+        /* The rate that would just finish in the time remaining, with a
+         * margin so a move is not failed for being marginally behind. Guarded
+         * against the final milliseconds, where left_ms tends to zero and the
+         * required rate would otherwise go to infinity and fail every move. */
+        float need_cms = 0.0f;
+
+        if (left_ms > STRAIGHT_PROGRESS_MIN_MS) {
+            need_cms = to_go_cm / ((float)left_ms * 0.001f)
+                       * STRAIGHT_PROGRESS_MARGIN;
+        }
+
+        const uint8_t too_slow_to_finish =
+            (need_cms > 0.0f) && (speed_cms < need_cms)
+            && (speed_cms < STRAIGHT_PROGRESS_MAX_CMS);
+
         if (fabsf(base) >= CONTROL_MIN_MOVE_SPEED
-            && speed_cms < STRAIGHT_STALL_RATE_CMS
+            && (speed_cms < STRAIGHT_STALL_RATE_CMS || too_slow_to_finish)
             && sl_breakaway_count >= STRAIGHT_BREAKAWAY_MAX) {
 
             /* ONLY ONCE THE BREAKAWAY HAS HAD ITS TURN. The pulse is the

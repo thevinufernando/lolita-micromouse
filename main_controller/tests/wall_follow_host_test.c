@@ -841,5 +841,55 @@ int main(void){
           "and is far longer than any gap the chain margin can absorb");
   }
 
+  /* ====== WEDGED IS NOT ALWAYS STOPPED: THE PROGRESS TEST ==========
+     A run reached the goal and failed on the way back, creeping 140 mm in
+     9.04 s -- 1.55 cm/s against a 1.50 stall threshold. It missed by five
+     hundredths and burned the whole 8 s timeout while jammed on something no
+     ToF beam could see. */
+  {
+    const float crept_cms = 14.0f / 9.04f;          /* 140 mm in 9.04 s */
+    const float cell_cm   = NAV_CELL_CM;
+
+    /* The creep that was missed really is above the stall threshold -- this
+       is the gap the new test fills, stated as a number. */
+    CHECK(crept_cms > STRAIGHT_STALL_RATE_CMS,
+          "the measured creep evades the stall threshold");
+
+    /* And really is too slow to finish a cell inside the timeout. */
+    const float need_to_finish =
+        cell_cm / ((float)CONTROL_MOVE_TIMEOUT_MS * 0.001f);
+    CHECK(crept_cms < need_to_finish,
+          "yet cannot cover a cell before the timeout -- so it must be failed");
+
+    /* The new gate must catch it. */
+    CHECK(crept_cms < STRAIGHT_PROGRESS_MAX_CMS,
+          "the creep is inside the progress test's speed window");
+
+    /* But the window must not swallow a healthy move. */
+    CHECK(STRAIGHT_PROGRESS_MAX_CMS < STRAIGHT_PROFILE_MAX_CMS * 0.5f,
+          "while a cruising robot is far outside it");
+
+    /* The margin must actually relax the requirement, or a move marginally
+       behind schedule gets failed for no good reason. */
+    CHECK(STRAIGHT_PROGRESS_MARGIN > 0.0f && STRAIGHT_PROGRESS_MARGIN < 1.0f,
+          "the margin only ever relaxes the required rate");
+
+    /* The end-of-move guard has to cover more than one control cycle, or the
+       required rate blows up in the final milliseconds and fails everything. */
+    CHECK((float)STRAIGHT_PROGRESS_MIN_MS
+              > CONTROL_SAMPLE_TIME_S * 1000.0f * 10.0f,
+          "and the test is disabled well before the deadline, not at it");
+  }
+
+  /* ====== THE TRACE MUST OUTLAST THE RUN ========== */
+  {
+    /* 82 moves filled a 64-record buffer, so the failure was in the
+       unrecorded tail and had to be reconstructed from live globals. */
+    CHECK(MAZE_TRACE_CAPACITY >= 128U,
+          "the trace holds a full explore + return + speed run");
+    CHECK((uint32_t)MAZE_TRACE_CAPACITY * 60U < 16384U,
+          "and still costs a small fraction of RAM");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

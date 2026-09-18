@@ -187,7 +187,12 @@
  * reason is reported as NAV_END_TRACE_FULL. Keep it comfortably above
  * NAV_MAX_MOVES + 2, which covers the budget, the final record, and the extra
  * one a failed move writes. At 48 bytes each this costs 3072 bytes of RAM. */
-#define MAZE_TRACE_CAPACITY 64U
+/* 64 -> 128 on 2026-09-19. An 82-move run filled the buffer at move 64, so
+ * the failure happened in the unrecorded tail and had to be reconstructed from
+ * live globals -- which only hold the LAST value of anything. At 60 bytes a
+ * record, 128 is 7.7 KB of a 128 KB part, and a full exploration plus return
+ * plus speed run is comfortably inside it. */
+#define MAZE_TRACE_CAPACITY 128U
 
 typedef struct {
   uint32_t timestamp_ms;
@@ -271,9 +276,24 @@ typedef struct {
    * at the cell centre. A spread here IS a spread in where every subsequent
    * move begins. */
   uint16_t stop_front_mm;
+
+  /* PER-WHEEL TRAVEL OVER THE MOVE THAT ARRIVED HERE, in tenths of a mm.
+   *
+   * Added after a move crept at 1.55 cm/s for nine seconds with no ToF sensor
+   * showing an obstruction -- wedged on something none of the beams could see.
+   * Nothing in the trace could say whether both wheels were dragging or one
+   * was doing all the work, and those are different faults: symmetric slip is
+   * a traction or loading problem, a large asymmetry is one wheel binding or
+   * an encoder not counting.
+   *
+   * Tenths of a mm in an int16 covers +/-3.2 m, far more than a cell, and
+   * keeps the pair to four bytes. SIGNED because a reverse move is a real
+   * move; a sign disagreement between the two is itself diagnostic. */
+  int16_t left_travel_tmm;
+  int16_t right_travel_tmm;
 } MazeTrace_t;
 
-_Static_assert(sizeof(MazeTrace_t) == 56,
+_Static_assert(sizeof(MazeTrace_t) == 60,
                "MazeTrace_t stride changed: update the SWD telemetry reader");
 
 extern volatile MazeTrace_t tm_maze_trace[MAZE_TRACE_CAPACITY];

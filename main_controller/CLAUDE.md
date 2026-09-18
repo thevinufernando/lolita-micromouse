@@ -625,6 +625,83 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (newest) - Wedged is not the same as stopped
+
+The robot now reaches and identifies the goal on most runs. This one explored,
+found the goal, and failed on the way back:
+
+```
+tm_maze_complete      1         goal identified
+tm_maze_moves         27
+tm_maze_abort_reason  2         MOVE_FAILED (timeout, not stall)
+sl_stall_abort        0         <- the stall detector did NOT fire
+final pose            (7,7) SOUTH, phase EXPLORE_TO_START
+wall_front_mm         311       left 220, right 94 -- nothing close
+```
+
+The trace timestamps show what happened:
+
+```
+rec 25   77.05 s  (7,8) forward, ok        +1.48 s   normal
+rec 26   78.53 s  (7,7) forward, ok
+rec 27   87.56 s  (7,7) FAILED             +9.04 s   ran to timeout
+```
+
+Same pose at 26 and 27 -- the pose never advanced. The robot covered 140 mm of
+a 192 mm cell in nine seconds and hit `CONTROL_MOVE_TIMEOUT_MS`.
+
+**The user reports it was physically stuck against a wall.** No ToF beam showed
+it: front 311 mm, left 220, right 94. So the obstruction was a corner, a post,
+or contact at an angle -- geometry none of the five sensors points at.
+
+**Why the stall detector missed it, and this is the whole fix:**
+
+```
+measured creep            1.55 cm/s   (140 mm / 9.04 s)
+STRAIGHT_STALL_RATE_CMS   1.50 cm/s   <- missed by five hundredths
+needed to finish in 8 s   2.40 cm/s
+commanded cruise         14.00 cm/s   (it managed 11%)
+```
+
+The detector asks "is the robot stationary". A robot jammed on something does
+not stop dead -- **it creeps**. There was a dead band between 1.5 cm/s and the
+2.4 cm/s needed to finish, in which a move is doomed but invisible, and it
+simply burned the full timeout.
+
+The test now also asks **"is this move going to finish"**: is the measured
+speed below what is needed to cover the distance remaining in the time left
+before the timeout. That requirement tightens by itself as the deadline
+approaches, so it stays in step with `CONTROL_MOVE_TIMEOUT_MS` without a second
+constant to drift against it. `STRAIGHT_STALL_RATE_CMS` is kept as the floor,
+so a move is never failed for being slower than a rate it was never asked to
+beat.
+
+Three guards keep it honest: `STRAIGHT_PROGRESS_MARGIN` (0.5) only ever relaxes
+the requirement, `STRAIGHT_PROGRESS_MIN_MS` (1500) disables the test near the
+deadline where the required rate would tend to infinity, and
+`STRAIGHT_PROGRESS_MAX_CMS` (4.0) confines it to creeping rather than to a move
+merely behind schedule.
+
+**Per-wheel travel is now in the trace.** `left_travel_tmm` and
+`right_travel_tmm`, tenths of a mm, signed. Nothing recorded could say whether
+both wheels were dragging or one was doing all the work, and those are
+different faults: symmetric slip is traction or loading, a large asymmetry is
+one wheel binding or an encoder not counting. Given the loose wheel found
+earlier, that distinction is worth having. `MazeTrace_t` is 60 bytes now; the
+stride assert moved with it.
+
+**`MAZE_TRACE_CAPACITY` 64 -> 128.** The previous 82-move run filled the buffer
+at move 64, so the failure was in the unrecorded tail and had to be
+reconstructed from live globals -- which only ever hold the LAST value of
+anything. 128 records at 60 bytes is 7.7 KB of a 128 KB part; RAM is now 21.9%.
+
+**Note what this change does and does not do.** It makes a wedged move fail in
+about two seconds instead of eight, with an honest reason, instead of grinding.
+It does not stop the robot getting wedged. If the next run still wedges, the
+per-wheel figures are the thing to read: a large left/right asymmetry points at
+the drivetrain, near-equal travel at both wheels points at the robot being
+driven into geometry the sensors cannot see.
+
 ### 2026-09-19 (newest) - A loose wheel, and a guard asking the question at the wrong moment
 
 **The hardware was the dominant variable all along.** A wheel was loose for

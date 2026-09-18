@@ -1685,6 +1685,39 @@
  * and still less than half the two seconds the wedged run spent grinding. */
 #define STRAIGHT_STALL_ABORT_MS 1200U
 
+/* ---- "Too slow to finish", as distinct from "not moving" ----
+ *
+ * STRAIGHT_STALL_RATE_CMS catches a robot that has stopped. It does not catch
+ * one that is WEDGED AND CREEPING, which is what a robot jammed on a corner or
+ * a post actually does -- it does not stop dead, it inches. Measured on a run
+ * that reached the goal and failed on the way back: 140 mm in 9.04 s, or
+ * 1.55 cm/s against a 1.50 threshold. It missed by five hundredths and burned
+ * the whole CONTROL_MOVE_TIMEOUT_MS, with no ToF sensor showing anything close
+ * (front 311, left 220, right 94 mm) because the obstruction was not in any
+ * beam.
+ *
+ * The additional test asks whether the move can still COMPLETE: is the
+ * measured speed below what is needed to cover the remaining distance in the
+ * time left before the timeout. That requirement tightens by itself as the
+ * deadline approaches, so it needs no second threshold to keep in step with
+ * the first. */
+
+/* Safety factor on the required rate. Below 1.0 the move is failed only once
+ * it is comfortably behind, not merely marginally so. */
+#define STRAIGHT_PROGRESS_MARGIN 0.5f
+
+/* Ignore the progress test in the last stretch before the timeout, ms. As
+ * left_ms tends to zero the required rate tends to infinity, which would fail
+ * every move in its final moments regardless of how well it was going. */
+#define STRAIGHT_PROGRESS_MIN_MS 1500U
+
+/* And never apply it above this speed, cm/s. A robot doing better than this is
+ * making real progress whatever the arithmetic says about the deadline -- the
+ * test exists for creeping, not for a move that is merely behind schedule.
+ * Sits between the creep that was missed (1.55) and the deliberate slow
+ * approach at the end of a profile. */
+#define STRAIGHT_PROGRESS_MAX_CMS 4.0f
+
 /* ---------------------- Noise filtering (tof_filter.c) ------------------- */
 
 /* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:

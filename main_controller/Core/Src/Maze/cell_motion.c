@@ -123,6 +123,21 @@ void CellMotion_Record(float move_error_cm, uint8_t move_ok,
     r->exit_err_mm    = s_exit_valid ? s_exit_err_mm : 0.0f;
     r->stop_front_mm  = s_stop_front_mm;
 
+    /* Per-wheel travel of the move that arrived here, tenths of a mm.
+     *
+     * Clamped rather than wrapped: a runaway odometer is exactly the fault
+     * this exists to record, and an int16 that silently wrapped would hide it
+     * behind a plausible small number. */
+    {
+        const float lt = Encoder_getLeftDistance()  * 100.0f;   /* cm -> 0.1mm */
+        const float rt = Encoder_getRightDistance() * 100.0f;
+
+        r->left_travel_tmm  = (int16_t)((lt >  32767.0f) ?  32767.0f :
+                                        (lt < -32768.0f) ? -32768.0f : lt);
+        r->right_travel_tmm = (int16_t)((rt >  32767.0f) ?  32767.0f :
+                                        (rt < -32768.0f) ? -32768.0f : rt);
+    }
+
     r->votes = (uint16_t)((wall_front_votes  & 7U)
                         | ((wall_left_votes   & 7U) << 3)
                         | ((wall_right_votes  & 7U) << 6)
