@@ -1509,7 +1509,7 @@
  * holding measure, and past about 85 the robot stops so far short that the
  * following move's odometry error becomes the larger problem.
  */
-#define WALL_FRONT_ALIGN_MM 80.0f
+#define WALL_FRONT_ALIGN_MM 71.0f
 
 /* Only align when the front reading is at or below this.
  *
