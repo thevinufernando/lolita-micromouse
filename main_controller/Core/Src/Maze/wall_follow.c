@@ -536,7 +536,33 @@ float WallFollow_Update(const ToF_Measurement_t m[TOF_SENSOR_TOTAL],
      * cycles, because sampling faster than the sensor produces only re-reads a
      * stale measurement. Using the control period here would make the slew
      * STRAIGHT_TOF_DIVIDER times slower than the constant says. */
-    const float max_step = WALL_FOLLOW_TILT_SLEW_DPS * dt_s;
+    /* A LARGE ERROR MAY SLEW FASTER.
+     *
+     * WallFollow_Reset() zeroes the tilt at every pivot, and this limit then
+     * rebuilds it at WALL_FOLLOW_TILT_SLEW_DPS. At 20 deg/s that is 0.5 s to
+     * reach the 10 degree clamp -- 70 mm of a 192 mm cell, over a third of it,
+     * spent at half authority or less. So the robot corrects most weakly in
+     * the cell straight after a turn, which is precisely the cell that
+     * inherits the pivot's lateral error. Measured on the arena: entered a
+     * cell 25 mm off centre, still 29 mm off a cell later, and wedged.
+     *
+     * The slew limit exists to stop the heading target STEPPING, because a
+     * step costs the inner loop its linear range (see the cascade rule at
+     * WALL_FOLLOW_MAX_TILT_DEG). That argument is about ORDINARY corrections.
+     * Past WALL_FOLLOW_URGENT_ERR_MM the robot is nearer to touching a wall
+     * than to being centred, and a faster-moving target is cheaper than
+     * another cell of drift.
+     *
+     * This is a FASTER SLEW, not a step: the rate rises to
+     * WALL_FOLLOW_URGENT_SLEW_DPS while the error is large, so the target
+     * still moves continuously and the heading loop can still track it. It
+     * reverts the moment the error comes back inside the threshold, so normal
+     * corridor behaviour is completely unchanged. */
+    const float slew_dps = (fabsf(wf_error_mm) >= WALL_FOLLOW_URGENT_ERR_MM)
+                         ? WALL_FOLLOW_URGENT_SLEW_DPS
+                         : WALL_FOLLOW_TILT_SLEW_DPS;
+
+    const float max_step = slew_dps * dt_s;
     float       step     = tilt - wf_tilt_deg;
 
     if (step >  max_step) step =  max_step;

@@ -607,6 +607,69 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (later) - The reference selection works; the RECOVERY does not
+
+First run on the reading-space constants. **The angled work is now doing what
+it was built to do**, which the logs show for the first time:
+
+```
+rec  pose    front left right | wall_side
+11  (1,10)     275   189    77 | R45      <- single angled beam
+12  (2,10)     457    76  ----  | BOTH
+13  (2,9)      594    27    82 | ANGLED   <- the pair, finally
+14  (2,9)      462    46   287 | L45      <- move FAILED here
+```
+
+Every tier appears -- ANGLED, L45, R45, BOTH. Before the reading-space fix
+`wf_side` had never once reached ANGLED. The near-field gate is also working:
+at rec 13 the left sensor read 27 mm, below `WALL_FOLLOW_USABLE_MIN_MM`, and
+was correctly refused rather than steered on.
+
+**But the robot still wedged, and the reason is recovery speed, not reference
+choice.** At rec 13 the left reading of 27 mm means a true gap near 10 mm --
+the robot was already ~25 mm off centre when ANGLED engaged, and one cell was
+not enough to pull that back before the walls changed again.
+
+**Why one cell was not enough.** `WallFollow_Reset()` zeroes the tilt at every
+pivot, and `WALL_FOLLOW_TILT_SLEW_DPS` then rebuilds it at 20 deg/s:
+
+```
+time to the 10 deg clamp   0.50 s
+distance covered at cruise   70 mm
+cell pitch                  192 mm   -> 36% of the cell spent ramping
+```
+
+So the cell that INHERITS a pivot's lateral error is the one with the least
+authority to remove it, at roughly half average tilt for its first third. That
+is exactly the user's observation: fine on the opening straight, wrong after
+turns.
+
+**Fix: `WALL_FOLLOW_URGENT_ERR_MM` (20 mm) and `WALL_FOLLOW_URGENT_SLEW_DPS`
+(40 deg/s).** Past 20 mm of lateral error -- over half the 35 mm nominal
+clearance, so the robot is nearer contact than centre -- the tilt slews at
+40 deg/s instead of 20, reaching the clamp in 35 mm of travel rather than 70.
+Below the threshold nothing changes, so ordinary corridor behaviour is
+untouched. It is a faster slew, not a step: the target still moves
+continuously.
+
+**40 is a ceiling, not a preference, and the host test enforced it.** 60 was
+tried first and refused. The cascade rule: the inner heading loop delivers
+`STRAIGHT_YAW_KP / TURN_FF_GAIN` = 4 deg/s of turn rate per degree of heading
+error, and its linear range is `STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP` = 11.0
+degrees, so a target ramping at R costs R/4 degrees of standing error and R
+must stay under 44. At 60 the cost is 15 degrees against an 11 degree range --
+the heading loop SATURATES and delivers less correction, not more. The test now
+asserts this symbolically so it cannot drift.
+
+**`WALL_FRONT_ALIGN_MM` deliberately LEFT at 80.** The front-wall contact looks
+like a forward-position problem and is not one: at an 80 mm target the pivot
+centre sits 118.7 mm from the wall face against a 77.8 mm half-diagonal, so
+clearance is 40.9 mm -- and still 42.6 mm with 20 mm of lateral error. There is
+no shortage of forward room. The contact comes from the lateral error rotating
+into the forward direction during the pivot, which is what the urgent slew
+addresses. Raising the target further would only spend forward odometry
+accuracy on a problem that is not forward.
+
 ### 2026-09-19 - Everything the loop compares is a READING. I got that wrong.
 
 The 52 -> 35 setpoint change from 2026-09-18 was **wrong and made the robot

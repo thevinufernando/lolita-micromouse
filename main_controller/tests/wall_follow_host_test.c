@@ -635,5 +635,44 @@ int main(void){
           "the angled reference sits at more than twice the sensor floor");
   }
 
+  /* ============ URGENT SLEW AFTER A PIVOT (2026-09-19) ================
+     WallFollow_Reset() zeroes the tilt at every turn. At the normal 20 deg/s
+     the lean takes 0.5 s to rebuild -- 70 mm of a 192 mm cell -- so the cell
+     that inherits the pivot's error is the one with the least authority to
+     remove it. A run entered a cell 25 mm off and was still 29 mm off a cell
+     later. */
+  {
+    const float clamp = WALL_FOLLOW_MAX_TILT_DEG;
+    const float t_norm = clamp / WALL_FOLLOW_TILT_SLEW_DPS;
+    const float t_urg  = clamp / WALL_FOLLOW_URGENT_SLEW_DPS;
+    const float speed_mm_s = STRAIGHT_PROFILE_MAX_CMS * 10.0f;
+
+    CHECK(WALL_FOLLOW_URGENT_SLEW_DPS > WALL_FOLLOW_TILT_SLEW_DPS,
+          "the urgent slew is faster than the normal one");
+
+    /* The ramp must fit in a small fraction of a cell, or it is not a fix. */
+    CHECK(t_urg * speed_mm_s < NAV_CELL_CM * 10.0f * 0.2f,
+          "at the urgent rate the lean is up within 20% of a cell");
+    CHECK(t_norm * speed_mm_s > NAV_CELL_CM * 10.0f * 0.3f,
+          "whereas the normal rate takes over 30% of it -- the problem");
+
+    /* THE CASCADE RULE STILL HAS TO HOLD. A ramping target costs the inner
+       heading loop R/(KP/FF) degrees of standing error; spend more than its
+       linear range and the loop saturates, delivering LESS correction. */
+    const float inner_rate = STRAIGHT_YAW_KP / TURN_FF_GAIN;   /* deg/s per deg */
+    const float ramp_cost  = WALL_FOLLOW_URGENT_SLEW_DPS / inner_rate;
+    CHECK(ramp_cost < STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP,
+          "and the urgent ramp still fits inside the heading loop's linear range");
+
+    /* It must not fire during ordinary corridor corrections. */
+    CHECK(WALL_FOLLOW_URGENT_ERR_MM > 10.0f,
+          "the urgent threshold is above routine corridor error");
+    /* But it must fire before the robot runs out of clearance. */
+    const float nominal_clear =
+        (MAZE_CORRIDOR_INNER_MM - TOF_SIDE_SPAN_MM) * 0.5f;
+    CHECK(WALL_FOLLOW_URGENT_ERR_MM < nominal_clear,
+          "and below the nominal clearance, so it fires before contact");
+  }
+
   printf("%s (%d failures)\n", fails?"FAILED":"ALL CHECKS PASSED", fails);
   return fails!=0; }

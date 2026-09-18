@@ -1073,6 +1073,36 @@
  * from-rest cell, against the 1 mm measured. */
 #define WALL_FOLLOW_TILT_SLEW_DPS 20.0f
 
+/* ---- Urgent-error slew, added 2026-09-19 ----
+ *
+ * Lateral error at which the tilt is allowed to build faster than
+ * WALL_FOLLOW_TILT_SLEW_DPS, in mm.
+ *
+ * 20 mm is over half the 35 mm nominal clearance each side, so a robot this
+ * far out has lost most of its margin and is heading for contact. Below it,
+ * nothing changes.
+ *
+ * RAISE if the robot feels twitchy in ordinary corridors -- that would mean
+ * the urgent path is firing on normal corrections. LOWER if it still fails to
+ * recover within a cell after a turn. */
+#define WALL_FOLLOW_URGENT_ERR_MM 20.0f
+
+/* Slew rate used while past that threshold, deg/s.
+ *
+ * 40 reaches the 10 degree clamp in 0.25 s instead of 0.50 -- 35 mm of travel
+ * instead of 70, so the lean is up within a fifth of a cell rather than over a
+ * third of it.
+ *
+ * 40 IS THE CEILING, AND THE HOST TEST ENFORCES IT. The cascade rule applies:
+ * the inner heading loop delivers STRAIGHT_YAW_KP / TURN_FF_GAIN = 4 deg/s of
+ * turn rate per degree of heading error, so a target ramping at R deg/s costs
+ * a standing error of R/4 degrees. The loop's linear range is
+ * STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP = 11.0 degrees, so R must stay under
+ * 44. 60 was tried first and the test refused it, correctly: at 60 the cost is
+ * 15 degrees against an 11 degree range, so the heading loop SATURATES and
+ * delivers less correction, not more. Faster is not better past this point. */
+#define WALL_FOLLOW_URGENT_SLEW_DPS 40.0f
+
 /* ---- WHY THERE IS NO REVERSE MOVE. Not a tuning choice. ----
  *
  * The side sensors are mounted at the VERY FRONT of the chassis. That makes
