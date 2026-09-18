@@ -8,23 +8,25 @@
  * per-device calibration state in here (SPAD map, offsets, sequence config),
  * which is exactly why each sensor needs its own: they are physically
  * different parts and their reference calibrations are not interchangeable. */
-static VL53L0X_Dev_t s_dev[TOF_SENSOR_COUNT];
+static VL53L0X_Dev_t s_dev[TOF_SENSOR_TOTAL];
 
 /* Mux channel per sensor. Index order must match ToF_Sensor_t. */
-static const uint8_t s_channel[TOF_SENSOR_COUNT] = {
+static const uint8_t s_channel[TOF_SENSOR_TOTAL] = {
     TOF_CHANNEL_FRONT,
     TOF_CHANNEL_LEFT,
     TOF_CHANNEL_RIGHT,
+    TOF_CHANNEL_LEFT_45,
+    TOF_CHANNEL_RIGHT_45,
 };
 
 /* Init succeeded for this sensor. A failed sensor is skipped by every
  * subsequent call rather than being retried, so one dead sensor cannot stall
  * a control loop with repeated I2C timeouts. */
-static uint8_t s_ready[TOF_SENSOR_COUNT];
+static uint8_t s_ready[TOF_SENSOR_TOTAL];
 
 /* Sensor is currently free-running. Determines whether ToF_ReadAll() polls or
  * triggers, and guards against starting continuous mode twice. */
-static uint8_t s_continuous[TOF_SENSOR_COUNT];
+static uint8_t s_continuous[TOF_SENSOR_TOTAL];
 
 /* MOST RECENT GOOD MEASUREMENT, and when it arrived.
  *
@@ -40,8 +42,8 @@ static uint8_t s_continuous[TOF_SENSOR_COUNT];
  * ToF_ReadAllLatest(). Holding it in the DRIVER rather than in each controller
  * keeps `valid` meaning the one thing every consumer already assumes it means:
  * this number can be trusted. */
-static ToF_Measurement_t s_last[TOF_SENSOR_COUNT];
-static uint32_t          s_last_ms[TOF_SENSOR_COUNT];
+static ToF_Measurement_t s_last[TOF_SENSOR_TOTAL];
+static uint32_t          s_last_ms[TOF_SENSOR_TOTAL];
 
 /* Throw away the next sample this sensor produces.
  *
@@ -54,7 +56,7 @@ static uint32_t          s_last_ms[TOF_SENSOR_COUNT];
  *
  * Dropping one sample makes the first reading the filter sees provably later
  * than the reset, with no assumption about how long anything takes. */
-static uint8_t s_discard_next[TOF_SENSOR_COUNT];
+static uint8_t s_discard_next[TOF_SENSOR_TOTAL];
 
 /* Which sensor ToF_PollOneLatest() talks to next. */
 static uint8_t s_poll_next;
@@ -69,15 +71,17 @@ volatile uint32_t tof_stale_drops;
 /* Noise filter state, one per sensor. Kept here rather than inside the filter
  * module so the filter stays a pure, host-testable transform with no global
  * state of its own. */
-static ToF_Filter_t s_filter[TOF_SENSOR_COUNT];
+static ToF_Filter_t s_filter[TOF_SENSOR_TOTAL];
 
 /* Per-sensor bias correction, mm, added to the raw reading. Index order must
  * match ToF_Sensor_t. Signed: a sensor that reads long needs a negative
  * offset. */
-static const int16_t s_offset_mm[TOF_SENSOR_COUNT] = {
+static const int16_t s_offset_mm[TOF_SENSOR_TOTAL] = {
     TOF_OFFSET_FRONT_MM,
     TOF_OFFSET_LEFT_MM,
     TOF_OFFSET_RIGHT_MM,
+    TOF_OFFSET_LEFT_45_MM,
+    TOF_OFFSET_RIGHT_45_MM,
 };
 
 /* Apply a sensor's offset, clamped to a sane range.
@@ -110,7 +114,7 @@ static uint16_t ToF_ApplyOffset(ToF_Sensor_t sensor, uint16_t raw_mm)
  * sensor at the same address. */
 static int ToF_SelectSensor(ToF_Sensor_t sensor)
 {
-    if (sensor >= TOF_SENSOR_COUNT) {
+    if (sensor >= TOF_SENSOR_TOTAL) {
         return TOF_ERROR;
     }
 
@@ -275,7 +279,7 @@ int ToF_Init(void)
 {
     int result = TOF_OK;
 
-    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+    for (uint8_t i = 0; i < TOF_SENSOR_TOTAL; i++) {
         s_ready[i] = 0U;
         s_continuous[i] = 0U;
         ToF_Filter_Reset(&s_filter[i]);
@@ -287,7 +291,7 @@ int ToF_Init(void)
         return TOF_ERROR;
     }
 
-    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+    for (uint8_t i = 0; i < TOF_SENSOR_TOTAL; i++) {
         ToF_Sensor_t sensor = (ToF_Sensor_t)i;
 
         if (ToF_SelectSensor(sensor) != TOF_OK) {
@@ -318,11 +322,22 @@ int ToF_Init(void)
 
 uint8_t ToF_IsSensorReady(ToF_Sensor_t sensor)
 {
-    if (sensor >= TOF_SENSOR_COUNT) {
+    if (sensor >= TOF_SENSOR_TOTAL) {
         return 0U;
     }
 
     return s_ready[sensor];
+}
+
+uint8_t ToF_NavSensorsReady(void)
+{
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        if (!s_ready[i]) {
+            return 0U;
+        }
+    }
+
+    return 1U;
 }
 
 int ToF_ReadSingle(ToF_Sensor_t sensor, ToF_Measurement_t *out)
@@ -332,7 +347,7 @@ int ToF_ReadSingle(ToF_Sensor_t sensor, ToF_Measurement_t *out)
 
     ToF_InvalidateMeasurement(out);
 
-    if (sensor >= TOF_SENSOR_COUNT || !s_ready[sensor]) {
+    if (sensor >= TOF_SENSOR_TOTAL || !s_ready[sensor]) {
         return TOF_ERROR;
     }
 
@@ -373,7 +388,7 @@ int ToF_StartContinuous(ToF_Sensor_t sensor)
 {
     VL53L0X_Error status;
 
-    if (sensor >= TOF_SENSOR_COUNT || !s_ready[sensor]) {
+    if (sensor >= TOF_SENSOR_TOTAL || !s_ready[sensor]) {
         return TOF_ERROR;
     }
 
@@ -413,7 +428,7 @@ int ToF_StartContinuousAll(void)
 {
     int result = TOF_OK;
 
-    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+    for (uint8_t i = 0; i < TOF_SENSOR_TOTAL; i++) {
         if (!s_ready[i]) {
             continue;
         }
@@ -436,7 +451,7 @@ int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
 
     ToF_InvalidateMeasurement(out);
 
-    if (sensor >= TOF_SENSOR_COUNT || !s_ready[sensor]) {
+    if (sensor >= TOF_SENSOR_TOTAL || !s_ready[sensor]) {
         return TOF_ERROR;
     }
 
@@ -518,7 +533,7 @@ int ToF_StopContinuous(ToF_Sensor_t sensor)
 {
     VL53L0X_Error status;
 
-    if (sensor >= TOF_SENSOR_COUNT || !s_ready[sensor]) {
+    if (sensor >= TOF_SENSOR_TOTAL || !s_ready[sensor]) {
         return TOF_ERROR;
     }
 
@@ -590,7 +605,7 @@ int ToF_StopContinuousAll(void)
 {
     int result = TOF_OK;
 
-    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+    for (uint8_t i = 0; i < TOF_SENSOR_TOTAL; i++) {
         if (!s_ready[i] || !s_continuous[i]) {
             continue;
         }
@@ -605,7 +620,7 @@ int ToF_StopContinuousAll(void)
 
 void ToF_ResetFilter(ToF_Sensor_t sensor)
 {
-    if (sensor >= TOF_SENSOR_COUNT) {
+    if (sensor >= TOF_SENSOR_TOTAL) {
         return;
     }
 
@@ -614,7 +629,7 @@ void ToF_ResetFilter(ToF_Sensor_t sensor)
 
 void ToF_ResetFilterAll(void)
 {
-    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+    for (uint8_t i = 0; i < TOF_SENSOR_TOTAL; i++) {
         ToF_Filter_Reset(&s_filter[i]);
 
         /* The cache is history too, and it is history about a heading the
@@ -628,13 +643,26 @@ void ToF_ResetFilterAll(void)
 
 uint32_t ToF_GetFilterJumpCount(ToF_Sensor_t sensor)
 {
-    if (sensor >= TOF_SENSOR_COUNT) {
+    if (sensor >= TOF_SENSOR_TOTAL) {
         return 0U;
     }
 
     return s_filter[sensor].jump_count;
 }
 
+/* !! THE BULK READS COVER THE NAVIGATION SENSORS ONLY !!
+ *
+ * ToF_ReadAll, ToF_ReadAllLatest, ToF_PollOneLatest and ToF_ReadAllFresh all
+ * take a caller-supplied out[TOF_SENSOR_COUNT] and fill exactly that many
+ * entries. Every caller in the tree declares a 3-element array, so raising any
+ * of these loops to TOF_SENSOR_TOTAL writes two elements past the end of the
+ * caller's stack buffer -- silent memory corruption, not a compile error,
+ * because C passes the array as a bare pointer.
+ *
+ * Reading an angled sensor is done one at a time through ToF_ReadSingle() or
+ * ToF_ReadContinuous(), which take a single ToF_Measurement_t and are bounded
+ * by TOF_SENSOR_TOTAL. If the angled pair is ever wired into navigation, the
+ * callers' arrays have to grow first. */
 int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT])
 {
     int result = TOF_OK;
@@ -783,6 +811,15 @@ int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
     const uint8_t polled = s_poll_next;
     uint8_t       got    = 0U;
 
+    /* TOF_SENSOR_COUNT, not TOF_SENSOR_TOTAL, and deliberately so: the
+     * rotation covers only the three navigation sensors. Including the angled
+     * pair would stretch a full refresh from 3 control cycles to 5 -- spending
+     * two cycles per rotation on readings nothing consumes, and slowing the
+     * wall follower's update rate by 67% to do it. The 3-cycle rotation is
+     * tuned; see STRAIGHT_TOF_DIVIDER and its static assert.
+     *
+     * The angled sensors are read individually by whoever wants them, via
+     * ToF_ReadSingle() or ToF_ReadContinuous(). */
     s_poll_next = (uint8_t)((s_poll_next + 1U) % TOF_SENSOR_COUNT);
 
     if (s_ready[polled]) {

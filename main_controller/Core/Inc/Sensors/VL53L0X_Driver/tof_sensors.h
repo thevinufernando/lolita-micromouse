@@ -10,15 +10,57 @@
  * ============================================================================
  *
  * Thin application layer over ST's official VL53L0X API (STSW-IMG005,
- * v1.0.4), covering the three sensors used for wall detection: front, left
- * and right. Everything under Sensors/VL53L0X/ is stock ST code and is not
- * modified here; the one exception is the platform layer
+ * v1.0.4), covering the five sensors on the robot. Everything under
+ * Sensors/VL53L0X/ is stock ST code and is not modified here; the one
+ * exception is the platform layer
  * (Sensors/VL53L0X/Platform/vl53l0x_platform.c), which ST ships as a Win32
  * reference port and which has been rewritten against the STM32 HAL.
  *
  * SCOPE: this driver reports DISTANCES ONLY. Turning distances into
- * "is there a wall there" decisions is deliberately left out — that belongs
- * with the maze logic, which does not exist yet.
+ * "is there a wall there" decisions belongs to Maze/wall_sense.c.
+ *
+ * ---------------------------------------------------------------------------
+ * SENSOR GEOMETRY
+ * ---------------------------------------------------------------------------
+ * Five sensors, all facing outward in the horizontal plane. Robot pointing
+ * north ("up" the page), looking down on it:
+ *
+ *            NW  \         | N            /  NE
+ *                 \        |             /
+ *              [L45]     [FRONT]     [R45]
+ *                  <--15mm-->   <--15mm-->
+ *       W  [LEFT] ....................... [RIGHT]  E
+ *             |<------ chassis width ------>|
+ *
+ *   TOF_FRONT     north, on the centreline
+ *   TOF_LEFT      west,  at the left edge
+ *   TOF_RIGHT     east,  at the right edge
+ *   TOF_LEFT_45   north-west, 45 deg
+ *   TOF_RIGHT_45  north-east, 45 deg
+ *
+ * !! THE ANGLED PAIR IS NOT CONCENTRIC WITH THE ORTHOGONAL PAIR !!
+ *
+ * There was no room on the chassis to put them on the same lateral line, so
+ * each angled sensor sits TOF_ANGLED_INBOARD_MM (15 mm) INBOARD of the side
+ * sensor next to it -- the left-angled one 15 mm to the RIGHT of TOF_LEFT, the
+ * right-angled one 15 mm to the LEFT of TOF_RIGHT.
+ *
+ * That matters the moment anyone tries to combine an angled reading with a
+ * side reading. Two sensors looking at the same wall from different origins do
+ * not measure the same thing, and the naive trigonometry -- "the 45-degree
+ * reading times cos(45) should equal the side reading" -- is wrong by the
+ * offset. Any future geometric fusion must work in a common robot frame using
+ * both the mounting offset and the 45-degree rotation, not by scaling one
+ * reading into the other. TOF_ANGLED_* in control_config.h carries the
+ * numbers; nothing consumes them yet.
+ *
+ * ---------------------------------------------------------------------------
+ * NAVIGATION SENSORS vs ANGLED SENSORS
+ * ---------------------------------------------------------------------------
+ * Only the three orthogonal sensors feed navigation. The angled pair is
+ * initialised, readable and covered by the bring-up test, and is consumed by
+ * nothing above this driver. See the comment on ToF_Sensor_t for why the two
+ * counts exist and what breaks if they are merged.
  *
  * ---------------------------------------------------------------------------
  * MUX
@@ -95,12 +137,49 @@
 #define TOF_DISTANCE_INVALID 0xFFFFU
 
 /* Sensor identifiers. These index the internal device table, so the order
- * must match the s_channel[] mapping in tof_sensors.c. */
+ * must match the s_channel[] mapping in tof_sensors.c.
+ *
+ * !! THE ORDER AND THE TWO COUNTS ARE LOAD-BEARING. READ THIS BEFORE EDITING !!
+ *
+ * The three NAVIGATION sensors come first, and TOF_SENSOR_COUNT is deliberately
+ * still 3. Everything Hiruna's navigation stack does -- the round-robin poll in
+ * straightline_controller.c, wall_sense.c, wall_follow.c, cell_motion.c --
+ * iterates TOF_SENSOR_COUNT and sizes arrays by it. Those are all written for
+ * front/left/right and nothing else.
+ *
+ * The two ANGLED sensors sit AFTER that boundary, counted by TOF_SENSOR_TOTAL.
+ * They are initialised and readable, and are used by nothing above this driver.
+ *
+ * Moving an angled sensor below TOF_SENSOR_COUNT, or raising TOF_SENSOR_COUNT
+ * to 5, does NOT simply "enable" them -- it would:
+ *
+ *   1. Break the static assert in straightline_controller.c, which requires
+ *      STRAIGHT_TOF_DIVIDER == TOF_SENSOR_COUNT.
+ *   2. Stretch the round-robin poll from 3 control cycles to 5, so the wall
+ *      follower would wait 5 cycles for a full refresh instead of 3. That
+ *      timing was arrived at over several arena runs (see the change log entry
+ *      "A taper instead of a cliff, and the poll unbunched"); silently
+ *      lengthening it regresses work that was expensive to get right.
+ *   3. Feed two 45-degree readings into wall_sense.c's per-sensor threshold
+ *      tables, which have exactly three entries and are indexed positionally.
+ *
+ * When the angled pair is genuinely wired into navigation, that is a deliberate
+ * change to those consumers -- not a change to this number. */
 typedef enum {
+  /* ---- Navigation sensors: front/left/right, orthogonal ---- */
   TOF_FRONT = 0,
   TOF_LEFT = 1,
   TOF_RIGHT = 2,
-  TOF_SENSOR_COUNT
+
+  /* Number of sensors the navigation stack consumes. Keep at 3. */
+  TOF_SENSOR_COUNT,
+
+  /* ---- Angled sensors: 45 degrees, initialised but not yet consumed ---- */
+  TOF_LEFT_45 = TOF_SENSOR_COUNT, /* points north-west */
+  TOF_RIGHT_45,                   /* points north-east */
+
+  /* Every sensor physically on the robot. Init and diagnostics use this. */
+  TOF_SENSOR_TOTAL
 } ToF_Sensor_t;
 
 /* One decoded measurement.
@@ -117,7 +196,7 @@ typedef struct {
 } ToF_Measurement_t;
 
 /*
- * Bring up the mux and all three sensors.
+ * Bring up the mux and all FIVE sensors.
  *
  * Per sensor this runs the full ST init sequence — DataInit, StaticInit,
  * reference SPAD management and reference calibration — then applies the
@@ -126,15 +205,29 @@ typedef struct {
  * the sensors have never been characterised on this chassis; once they have,
  * the results can be cached to save ~40 ms per sensor at boot.
  *
- * Returns TOF_OK only when EVERY sensor came up. If some subset works the
- * function still returns TOF_ERROR, but the healthy sensors remain usable —
- * check ToF_IsSensorReady() to find out which. This mirrors how the turn
+ * Budget ~50-100 ms per sensor, so adding the angled pair lengthens boot by
+ * roughly 100-200 ms. It is one-time and happens while the robot is required
+ * to be stationary anyway for the gyro bias calibration.
+ *
+ * Returns TOF_OK only when EVERY sensor came up, angled pair included. If some
+ * subset works the function still returns TOF_ERROR, but the healthy sensors
+ * remain usable — check ToF_IsSensorReady() to find out which. This mirrors
+ * how the turn
  * controller degrades when the IMU is absent: report the fault, keep going.
  */
 int ToF_Init(void);
 
-/* 1 if that sensor initialised and is usable, 0 otherwise. */
+/* 1 if that sensor initialised and is usable, 0 otherwise. Accepts any of the
+ * five, angled pair included. */
 uint8_t ToF_IsSensorReady(ToF_Sensor_t sensor);
+
+/* 1 only if all three NAVIGATION sensors are up; the angled pair is ignored.
+ *
+ * This is the question maze and control code should ask. ToF_Init() returning
+ * TOF_ERROR means "something among the five failed", which for a maze run is
+ * the wrong question: a loose wire on an angled sensor nothing consumes must
+ * not read as a degraded navigation subsystem. */
+uint8_t ToF_NavSensorsReady(void);
 
 /* ---- Single-shot ---- */
 

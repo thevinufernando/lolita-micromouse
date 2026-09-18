@@ -35,9 +35,10 @@
 #define TEST_TOF_MODE_CYCLE 13   /* No motion. Mode switching + stop path. */
 #define TEST_MAZE_RUN 14         /* MOVES. Reactive navigation + wall map. */
 #define TEST_FLOODFILL_RUN 15    /* MOVES. The ported flood-fill solver.    */
+#define TEST_TOF_ANGLED 16       /* No motion. All 5 sensors, incl. 45s.    */
 
 /* ---- SELECT THE TEST TO RUN HERE ---- */
-#define ACTIVE_TEST TEST_FLOODFILL_RUN
+#define ACTIVE_TEST TEST_TOF_ANGLED
 
 /* ---- Test parameters ---- */
 #define TEST_DISTANCE_CM 30.0f    /* Straightline test distance          */
@@ -171,7 +172,11 @@ extern volatile uint32_t tm_ekf_rejects; /* gated-out encoder updates   */
  * by the motion controllers. TOF_DISTANCE_INVALID (0xFFFF = 65535) means the
  * reading is not usable -- check the matching status/valid field to find out
  * why before assuming the sensor is broken. */
-extern volatile uint8_t tm_tof_ready; /* bit0 front, bit1 left, bit2 right */
+/* Which sensors came up. bit0 front, bit1 left, bit2 right, bit3 left-45,
+ * bit4 right-45. All five present reads 0x1F; the three navigation sensors
+ * alone read 0x07. An all-zero mask means the MUX never answered, which is a
+ * different fault from a dead sensor. */
+extern volatile uint8_t tm_tof_ready;
 extern volatile uint16_t tm_tof_front_mm; /* filtered (what code should use) */
 extern volatile uint16_t tm_tof_left_mm;
 extern volatile uint16_t tm_tof_right_mm;
@@ -196,6 +201,18 @@ extern volatile uint8_t tm_tof_left_status;
 extern volatile uint8_t tm_tof_right_status;
 extern volatile uint32_t tm_tof_sample_count; /* successful full sweeps      */
 extern volatile uint32_t tm_tof_error_count;  /* sweeps with any bad reading */
+
+/* ---- Angled (45 degree) sensors ----
+ * Populated ONLY by TEST_TOF_ANGLED. The angled pair is outside
+ * TOF_SENSOR_COUNT, so the ordinary sweep that fills the tm_tof_* values above
+ * does not touch it -- during a maze run these stay at their initial
+ * TOF_DISTANCE_INVALID, which is correct and not a fault. */
+extern volatile uint16_t tm_tof_l45_mm;     /* filtered   */
+extern volatile uint16_t tm_tof_r45_mm;
+extern volatile uint16_t tm_tof_l45_raw_mm; /* unfiltered */
+extern volatile uint16_t tm_tof_r45_raw_mm;
+extern volatile uint8_t tm_tof_l45_status;  /* raw ST RangeStatus, 0 = good */
+extern volatile uint8_t tm_tof_r45_status;
 
 /* ---- ToF flight recorder ----
  *

@@ -48,7 +48,9 @@
                     "tm_tof_ready",
                     "tm_tof_front_mm",
                     "tm_tof_left_mm",
-                    "tm_tof_right_mm"
+                    "tm_tof_right_mm",
+                    "tm_tof_l45_mm",
+                    "tm_tof_r45_mm"
                 ]
             }
         },

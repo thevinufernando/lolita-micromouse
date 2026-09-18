@@ -218,7 +218,7 @@ There are no magic numbers scattered in the controllers. Change values there,
 rebuild, flash.
 
 `Core/Inc/Tests/test_harness.h` has an `ACTIVE_TEST` switch selecting one of
-15 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
+17 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
 rebuild, flash, and read results in live-watch.
 
 | # | Test | Purpose |
@@ -237,6 +237,8 @@ rebuild, flash, and read results in live-watch.
 | 12 | `TEST_TOF_CONTINUOUS` | Free-running ranging, same distances |
 | 13 | `TEST_TOF_MODE_CYCLE` | Mode switching and the stop path |
 | 14 | `TEST_MAZE_RUN` | **Moves.** Reactive navigation, wall map, one run |
+| 15 | `TEST_FLOODFILL_RUN` | **Moves.** The ported flood-fill solver |
+| 16 | `TEST_TOF_ANGLED` | **Run first after wiring the 45° pair** — all 5 sensors |
 
 ### Bring-up order for the IMU
 
@@ -316,8 +318,66 @@ said all four were deliberately absent:
 
 ## 9. ToF ranging (VL53L0X + TCA9548A)
 
-Three VL53L0X sensors (front, left, right) provide distance readings for wall
-detection. **Distances only** — see §8 for what is deliberately absent.
+Five VL53L0X sensors provide distance readings. **Distances only** — see §8 for
+what is deliberately absent.
+
+### Sensor geometry, and the two counts
+
+Three **navigation** sensors (front/left/right, orthogonal) plus a 45°
+**angled** pair added 2026-09-18. Robot pointing north, viewed from above:
+
+```
+        NW  \         | N            /  NE
+             \        |             /
+          [L45]     [FRONT]     [R45]
+              <--15mm-->   <--15mm-->
+   W  [LEFT] ....................... [RIGHT]  E
+```
+
+| Sensor | Direction | Mux ch | Consumed by |
+|---|---|---|---|
+| `TOF_FRONT` | north | 0 | navigation |
+| `TOF_LEFT` | west | 3 | navigation |
+| `TOF_RIGHT` | east | 4 | navigation |
+| `TOF_LEFT_45` | north-west | 1 | **nothing yet** |
+| `TOF_RIGHT_45` | north-east | 2 | **nothing yet** |
+
+⚠️ **`TOF_SENSOR_COUNT` is 3 and `TOF_SENSOR_TOTAL` is 5, and the gap is
+load-bearing.** The angled pair is initialised, readable and covered by
+`TEST_TOF_ANGLED`; nothing above the driver consumes it. Raising
+`TOF_SENSOR_COUNT` to 5 does **not** simply "enable" them — it would:
+
+1. Break the `_Static_assert` in `straightline_controller.c` requiring
+   `STRAIGHT_TOF_DIVIDER == TOF_SENSOR_COUNT`.
+2. Stretch the round-robin poll from 3 control cycles to 5, slowing the wall
+   follower's refresh by 67% — regressing timing work that took several arena
+   runs to get right (see the "poll unbunched" change-log entry).
+3. Feed 45° readings into `wall_sense.c`'s threshold tables, which have exactly
+   three positional entries.
+
+The bulk reads (`ToF_ReadAll`, `ReadAllLatest`, `PollOneLatest`,
+`ReadAllFresh`) fill a caller-supplied `out[TOF_SENSOR_COUNT]`. Every caller
+declares a 3-element array, so raising those loops writes **past the end of the
+caller's stack buffer** — silent corruption, not a compile error. Read an
+angled sensor one at a time via `ToF_ReadSingle()` / `ToF_ReadContinuous()`.
+
+Use `ToF_NavSensorsReady()` — not `ToF_Init()`'s return — to ask whether
+navigation can run: a loose wire on an unused angled sensor must not read as a
+degraded navigation subsystem.
+
+⚠️ **The five sensors are NOT concentric.** Each angled sensor sits
+`TOF_ANGLED_INBOARD_MM` (15 mm) inboard of the side sensor beside it. So the
+tempting identity *"angled × cos(45) = side reading"* is **false here** — it
+assumes a shared origin, and they are 15 mm apart along the very axis the side
+sensor measures. At maze wall distances (~35 mm) that error is enormous. Any
+real fusion must put both readings into a common robot frame using the offset
+**and** the rotation. Bearings are `TOF_ANGLED_*_BEARING_DEG`, signed to match
+§4's convention (positive = anticlockwise), so left-45 is +45 and right-45 −45.
+
+The angled offsets (`TOF_OFFSET_*_45_MM`) are **unmeasured, held at 0**. Don't
+assume they share the other three sensors' ~+27 mm bias: that was measured
+against a square flat target, and a 45° target returns weaker signal, which is
+what drives the VL53L0X's near-field over-read.
 
 ### The ST API is vendor code
 
@@ -482,10 +542,19 @@ timeouts), while the healthy ones stay usable. `ToF_Init()` still returns
 
 ### Bring-up order
 
+0. **For the 45° pair, use `TEST_TOF_ANGLED` (test 16) instead** — the ordinary
+   ToF tests go through `ToF_ReadAll()`, which by design covers only the three
+   navigation sensors, so they cannot see the angled pair at all. Expect
+   `tm_tof_ready == 0x1F`; `0x07` means the angled pair did not initialise, so
+   check `TOF_CHANNEL_LEFT_45` / `_RIGHT_45` against the board first. Read
+   `tm_tof_l45_mm` / `tm_tof_r45_mm`. In a corridor both should be roughly
+   equal and **longer** than the side readings (the diagonal path is longer) —
+   but do *not* expect `side / cos(45)`, see the geometry warning above.
 1. `TEST_TOF_SINGLE` (test 11). Check `tm_tof_ready` **first**: bit0 front,
-   bit1 left, bit2 right. An all-zero mask means the *mux* never answered —
-   that is a wiring or address problem, not a sensor problem.
-2. With `tm_tof_ready == 0x07`, hold a wall at a known distance in front of
+   bit1 left, bit2 right, bit3 left-45, bit4 right-45. An all-zero mask means
+   the *mux* never answered — that is a wiring or address problem, not a
+   sensor problem.
+2. With the three navigation bits set, hold a wall at a known distance in front of
    each sensor and check `tm_tof_front_mm` / `_left_mm` / `_right_mm` against
    a ruler. Confirm each sensor responds to the direction it is named for —
    this is the check that catches a swapped `TOF_CHANNEL_*` mapping.
@@ -527,6 +596,76 @@ accident.
 ---
 
 ## Change log
+
+### 2026-09-18 - Two angled sensors, wired in but deliberately not consumed
+
+The remaining two VL53L0X footprints are populated: a 45 degree pair on mux
+channels 1 and 2, left-angled looking north-west and right-angled north-east.
+They are initialised, readable and tested. **Nothing above the driver uses
+them, on purpose** -- the maze stack keeps running on the same three sensors it
+was tuned against, and enabling the pair is a separate, deliberate piece of
+work.
+
+**The whole design turns on not raising `TOF_SENSOR_COUNT`.** Growing that enum
+from 3 to 5 looks like the obvious way to add sensors and is the one thing that
+must not happen here. It would have broken three things at once:
+
+- the `_Static_assert` tying `STRAIGHT_TOF_DIVIDER` to it;
+- the round-robin ToF poll, which would stretch from a 3-cycle rotation to 5,
+  cutting the wall follower's refresh rate by 67% and spending two cycles per
+  rotation on readings nothing reads. That 3-cycle timing was arrived at over
+  several arena runs and is not free to give back;
+- `wall_sense.c`'s per-sensor threshold tables, which are three positional
+  entries indexed by sensor id.
+
+So the enum now carries **two** counts. `TOF_SENSOR_COUNT` (3) is unchanged and
+still means "sensors the navigation stack consumes"; `TOF_SENSOR_TOTAL` (5)
+means "sensors physically on the robot" and is what init, the per-sensor state
+arrays and the bounds checks use. The angled ids sit after the boundary.
+
+**The bulk reads stay at 3, and that is a memory-safety boundary, not a
+preference.** `ToF_ReadAll`, `ReadAllLatest`, `PollOneLatest` and
+`ReadAllFresh` all fill a caller-supplied `out[TOF_SENSOR_COUNT]`; every caller
+in the tree declares a 3-element array, and C passes it as a bare pointer. A
+well-meaning edit raising those loops to `TOF_SENSOR_TOTAL` writes two elements
+off the end of a stack buffer and compiles silently. The comment at
+`ToF_ReadAll` says so at the point of temptation.
+
+**`ToF_NavSensorsReady()` is new and is the question maze code should ask.**
+`ToF_Init()` returning `TOF_ERROR` now means "something among the five failed",
+which is the wrong test for a maze run: a loose wire on a sensor nothing
+consumes must not read as a degraded navigation subsystem. Init still reports
+all five honestly, because the point of this change is to verify the new pair.
+
+**The sensors are NOT concentric, and that is the trap worth writing down.**
+There was no room on the chassis, so each angled sensor sits 15 mm inboard of
+the side sensor beside it. The natural cross-check -- "the 45 degree reading
+times cos(45) should equal the side reading" -- is therefore WRONG, because it
+assumes a shared origin and they are 15 mm apart along exactly the axis the
+side sensor measures. At the ~35 mm the side sensors actually see, that is a
+first-order error, not a rounding one. `TOF_ANGLED_INBOARD_MM` and
+`TOF_ANGLED_*_BEARING_DEG` record the mounting so a future consumer can build a
+proper common-frame transform instead of rediscovering this.
+
+- `TOF_OFFSET_LEFT_45_MM` / `_RIGHT_45_MM` are **unmeasured, held at 0**. The
+  other three sensors' ~+27 mm near-field over-read does not transfer: it was
+  measured square-on, and a 45 degree target returns weaker signal, which is
+  what drives that over-read in the first place.
+- `TEST_TOF_ANGLED` (test 16) reads all five and refreshes the ready mask every
+  cycle, so a sensor dropping off the bus after init is visible.
+  `tm_tof_ready` is now 5 bits: `0x1F` is everything, `0x07` means the angled
+  pair did not come up, `0x00` means the mux never answered.
+- `tm_tof_l45_*` / `tm_tof_r45_*` are written only by that test. During a maze
+  run they stay `TOF_DISTANCE_INVALID`, which is correct rather than a fault.
+- Boot is ~100-200 ms longer: two more sensors each running reference SPAD
+  management and reference calibration. It happens while the robot must be
+  stationary for the gyro bias calibration anyway.
+
+Verified: warning-free build on `TEST_FLOODFILL_RUN`, `TEST_TOF_ANGLED`,
+`TEST_TOF_SINGLE` and `TEST_MAZE_RUN`; all seven host suites pass; **no file
+under `Core/Src/Maze/` or `Core/Src/Control/` was modified.** The flood-fill
+differential test could not run here -- the sibling `MicroMouseAlgorithm` repo
+is not on this machine -- but no flood-fill source was touched.
 
 ### 2026-09-12 (newest) - The lean never got built, and the last 5 cm were blind
 

@@ -64,6 +64,15 @@ volatile uint8_t  tm_tof_right_status  = 255;
 volatile uint32_t tm_tof_sample_count  = 0;
 volatile uint32_t tm_tof_error_count   = 0;
 
+/* Angled pair. Only TEST_TOF_ANGLED writes these; during any other test they
+ * stay invalid, which is correct rather than a fault. */
+volatile uint16_t tm_tof_l45_mm        = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_r45_mm        = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_l45_raw_mm    = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_r45_raw_mm    = TOF_DISTANCE_INVALID;
+volatile uint8_t  tm_tof_l45_status    = 255;
+volatile uint8_t  tm_tof_r45_status    = 255;
+
 /* Flight recorder for ToF sweeps. See test_harness.h for why the scalars
  * above are not enough to characterise a sensor. */
 volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
@@ -531,9 +540,12 @@ static void ToF_HaltIfBufferFull(void)
  * live-watch even when a non-ToF test is selected. */
 void TestHarness_CaptureToFReady(void)
 {
-  tm_tof_ready = (uint8_t)((ToF_IsSensorReady(TOF_FRONT) ? 0x01U : 0x00U) |
-                           (ToF_IsSensorReady(TOF_LEFT)  ? 0x02U : 0x00U) |
-                           (ToF_IsSensorReady(TOF_RIGHT) ? 0x04U : 0x00U));
+  tm_tof_ready =
+      (uint8_t)((ToF_IsSensorReady(TOF_FRONT)    ? 0x01U : 0x00U) |
+                (ToF_IsSensorReady(TOF_LEFT)     ? 0x02U : 0x00U) |
+                (ToF_IsSensorReady(TOF_RIGHT)    ? 0x04U : 0x00U) |
+                (ToF_IsSensorReady(TOF_LEFT_45)  ? 0x08U : 0x00U) |
+                (ToF_IsSensorReady(TOF_RIGHT_45) ? 0x10U : 0x00U));
 }
 
 /* Single-shot ranging. Run this first after wiring the sensors: it is the
@@ -544,6 +556,79 @@ void TestHarness_CaptureToFReady(void)
  * the matching tm_tof_*_mm against a ruler. A sensor reading a plausible
  * distance for the WRONG direction means the TOF_CHANNEL_* mapping in
  * control_config.h does not match the PCB. */
+/* ALL FIVE sensors, single-shot, including the 45-degree pair.
+ *
+ * This is the bring-up test for the angled sensors, because the ordinary ToF
+ * tests cannot see them: those go through ToF_ReadAll(), which by design
+ * covers only the three navigation sensors. The angled pair is read here one
+ * at a time through ToF_ReadSingle(), which is the supported way to reach a
+ * sensor outside TOF_SENSOR_COUNT.
+ *
+ * WHAT TO CHECK, in this order:
+ *
+ *  1. tm_tof_ready == 0x1F. Every bit set: front, left, right, L45, R45.
+ *     0x07 means the angled pair did not initialise -- check
+ *     TOF_CHANNEL_LEFT_45 / _RIGHT_45 against the board before anything else.
+ *     0x00 means the mux never answered at all.
+ *
+ *  2. Each sensor responds to ITS OWN direction. Put a target in front of one
+ *     sensor at a time and confirm only that reading changes. A left-45 that
+ *     responds when you block the right-45 means the two channels are
+ *     swapped, which produces entirely plausible numbers pointing the wrong
+ *     way -- much harder to spot later than a dead sensor.
+ *
+ *  3. The angled readings behave sensibly in a corridor. Facing along a
+ *     corridor with both side walls present, the two 45-degree readings should
+ *     be roughly equal and LONGER than the side readings, since the diagonal
+ *     path to a wall is longer than the perpendicular one. Do NOT expect
+ *     side_mm / cos(45): the sensors are 15 mm inboard, so that identity does
+ *     not hold here. See TOF_ANGLED_INBOARD_MM.
+ *
+ *  4. Bias, if you want to measure it. Target at a known distance ALONG THE
+ *     SENSOR'S OWN 45-degree axis, let the filtered value settle, and record
+ *     (true - measured) into TOF_OFFSET_LEFT_45_MM / _RIGHT_45_MM. The
+ *     +27 mm figure measured for the other three does not transfer -- a
+ *     45-degree target returns less signal, and the VL53L0X's near-field
+ *     over-read varies with signal strength. */
+TEST_FN void Test_ToFAngled(void)
+{
+  Motor_Brake();
+
+  /* The three navigation sensors, exactly as TEST_TOF_SINGLE reads them, so
+   * the two tests are directly comparable. */
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+  int status = ToF_ReadAll(m);
+
+  Telemetry_CaptureToF(m, status, TOF_PHASE_SINGLE);
+
+  /* The angled pair, one at a time. ToF_ReadSingle() selects the mux channel
+   * itself, so no ordering constraint against the sweep above. */
+  ToF_Measurement_t l45;
+  ToF_Measurement_t r45;
+
+  (void)ToF_ReadSingle(TOF_LEFT_45, &l45);
+  (void)ToF_ReadSingle(TOF_RIGHT_45, &r45);
+
+  /* Both measurements are invalidated by the driver on any failure, so these
+   * are safe to publish unconditionally -- a failed read shows as
+   * TOF_DISTANCE_INVALID rather than a stale number. */
+  tm_tof_l45_mm     = l45.distance_mm;
+  tm_tof_l45_raw_mm = l45.raw_mm;
+  tm_tof_l45_status = l45.range_status;
+
+  tm_tof_r45_mm     = r45.distance_mm;
+  tm_tof_r45_raw_mm = r45.raw_mm;
+  tm_tof_r45_status = r45.range_status;
+
+  /* Refresh the ready mask every cycle rather than trusting the boot latch: a
+   * sensor that drops off the bus after init is exactly what this test is for
+   * catching. */
+  TestHarness_CaptureToFReady();
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(100);
+}
+
 TEST_FN void Test_ToFSingle(void)
 {
   Motor_Brake();
@@ -771,6 +856,10 @@ void TestHarness_RunCycle(void)
 #elif (ACTIVE_TEST == TEST_FLOODFILL_RUN)
   Test_FloodFillRun();
   return;   /* runs once, then heartbeats */
+
+#elif (ACTIVE_TEST == TEST_TOF_ANGLED)
+  Test_ToFAngled();
+  return;   /* poll continuously, no cycle pause */
 
 #else
   #error "ACTIVE_TEST is not set to a valid test id"

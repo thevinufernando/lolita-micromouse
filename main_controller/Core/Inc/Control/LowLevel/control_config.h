@@ -467,13 +467,19 @@
 /* ==================== VL53L0X ToF ranging sensors ======================== */
 
 /* Which TCA9548A channel each sensor hangs off. The mux has 8 channels and
- * the PCB breaks out five ToF footprints; only three are populated for wall
- * detection. Verify against the Main PCB schematic before trusting a reading
- * -- a swapped pair here produces perfectly valid distances attributed to the
- * wrong direction, which is far harder to spot than a dead sensor. */
+ * all five ToF footprints are now populated. Verify against the Main PCB
+ * schematic before trusting a reading -- a swapped pair here produces
+ * perfectly valid distances attributed to the wrong direction, which is far
+ * harder to spot than a dead sensor. */
 #define TOF_CHANNEL_FRONT 0U
 #define TOF_CHANNEL_LEFT 3U
 #define TOF_CHANNEL_RIGHT 4U
+
+/* The 45-degree pair, added 2026-09-18. Initialised and readable; consumed by
+ * nothing above the driver yet -- see the ToF_Sensor_t comment in
+ * tof_sensors.h for why they sit outside TOF_SENSOR_COUNT. */
+#define TOF_CHANNEL_LEFT_45 1U
+#define TOF_CHANNEL_RIGHT_45 2U
 
 /* Factory default 7-bit address, shifted to the 8-bit form both the ST API
  * and the HAL expect. Every sensor keeps this address; the mux is what makes
@@ -1607,6 +1613,44 @@
 #define TOF_OFFSET_FRONT_MM 0 /* measured: -26 */
 #define TOF_OFFSET_LEFT_MM 0  /* measured: -27 */
 #define TOF_OFFSET_RIGHT_MM 0 /* measured: -29 */
+
+/* The 45-degree pair, NOT YET MEASURED. Held at 0, which is the same value the
+ * three characterised sensors run at, so the pipeline is uniform.
+ *
+ * Do not assume they share the other three sensors' roughly +27 mm bias. That
+ * figure was measured against a flat surface square to the sensor; these look
+ * at a wall at 45 degrees, so the returned signal is weaker and spread over a
+ * longer path, and the near-field over-read the VL53L0X shows is a function of
+ * signal strength. Measure them the same way the others were measured -- a
+ * known distance along the sensor's own axis, 200 samples, robot stationary --
+ * rather than inferring them. TEST_TOF_ANGLED is there to do it. */
+#define TOF_OFFSET_LEFT_45_MM 0  /* not yet measured */
+#define TOF_OFFSET_RIGHT_45_MM 0 /* not yet measured */
+
+/* ---------------------- Angled sensor geometry -------------------------- */
+
+/* Mounting of the 45-degree pair, recorded so a future consumer does not have
+ * to re-derive it from the CAD. Nothing reads these yet.
+ *
+ * Each angled sensor is TOF_ANGLED_INBOARD_MM inboard of the side sensor on
+ * its own side: the left-angled one that far to the RIGHT of TOF_LEFT, the
+ * right-angled one that far to the LEFT of TOF_RIGHT. There was no room to put
+ * them on the same lateral line, so the five sensors are NOT concentric.
+ *
+ * !! THIS IS THE PART THAT WILL CATCH SOMEBODY OUT !!
+ * The tempting identity -- "angled_reading * cos(45) should equal the side
+ * reading" -- is FALSE here. It assumes both sensors share an origin, and
+ * these are 15 mm apart along the very axis the side sensor measures. Using it
+ * to cross-check or fuse the two produces an error of order the offset, which
+ * at maze wall distances (~35 mm) is enormous. Any real fusion has to put both
+ * readings into a common robot frame first, using the offset AND the rotation.
+ *
+ * Angles are measured from the robot's forward axis, positive anticlockwise,
+ * matching the yaw convention in section 4 of CLAUDE.md. So the left-angled
+ * sensor is +45 (north-west) and the right-angled one -45 (north-east). */
+#define TOF_ANGLED_INBOARD_MM 15.0f
+#define TOF_ANGLED_LEFT_BEARING_DEG 45.0f
+#define TOF_ANGLED_RIGHT_BEARING_DEG (-45.0f)
 
 /* ========================= Completion criteria =========================== */
 
