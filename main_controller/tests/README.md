@@ -16,6 +16,7 @@ RULE rather than the plumbing.
 | `maze_map_host_test.c` | Pose, wall bookkeeping, known-vs-open | `maze_map.c` |
 | `navigator_host_test.c` | Reactive wall-following rule | `navigator.c` |
 | `wall_follow_host_test.c` | Lateral loop and the cascade rule | `wall_follow.c`, the `WALL_FOLLOW_*` constants |
+| `floodfill_goal_latch_test.c` | The goal-completion ordering window | `floodfill_run.c`, and upstream `Main.c` |
 | `floodfill_diff.sh` | **That the ported flood fill IS the original** | anything under `Core/*/Maze/floodfill/` |
 
 > **The maze state moved.** `v_walls`, `h_walls` and the pose are defined by the

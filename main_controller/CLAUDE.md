@@ -625,6 +625,63 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (newest) - The goal was found and then walked away from
+
+**A real algorithm bug, fixed upstream and re-ported.** The robot entered all
+four goal cells and kept exploring as though it had not:
+
+```
+rec 21   51.95 s  (7,8)  GOAL
+rec 22   55.85 s  (8,8)  GOAL
+rec 23   59.59 s  (8,7)  GOAL
+rec 24   65.91 s  (7,7)  GOAL   <- fourth and final
+rec 25   70.96 s  (6,7)         <- left the block, never transitioned
+```
+
+It then wandered into the dead end at (8,3) and drove into a 5/5 front wall,
+which is the second symptom -- a consequence, not a separate fault.
+
+**THE BUG IS AN ORDERING WINDOW IN `Main.c`.** A cell is marked visited AFTER
+the move, at the bottom of the loop; the "have all four goal cells been
+visited" test runs at the TOP, guarded by "am I currently inside the 2x2 goal
+block":
+
+```
+top:     if (in goal block && all four visited) -> EXPLORE_TO_START
+         ... choose direction, turn, move, update pose ...
+bottom:  visited_to_goal[y][x] = true
+```
+
+So the fourth and final goal cell is marked one full iteration before anyone
+looks -- and that iteration is free to walk the robot straight back out. When
+it does, the guard is false, the test never runs again, and the mouse explores
+forever having already solved the maze. Nothing is lost; the flags are all set.
+It is a missed window, not missing data.
+
+**Fix: re-run the completion test immediately after the mark**, while the robot
+is still standing in the cell it just entered -- a guarded `continue`. It costs
+one extra pass through the top of the loop and moves nothing else.
+
+**Done upstream first, then re-ported**, which is the workflow this file's
+header asks for. `MicroMouseAlgorithm` was not on this machine; it is now
+cloned at `D:/Projects/MicroMouseAlgorithm`, which is where
+`tests/floodfill_diff.sh` looks by default. **`floodfill_diff.sh` still reports
+PORT IS FAITHFUL across all seven seeded mazes**, so the guarantee is intact.
+The upstream change is committed to nothing -- it sits uncommitted on that
+repo's `main` for the owner to review and push.
+
+**The existing mazes could not have caught this, and that is worth knowing.**
+Both the patched and unpatched builds reach `SPEED_TO_GOAL` in simulation: in
+those mazes the solver happens to stay inside the goal block on the critical
+iteration, so the window exists but is never entered. A test that hopes a maze
+finds the ordering is not a test of the ordering.
+
+So `tests/floodfill_goal_latch_test.c` drives it directly -- walks the four
+goal cells in the order the hardware did, asserts the transition is reachable
+while still in the block, then steps to (6,7) and asserts the guard has gone
+false with all four flags still set. That is the failure, stated as the
+property rather than as a maze.
+
 ### 2026-09-19 (newest) - The drift happens in the third of a cell after a pivot
 
 Best run yet, and the two guards added today both worked:

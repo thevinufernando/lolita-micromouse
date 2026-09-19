@@ -187,6 +187,29 @@ void FloodFill_Run(void) {
             } else {
                 first_visit_goal[mouse_y][mouse_x] = true;
             }
+
+            /* Re-run the goal-completion test NOW, while the robot is still
+             * standing in the cell it has just marked.
+             *
+             * That test lives at the top of the loop and is guarded by
+             * "am I inside the 2x2 goal block". The cell is marked HERE, after
+             * the move, so the fourth and final goal cell is marked one full
+             * iteration before the test next runs -- and that iteration is free
+             * to walk the robot straight back out of the block. When it does,
+             * the guard is false, the test never fires again, and the mouse
+             * explores forever having already solved the maze.
+             *
+             * Observed on hardware: all four goal cells entered in sequence
+             * (7,8) (8,8) (8,7) (7,7), then the very next move left for (6,7)
+             * and the run never transitioned to EXPLORE_TO_START.
+             *
+             * `continue` costs one extra pass through the top of the loop and
+             * changes nothing else: every phase transition, wall update and
+             * distance calculation is unmoved. It simply closes the window in
+             * which the robot can leave the goal before anyone checks. */
+            if (mouse_x >= 7 && mouse_x <= 8 && mouse_y >= 7 && mouse_y <= 8) {
+                continue;
+            }
         } else if (current_phase == EXPLORE_TO_START) {
             visited_to_start[mouse_y][mouse_x] = true;
             static bool first_visit_start[MAZE_SIZE][MAZE_SIZE] = {false};
