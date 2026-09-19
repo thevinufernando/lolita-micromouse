@@ -624,6 +624,26 @@ uint8_t CellMotion_Forward(void)
             const float chained_target_mm =
                 WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM * 10.0f;
 
+            /* REVERTED 2026-09-19: this projected past the HANDOVER --
+             * this segment's travel plus a full chained pitch -- on the
+             * argument that a cruise exit promises the NEXT segment can stop.
+             * The argument is sound and the result was unusable.
+             *
+             * A wall two cells out reads about 405 mm at a decision point, and
+             * 405 - (127 + 192) = 86 mm, below the trip point, so the guard
+             * forced a stop. Two cells is most of a maze: chaining was off in
+             * all but name and the robot braked for walls it was nowhere near.
+             * Observed as "turns far before the front wall", 26 cells down to
+             * 12, with a move failing at front = 408 mm and 0/5 front votes.
+             *
+             * So it tests THIS segment's endpoint again. That leaves the
+             * handover case genuinely uncovered -- a short from-rest segment
+             * can still hand over at cruise to a chained segment that cannot
+             * stop -- and the honest position is that the endpoint test is the
+             * one that works in practice while the handover case needs a
+             * narrower fix than a blanket extra pitch. Anything tried here
+             * must be checked against BOTH failures: a wall one cell ahead
+             * must stop, and a wall two cells ahead must not. */
             const float front_at_end_mm =
                 (float)fm[TOF_FRONT].distance_mm - distance * 10.0f;
 

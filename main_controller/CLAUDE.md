@@ -625,7 +625,109 @@ accident.
 
 ## Change log
 
-### 2026-09-19 (newest) - The goal was found and then walked away from
+### 2026-09-19 (newest) - Reverted: the handover projection braked for walls a maze away
+
+The handover projection from earlier today was **wrong in practice and is
+reverted.** It argued that a cruise exit is a promise the NEXT segment can
+stop, so the guard should project this segment's travel plus a full chained
+pitch. The argument holds. The result did not:
+
+```
+tm_maze_trace_count   12        (26 the run before)
+tm_chain_wall_stops   1 of 11 segments
+rec 11  (0,10) E  front 408 mm, 0/5 front votes, move FAILED
+```
+
+A wall two cells out reads about 405 mm at a decision point, and
+`405 - (127 + 192) = 86 mm` trips the guard. Two cells is most of a maze, so
+the robot stopped at nearly every cruise exit and braked for walls it was
+nowhere near -- reported as "turns far before the front wall", and visible in
+the trace as a failed move with the front sensor reading 408 mm and no wall
+voted at all.
+
+Back to projecting to THIS segment's endpoint: a wall one cell ahead stops, two
+cells cruises, and the 405 mm reading that stalled the run no longer stops
+anything.
+
+**The handover case is now a KNOWN, DOCUMENTED GAP.** A short from-rest segment
+can still hand over at cruise to a chained segment that cannot stop -- which is
+the real failure from the run before this one. It is left uncovered rather than
+papered over, because the obvious fix is precisely the one that had to be
+reverted. Any narrower fix has to satisfy both ends: **a wall one cell ahead
+must stop, and a wall two cells ahead must not.**
+
+**The host tests were not pinning any of this, and that is the more important
+finding.** They computed `- 2.0f * cell_mm` inline, so they tested arithmetic
+written in the test rather than the rule the firmware applies -- and passed
+identically with the firmware projecting one pitch or two. The rule now lives
+in a single `WOULD_STOP(front, segment)` helper shaped like the source, and the
+assertions are stated as the two competing failures plus the known gap.
+
+Verified by mutation: reintroducing the extra pitch in the helper makes four of
+those checks fail. Before the rewrite it made none fail. **A test that cannot
+fail is not evidence, and three of these guards have now been changed while the
+suite stayed green.**
+
+### 2026-09-19 (SUPERSEDED - reverted above) - The cruise exit is a promise about the NEXT segment
+
+**The goal-latch fix worked.** All four goal cells visited, the blink fired,
+and the phase reached `EXPLORE_TO_START`:
+
+```
+rec 21   51.70 s  (7,8)  GOAL
+rec 22   55.70 s  (8,8)  GOAL
+rec 23   59.42 s  (8,7)  GOAL
+rec 24   69.77 s  (7,7)  GOAL   (+10.35 s -- one cell plus the 4.2 s blink)
+rec 25   74.70 s  (7,7)  front 42 mm, 5/5 votes, move FAILED
+final phase = EXPLORE_TO_START
+```
+
+So the transition is fixed. The malfunction is the very next move: leaving the
+goal, the robot drove into a wall and stall-aborted.
+
+**`tm_chain_wall_stops` was 0 -- the front-wall guard did not fire, and it
+should have.** The arithmetic says so directly: front read 289 mm, and
+
+```
+289 - 192 (a chained pitch) = 97 mm, below the 120 mm trip point -> STOP
+```
+
+**Why it did not.** The guard subtracts `distance`, the length of THIS
+segment. The blink calls `CellMotion_StopAtCell()`, so the robot was at REST
+entering that move -- and a from-rest segment covers only
+`NAV_CELL_CM - CELL_DECISION_OFFSET_CM` = 127 mm, not a full 192:
+
+```
+289 - 127 = 162 mm  ->  above the trip point  ->  cruise exit allowed
+```
+
+The next segment was chained, covered a full 192 mm from there, and finished
+**30 mm past the wall**. The guard answered honestly and had been asked the
+wrong question.
+
+**EXITING AT CRUISE IS A PROMISE THAT THE NEXT SEGMENT CAN STOP**, so the
+projection has to reach past the handover: this segment's travel PLUS a full
+chained pitch. Testing only this segment's own endpoint is right only when the
+two are the same length, which is exactly when it does not matter.
+
+That is the third time in this series that a guard has been correct in logic
+and wrong in WHERE it was evaluated -- the corroboration gate sampled while
+the distance was changing by design, the first chain guard sampled while the
+wall was a cell away by design, and this one measured the wrong segment. The
+pattern is worth naming: **when a test reads a sensor, check what the reading
+means at the moment the test runs.**
+
+**The cost, stated plainly:** this stops one cell earlier than before. A wall
+two cells ahead now ends the cruise where only one cell did; three cells still
+cruises. One extra stop per wall-ended corridor, against driving into a wall.
+Worth it here, and the host test pins both halves so the trade cannot drift.
+
+Also worth noting for the next reader: the blink turning the robot from
+"rolling" to "at rest" is what exposed this. A guard whose behaviour depends
+on the robot's motion state will be exercised differently at a milestone than
+anywhere else in a run.
+
+### 2026-09-19 (earlier) - The goal was found and then walked away from
 
 **A real algorithm bug, fixed upstream and re-ported.** The robot entered all
 four goal cells and kept exploring as though it had not:
@@ -682,7 +784,7 @@ while still in the block, then steps to (6,7) and asserts the guard has gone
 false with all four flags still set. That is the failure, stated as the
 property rather than as a maze.
 
-### 2026-09-19 (newest) - The drift happens in the third of a cell after a pivot
+### 2026-09-19 (earlier) - The drift happens in the third of a cell after a pivot
 
 Best run yet, and the two guards added today both worked:
 
@@ -733,7 +835,7 @@ the reset in `WallFollow_Reset()` and risks applying a lean about the wrong
 axis after a 90 degree turn. Worth trying if the threshold change is not
 enough, as a single change on its own.
 
-### 2026-09-19 (newest) - Wedged is not the same as stopped
+### 2026-09-19 (earlier) - Wedged is not the same as stopped
 
 The robot now reaches and identifies the goal on most runs. This one explored,
 found the goal, and failed on the way back:
@@ -810,7 +912,7 @@ per-wheel figures are the thing to read: a large left/right asymmetry points at
 the drivetrain, near-equal travel at both wheels points at the robot being
 driven into geometry the sensors cannot see.
 
-### 2026-09-19 (newest) - A loose wheel, and a guard asking the question at the wrong moment
+### 2026-09-19 (earlier) - A loose wheel, and a guard asking the question at the wrong moment
 
 **The hardware was the dominant variable all along.** A wheel was loose for
 every run in this series, which is why run length swung 57 / 13 / 57 with no
@@ -878,7 +980,7 @@ against 82 moves means the failure was invisible in the trace and had to be
 reconstructed from live globals. Worth raising `MAZE_TRACE_CAPACITY` before the
 next long run -- at 56 bytes a record, 128 records is 7 KB of a 128 KB part.
 
-### 2026-09-19 (newest) - The chain guard was dead on arrival
+### 2026-09-19 (earlier) - The chain guard was dead on arrival
 
 The front-wall chain guard added earlier today **never fired once**:
 
@@ -928,7 +1030,7 @@ so the thrashing metric does not track run length either. **Reference
 selection remains the outstanding problem** and is now the only significant one
 left in the wall follower.
 
-### 2026-09-19 (newest) - Two ways to drive blind into a detected wall
+### 2026-09-19 (earlier) - Two ways to drive blind into a detected wall
 
 57 cells, goal reached and identified, clean backtracking. Then the robot hit
 a front wall. **It had detected that wall perfectly** -- rec 55 shows the front
@@ -991,7 +1093,7 @@ guard is not seeing the wall** -- look at the front reading, not this counter.
 **Still open:** `wf_switches` was 121 over 57 cells, 2.1 per cell, worse than
 the 1.86 before. Reference thrashing remains unaddressed.
 
-### 2026-09-19 (newest) - I killed the front alignment. Reverted.
+### 2026-09-19 (earlier) - I killed the front alignment. Reverted.
 
 The corroboration gate added earlier today made front-wall behaviour WORSE,
 exactly as reported. The logs say so without ambiguity:
@@ -1046,7 +1148,7 @@ the reference changes. That remains the outstanding item, and hysteresis on
 the selection is the next thing to try once the alignment is confirmed
 working again.
 
-### 2026-09-19 (newest) - It was never the turn. It was an 18 degree crab.
+### 2026-09-19 (earlier) - It was never the turn. It was an 18 degree crab.
 
 Best run yet: 29 cells, reached the goal, identified it, blinked. Then a turn
 that "looked like more than 90 degrees" left the robot mis-oriented and it
@@ -1119,7 +1221,7 @@ lean IS the heading error. The axis clamp bounds the damage; it does not stop
 the thrashing. Reference hysteresis is the next thing to try if this run still
 crabs.
 
-### 2026-09-19 (newest) - The LED says when the goal is reached
+### 2026-09-19 (earlier) - The LED says when the goal is reached
 
 The robot had no way to say it had found the goal. It does now: **long–short–
 short, three times** (~4.2 s), and **5 even blinks** on returning to the start
@@ -1561,7 +1663,7 @@ under `Core/Src/Maze/` or `Core/Src/Control/` was modified.** The flood-fill
 differential test could not run here -- the sibling `MicroMouseAlgorithm` repo
 is not on this machine -- but no flood-fill source was touched.
 
-### 2026-09-12 (newest) - The lean never got built, and the last 5 cm were blind
+### 2026-09-12 (earlier) - The lean never got built, and the last 5 cm were blind
 
 Two measurements finally separated what had been one confused symptom.
 
@@ -2082,7 +2184,7 @@ lateral loop is being asked to clean up after a far larger disturbance than
 anything it has been tuned against, and no amount of gain work fixes that. The
 reader prints the worst entry error and how many cells exceed 15 mm.
 
-### 2026-09-12 (newest) - Align late, and tell the follower where it is
+### 2026-09-12 (earlier) - Align late, and tell the follower where it is
 
 Two faults from one move in the last run.
 
@@ -2231,7 +2333,7 @@ inside what the span check already tolerates.
 Expect the period histogram to read about 12 ms throughout with nothing above
 25. If it still shows 35s, the rotation is not happening.
 
-### 2026-09-12 (newest) - The integral was the thing moving, not the alignment
+### 2026-09-12 (earlier) - The integral was the thing moving, not the alignment
 
 First run on continuous ranging. Mode switching worked: both failure flags read
 0, 3870 fresh reads against 3 held, no stale drops. The run reached 33 cells,

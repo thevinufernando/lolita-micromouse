@@ -788,18 +788,64 @@ int main(void){
     /* What the front reads at a decision point with a wall N cells ahead. */
     #define FRONT_AT(n) (chained_target_mm + ((float)(n) - 1.0f) * cell_mm)
 
-    /* One cell ahead: the segment ends at the wall, so it must NOT exit at
-       cruise. This is the case that drove the robot into a wall. */
-    CHECK(FRONT_AT(1) - cell_mm < trip,
+    /* !! THIS MIRRORS cell_motion.c's DECISION -- KEEP THE TWO IN STEP !!
+     *
+     * The previous version of these checks computed "- 2.0f * cell_mm" inline
+     * and so tested arithmetic written in the test, not the rule the firmware
+     * applies. They passed with the firmware projecting one pitch AND with it
+     * projecting two, which means they were pinning nothing at all. Expressed
+     * as one helper, the way the source does it, so a change to the source
+     * that is not mirrored here shows up as a failure rather than as silence.
+     *
+     * The rule: a chained segment may exit at cruise only if the front wall,
+     * projected to where THIS segment ends, still leaves the trip margin. */
+    #define WOULD_STOP(front_mm, seg_mm)         (((float)(front_mm) - (float)(seg_mm)) < trip)
+
+    const float rest_mm = (NAV_CELL_CM - offset_cm) * 10.0f;
+
+    /* ---- The failure this guard exists to prevent ---- */
+    /* A wall one cell ahead: the segment ends at it, so it must not hand over
+       at cruise. This is the case that drove the robot into a wall. */
+    CHECK(WOULD_STOP(FRONT_AT(1), cell_mm),
           "a wall one cell ahead forces a rest exit");
 
-    /* Two cells ahead: the next segment re-evaluates one cell closer and
-       still inherits the full braking offset, so cruising on is correct --
-       and stopping here would cost a full stop for most cells in a maze. */
-    CHECK(FRONT_AT(2) - cell_mm >= trip,
-          "but a wall two cells ahead still allows a cruise exit");
-    CHECK(FRONT_AT(3) - cell_mm > trip,
-          "and three cells ahead certainly does");
+    /* ---- The failure the OVER-CORRECTION caused, 2026-09-19 ----
+     *
+     * Projecting past the handover (this segment plus a full chained pitch)
+     * was tried and reverted the same day. A wall two cells out reads about
+     * 405 mm at a decision point, and 405 - (127 + 192) = 86 mm tripped the
+     * guard -- so the robot braked for walls it was nowhere near, chaining was
+     * off in all but name, and a run went 26 cells down to 12 with a move
+     * failing at front = 408 mm and 0/5 front votes.
+     *
+     * Two cells MUST keep its cruise exit. The next segment re-evaluates one
+     * cell closer with a better reading and still inherits the full braking
+     * offset. */
+    CHECK(!WOULD_STOP(FRONT_AT(2), cell_mm),
+          "but a wall two cells ahead keeps its cruise exit");
+    CHECK(!WOULD_STOP(405.0f, cell_mm),
+          "and the 405 mm reading that stalled a run no longer stops it");
+    CHECK(!WOULD_STOP(405.0f, rest_mm),
+          "including on a from-rest segment, which covers less ground");
+
+    CHECK(!WOULD_STOP(FRONT_AT(3), cell_mm),
+          "three cells ahead certainly keeps it");
+
+    /* ---- The case that is KNOWINGLY NOT COVERED ----
+     *
+     * A short from-rest segment can still hand over at cruise to a chained
+     * segment that cannot stop: at front 289 the from-rest endpoint clears,
+     * but the next full pitch overshoots. Asserted as a KNOWN GAP rather than
+     * left silent, because the obvious fix for it is the one that had to be
+     * reverted, and the next person should know that before reaching for it.
+     *
+     * Any narrower fix must satisfy BOTH this and the two-cell check above. */
+    CHECK(!WOULD_STOP(289.0f, rest_mm),
+          "KNOWN GAP: a from-rest segment still hands over at front 289 mm");
+    CHECK(289.0f - rest_mm - cell_mm < trip,
+          "and the segment it hands to would indeed overshoot -- unfixed");
+
+    #undef WOULD_STOP
 
     /* The margin exists so the two-cell boundary does not turn on
        floating-point equality. */
