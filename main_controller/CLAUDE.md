@@ -625,6 +625,57 @@ accident.
 
 ## Change log
 
+### 2026-09-19 (newest) - The drift happens in the third of a cell after a pivot
+
+Best run yet, and the two guards added today both worked:
+
+```
+tm_maze_trace_count   48        (trace no longer truncating)
+tm_maze_complete      1         goal identified
+tm_chain_wall_stops   1         <- the front-wall guard FIRED, first time ever
+tm_maze_abort_reason  6         STALLED, aborted in ~2 s, not an 8 s timeout
+```
+
+**The failure is now purely lateral, and it is in the backtrack**, at pose
+(2,0) WEST -- two cells from home:
+
+```
+rec 45  131.65 s  (3,0) W  left 52   just after a turn, centred
+rec 46  132.99 s  (2,0) W  left 37   -15 mm
+rec 47  137.81 s  (2,0) W  left 30   -22 mm, jammed on the left wall
+```
+
+A steady ~11 mm per cell into the left wall, starting immediately after a
+pivot.
+
+**The follower had the authority and was not given the chance.** At 15 mm of
+error the loop can deliver 25 mm of correction per cell against 11 mm of
+drift. Two things spend that:
+
+1. `WallFollow_Reset()` zeroes the tilt at every pivot, and rebuilding it at
+   `WALL_FOLLOW_TILT_SLEW_DPS` (20 deg/s) takes 0.5 s -- **70 mm of a 192 mm
+   cell at half authority or less**.
+2. `WALL_FOLLOW_URGENT_ERR_MM` was **20 mm**, so the fast 40 deg/s slew only
+   armed once 57% of the 35 mm nominal clearance was already gone. In this run
+   the error crossed 0 -> 15 mm entirely inside the slow window, so the fast
+   slew never armed at all.
+
+**`WALL_FOLLOW_URGENT_ERR_MM` 20 -> 8.** This shortens the weak window rather
+than making the correction larger; the tilt clamp is untouched. It now arms
+with 27 mm of clearance in hand instead of 15.
+
+8 mm is the floor worth using: filtered side-reading noise is ~0.94 mm sigma,
+so 8 mm is 8.5 sigma and noise cannot reach it. The host test now asserts that
+relationship against the noise figure rather than against a literal, so
+lowering the threshold again cannot silently turn into "arms on noise".
+
+**The alternative was rejected for now.** Carrying the lean through a pivot --
+the lateral offset survives an in-place turn even though the heading does not
+-- attacks the root cause more directly, but contradicts the stated reason for
+the reset in `WallFollow_Reset()` and risks applying a lean about the wrong
+axis after a 90 degree turn. Worth trying if the threshold change is not
+enough, as a single change on its own.
+
 ### 2026-09-19 (newest) - Wedged is not the same as stopped
 
 The robot now reaches and identifies the goal on most runs. This one explored,

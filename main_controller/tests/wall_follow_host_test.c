@@ -664,14 +664,26 @@ int main(void){
     CHECK(ramp_cost < STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP,
           "and the urgent ramp still fits inside the heading loop's linear range");
 
-    /* It must not fire during ordinary corridor corrections. */
-    CHECK(WALL_FOLLOW_URGENT_ERR_MM > 10.0f,
-          "the urgent threshold is above routine corridor error");
-    /* But it must fire before the robot runs out of clearance. */
+    /* IT MUST NOT FIRE ON NOISE -- which is the real constraint, and is what
+       the old "> 10 mm" assertion was standing in for. Filtered side-reading
+       noise is about 0.94 mm sigma (host-measured in tof_filter_host_test),
+       so the threshold has to be many sigma clear of it. Expressed against
+       the noise rather than a literal, so lowering the threshold to arm
+       earlier does not silently become "arms on noise". */
+    const float read_noise_sigma_mm = 0.94f;
+    CHECK(WALL_FOLLOW_URGENT_ERR_MM > 5.0f * read_noise_sigma_mm,
+          "the urgent threshold is several sigma clear of reading noise");
+
+    /* And it must arm while there is still clearance to recover in. At 20 mm
+       it armed with only 15 mm of the 35 mm nominal gap left, by which point
+       the robot was nearly touching -- that cost a run. */
     const float nominal_clear =
         (MAZE_CORRIDOR_INNER_MM - TOF_SIDE_SPAN_MM) * 0.5f;
+
+    CHECK(WALL_FOLLOW_URGENT_ERR_MM < nominal_clear * 0.5f,
+          "and arms before half the clearance is gone, leaving room to recover");
     CHECK(WALL_FOLLOW_URGENT_ERR_MM < nominal_clear,
-          "and below the nominal clearance, so it fires before contact");
+          "and well below the nominal clearance, so it fires before contact");
   }
 
   /* ======== THE COMMANDED HEADING MAY NOT LEAVE THE MAZE AXIS =========

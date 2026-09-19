@@ -1073,19 +1073,36 @@
  * from-rest cell, against the 1 mm measured. */
 #define WALL_FOLLOW_TILT_SLEW_DPS 20.0f
 
-/* ---- Urgent-error slew, added 2026-09-19 ----
+/* ---- Urgent-error slew ----
  *
- * Lateral error at which the tilt is allowed to build faster than
- * WALL_FOLLOW_TILT_SLEW_DPS, in mm.
+ * Lateral error at which the tilt may build at WALL_FOLLOW_URGENT_SLEW_DPS
+ * instead of WALL_FOLLOW_TILT_SLEW_DPS.
  *
- * 20 mm is over half the 35 mm nominal clearance each side, so a robot this
- * far out has lost most of its margin and is heading for contact. Below it,
- * nothing changes.
+ * 20 -> 8 ON 2026-09-19, AND THE REASON IS WHEN IT ARMS, NOT HOW HARD.
  *
- * RAISE if the robot feels twitchy in ordinary corridors -- that would mean
- * the urgent path is firing on normal corrections. LOWER if it still fails to
- * recover within a cell after a turn. */
-#define WALL_FOLLOW_URGENT_ERR_MM 20.0f
+ * At 20 the fast slew only engaged once the robot was already 20 mm off
+ * centre -- 57% of the 35 mm nominal clearance spent before the recovery
+ * started. A backtracking run drifted left 52 -> 37 -> 30 mm over two cells
+ * and jammed, and the error passed from ~0 to ~15 mm entirely INSIDE the slow
+ * window, so the fast slew never armed at all. By the time it would have, the
+ * robot had 15 mm of clearance left and was about to touch.
+ *
+ * The window matters because WallFollow_Reset() zeroes the tilt at every
+ * pivot. Rebuilding at 20 deg/s takes 0.5 s -- 70 mm of a 192 mm cell -- so
+ * the first third of every post-pivot cell is corrected at half authority or
+ * less, which is precisely where the drift accumulates. Arming the fast slew
+ * earlier shortens that window rather than making the correction larger; the
+ * tilt clamp is untouched.
+ *
+ * WHY 8 AND NOT LOWER. Filtered side-reading noise is about 0.94 mm sigma, so
+ * 8 mm is 8.5 sigma -- noise cannot reach it, and the fast slew stays off in
+ * a corridor the robot is holding well. It arms with 27 mm of clearance still
+ * in hand instead of 15.
+ *
+ * RAISE if the robot feels twitchy in corridors it is already tracking
+ * cleanly. LOWER only if it still fails to recover within a cell after a
+ * pivot -- but below about 4 mm this starts responding to noise. */
+#define WALL_FOLLOW_URGENT_ERR_MM 8.0f
 
 /* Slew rate used while past that threshold, deg/s.
  *
