@@ -1,0 +1,346 @@
+#ifndef TOF_SENSORS_H
+#define TOF_SENSORS_H
+
+#include "main.h"
+#include <stdint.h>
+
+/*
+ * ============================================================================
+ *                    VL53L0X TIME-OF-FLIGHT RANGING DRIVER
+ * ============================================================================
+ *
+ * Thin application layer over ST's official VL53L0X API (STSW-IMG005,
+ * v1.0.4), covering the five sensors on the robot. Everything under
+ * Sensors/VL53L0X/ is stock ST code and is not modified here; the one
+ * exception is the platform layer
+ * (Sensors/VL53L0X/Platform/vl53l0x_platform.c), which ST ships as a Win32
+ * reference port and which has been rewritten against the STM32 HAL.
+ *
+ * SCOPE: this driver reports DISTANCES ONLY. Turning distances into
+ * "is there a wall there" decisions belongs to Maze/wall_sense.c.
+ *
+ * ---------------------------------------------------------------------------
+ * SENSOR GEOMETRY
+ * ---------------------------------------------------------------------------
+ * Five sensors, all facing outward in the horizontal plane. Robot pointing
+ * north ("up" the page), looking down on it:
+ *
+ *            NW  \         | N            /  NE
+ *                 \        |             /
+ *              [L45]     [FRONT]     [R45]
+ *                  <--15mm-->   <--15mm-->
+ *       W  [LEFT] ....................... [RIGHT]  E
+ *             |<------ chassis width ------>|
+ *
+ *   TOF_FRONT     north, on the centreline
+ *   TOF_LEFT      west,  at the left edge
+ *   TOF_RIGHT     east,  at the right edge
+ *   TOF_LEFT_45   north-west, 45 deg
+ *   TOF_RIGHT_45  north-east, 45 deg
+ *
+ * !! THE ANGLED PAIR IS NOT CONCENTRIC WITH THE ORTHOGONAL PAIR !!
+ *
+ * There was no room on the chassis to put them on the same lateral line, so
+ * each angled sensor sits TOF_ANGLED_INBOARD_MM (15 mm) INBOARD of the side
+ * sensor next to it -- the left-angled one 15 mm to the RIGHT of TOF_LEFT, the
+ * right-angled one 15 mm to the LEFT of TOF_RIGHT.
+ *
+ * That matters the moment anyone tries to combine an angled reading with a
+ * side reading. Two sensors looking at the same wall from different origins do
+ * not measure the same thing, and the naive trigonometry -- "the 45-degree
+ * reading times cos(45) should equal the side reading" -- is wrong by the
+ * offset. Any future geometric fusion must work in a common robot frame using
+ * both the mounting offset and the 45-degree rotation, not by scaling one
+ * reading into the other. TOF_ANGLED_* in control_config.h carries the
+ * numbers; nothing consumes them yet.
+ *
+ * ---------------------------------------------------------------------------
+ * NAVIGATION SENSORS vs ANGLED SENSORS
+ * ---------------------------------------------------------------------------
+ * Only the three orthogonal sensors feed navigation. The angled pair is
+ * initialised, readable and covered by the bring-up test, and is consumed by
+ * nothing above this driver. See the comment on ToF_Sensor_t for why the two
+ * counts exist and what breaks if they are merged.
+ *
+ * ---------------------------------------------------------------------------
+ * MUX
+ * ---------------------------------------------------------------------------
+ * All sensors share address 0x29 and are separated by a TCA9548A (see
+ * TCA9548A.h). Every entry point here opens the right channel before touching
+ * a sensor, so callers never deal with the mux directly. The channel numbers
+ * are in control_config.h.
+ *
+ * ---------------------------------------------------------------------------
+ * MODES
+ * ---------------------------------------------------------------------------
+ * Both ranging modes the API offers are exposed, because they suit different
+ * phases of the project:
+ *
+ *   SINGLE     — ToF_ReadSingle(). The MCU asks for one measurement and
+ *                blocks until it lands (~30 ms with the default budget).
+ *                Simple and always in step with the caller. Good for
+ *                bring-up and for a stationary "look around" at a cell
+ *                centre. Costs a full measurement's latency per read.
+ *
+ *   CONTINUOUS — ToF_StartContinuous() once, then ToF_ReadContinuous()
+ *                whenever a fresh sample is wanted. The sensor free-runs and
+ *                the MCU picks up the newest result without waiting for a
+ *                conversion. This is what a moving robot wants: reads become
+ *                cheap and bounded, at the cost of the data being up to one
+ *                measurement period stale.
+ *
+ * A sensor is in one mode at a time. ToF_StopContinuous() returns it to
+ * single-shot.
+ *
+ * ---------------------------------------------------------------------------
+ * UNITS AND VALIDITY
+ * ---------------------------------------------------------------------------
+ * Distances are UNSIGNED MILLIMETRES, matching the ST API's native
+ * RangeMilliMeter. Note this differs from the cm used by the motion
+ * controllers — the conversion belongs to whoever consumes both, not here.
+ *
+ * A reading is only meaningful when the call returns TOF_OK. On anything else
+ * the distance is set to TOF_DISTANCE_INVALID rather than left stale, so a
+ * caller that ignores the return code gets an obviously-wrong number instead
+ * of a plausible old one. Out-of-range (nothing in front of the sensor) is
+ * reported as TOF_ERROR_RANGE, which is a normal condition, not a fault.
+ *
+ * ---------------------------------------------------------------------------
+ * ACCURACY: TWO SEPARATE PROBLEMS
+ * ---------------------------------------------------------------------------
+ * Raw readings are both NOISY and BIASED, and the two need different fixes.
+ * Confusing them wastes a lot of time, so the pipeline separates them:
+ *
+ *     raw from sensor  ->  + TOF_OFFSET_*_MM  ->  filter  ->  distance_mm
+ *                             (fixes bias)      (fixes noise)
+ *
+ *   NOISE is random spread between consecutive readings of a stationary
+ *   target. Handled by tof_filter.c (median + EMA). See tof_filter.h.
+ *
+ *   BIAS is a consistent over- or under-read. Filtering CANNOT fix it -- the
+ *   average of biased samples is just as biased. Handled by the per-sensor
+ *   TOF_OFFSET_*_MM constants in control_config.h, which are applied before
+ *   the filter so the filter smooths an already-centred signal.
+ *
+ * If readings are stable but wrong, adjust the offsets. If they are centred
+ * but jumpy, adjust the filter. Reach for the other knob only after the first
+ * one is right.
+ * ============================================================================
+ */
+
+#define TOF_OK             0
+#define TOF_ERROR         -1  /* I2C / API failure                       */
+#define TOF_ERROR_RANGE   -2  /* Sensor answered, measurement not valid  */
+#define TOF_ERROR_TIMEOUT -3  /* No data-ready within the deadline       */
+
+/* Returned in place of a distance whenever a read does not return TOF_OK. */
+#define TOF_DISTANCE_INVALID 0xFFFFU
+
+/* Sensor identifiers. These index the internal device table, so the order
+ * must match the s_channel[] mapping in tof_sensors.c.
+ *
+ * !! THE ORDER AND THE TWO COUNTS ARE LOAD-BEARING. READ THIS BEFORE EDITING !!
+ *
+ * The three NAVIGATION sensors come first, and TOF_SENSOR_COUNT is deliberately
+ * still 3. Everything Hiruna's navigation stack does -- the round-robin poll in
+ * straightline_controller.c, wall_sense.c, wall_follow.c, cell_motion.c --
+ * iterates TOF_SENSOR_COUNT and sizes arrays by it. Those are all written for
+ * front/left/right and nothing else.
+ *
+ * The two ANGLED sensors sit AFTER that boundary, counted by TOF_SENSOR_TOTAL.
+ * They are initialised and readable, and are used by nothing above this driver.
+ *
+ * Moving an angled sensor below TOF_SENSOR_COUNT, or raising TOF_SENSOR_COUNT
+ * to 5, does NOT simply "enable" them -- it would:
+ *
+ *   1. Break the static assert in straightline_controller.c, which requires
+ *      STRAIGHT_TOF_DIVIDER == TOF_SENSOR_COUNT.
+ *   2. Stretch the round-robin poll from 3 control cycles to 5, so the wall
+ *      follower would wait 5 cycles for a full refresh instead of 3. That
+ *      timing was arrived at over several arena runs (see the change log entry
+ *      "A taper instead of a cliff, and the poll unbunched"); silently
+ *      lengthening it regresses work that was expensive to get right.
+ *   3. Feed two 45-degree readings into wall_sense.c's per-sensor threshold
+ *      tables, which have exactly three entries and are indexed positionally.
+ *
+ * When the angled pair is genuinely wired into navigation, that is a deliberate
+ * change to those consumers -- not a change to this number. */
+typedef enum {
+  /* ---- Navigation sensors: front/left/right, orthogonal ---- */
+  TOF_FRONT = 0,
+  TOF_LEFT = 1,
+  TOF_RIGHT = 2,
+
+  /* Number of sensors the navigation stack consumes. Keep at 3. */
+  TOF_SENSOR_COUNT,
+
+  /* ---- Angled sensors: 45 degrees, initialised but not yet consumed ---- */
+  TOF_LEFT_45 = TOF_SENSOR_COUNT, /* points north-west */
+  TOF_RIGHT_45,                   /* points north-east */
+
+  /* Every sensor physically on the robot. Init and diagnostics use this. */
+  TOF_SENSOR_TOTAL
+} ToF_Sensor_t;
+
+/* One decoded measurement.
+ *
+ * Both the filtered and the unfiltered distance are reported. distance_mm is
+ * what application code should use; raw_mm exists so bring-up can see what the
+ * filter is actually doing, and so a noisy sensor can be told apart from a
+ * badly-tuned filter. Both already include the per-sensor offset. */
+typedef struct {
+  uint16_t distance_mm; /* Filtered. TOF_DISTANCE_INVALID when not valid */
+  uint16_t raw_mm;      /* Offset-corrected but unfiltered               */
+  uint8_t range_status; /* Raw ST status; 0 = valid. Kept for diagnosis  */
+  uint8_t valid;        /* 1 = distance_mm is trustworthy                */
+} ToF_Measurement_t;
+
+/*
+ * Bring up the mux and all FIVE sensors.
+ *
+ * Per sensor this runs the full ST init sequence — DataInit, StaticInit,
+ * reference SPAD management and reference calibration — then applies the
+ * timing budget and range profile from control_config.h. Reference
+ * calibration is done at runtime rather than loading stored values because
+ * the sensors have never been characterised on this chassis; once they have,
+ * the results can be cached to save ~40 ms per sensor at boot.
+ *
+ * Budget ~50-100 ms per sensor, so adding the angled pair lengthens boot by
+ * roughly 100-200 ms. It is one-time and happens while the robot is required
+ * to be stationary anyway for the gyro bias calibration.
+ *
+ * Returns TOF_OK only when EVERY sensor came up, angled pair included. If some
+ * subset works the function still returns TOF_ERROR, but the healthy sensors
+ * remain usable — check ToF_IsSensorReady() to find out which. This mirrors
+ * how the turn
+ * controller degrades when the IMU is absent: report the fault, keep going.
+ */
+int ToF_Init(void);
+
+/* 1 if that sensor initialised and is usable, 0 otherwise. Accepts any of the
+ * five, angled pair included. */
+uint8_t ToF_IsSensorReady(ToF_Sensor_t sensor);
+
+/* 1 only if all three NAVIGATION sensors are up; the angled pair is ignored.
+ *
+ * This is the question maze and control code should ask. ToF_Init() returning
+ * TOF_ERROR means "something among the five failed", which for a maze run is
+ * the wrong question: a loose wire on an angled sensor nothing consumes must
+ * not read as a degraded navigation subsystem. */
+uint8_t ToF_NavSensorsReady(void);
+
+/* ---- Single-shot ---- */
+
+/* Trigger one measurement and block until it completes.
+ * Returns TOF_OK, TOF_ERROR_RANGE (valid transaction, unusable reading), or
+ * TOF_ERROR. `out` may be NULL if only the return code is wanted. */
+int ToF_ReadSingle(ToF_Sensor_t sensor, ToF_Measurement_t *out);
+
+/* Convenience form: distance only, TOF_DISTANCE_INVALID on any failure. */
+uint16_t ToF_GetDistanceSingle(ToF_Sensor_t sensor);
+
+/* ---- Continuous ---- */
+
+/* Put one sensor into free-running continuous ranging. */
+int ToF_StartContinuous(ToF_Sensor_t sensor);
+
+/* Put every successfully-initialised sensor into continuous ranging.
+ * Returns TOF_OK only if all ready sensors started. */
+int ToF_StartContinuousAll(void);
+
+/* Fetch the most recent continuous result.
+ *
+ * If `wait_for_new` is 0 this returns immediately: TOF_OK with a fresh sample
+ * if one is pending, TOF_ERROR_TIMEOUT if the sensor has not finished a new
+ * measurement yet. That non-blocking form is the one a control loop wants.
+ * If `wait_for_new` is 1 it blocks up to TOF_DATA_READY_TIMEOUT_MS. */
+int ToF_ReadContinuous(ToF_Sensor_t sensor, ToF_Measurement_t *out,
+                       uint8_t wait_for_new);
+
+/* Stop continuous ranging and return the sensor to single-shot mode. */
+int ToF_StopContinuous(ToF_Sensor_t sensor);
+
+/* Stop continuous ranging on every sensor. */
+int ToF_StopContinuousAll(void);
+
+/* ---- Filtering ---- */
+
+/* Discard filter history for one sensor (or all of them).
+ *
+ * Call after anything that breaks continuity between consecutive readings --
+ * a pivot turn, say, where the sensor ends up pointing at a completely
+ * different wall. Blending readings from before and after such a move is
+ * meaningless, and the jump detector only catches it if the change happens to
+ * exceed its threshold. The next reading re-seeds the filter. */
+void ToF_ResetFilter(ToF_Sensor_t sensor);
+void ToF_ResetFilterAll(void);
+
+/* Number of step-jumps the filter has snapped to for this sensor. A useful
+ * bring-up signal: sitting still it should not move at all. If it climbs with
+ * the robot stationary, TOF_FILTER_JUMP_THRESHOLD_MM is set below the actual
+ * noise spread and the smoothing is being defeated. */
+uint32_t ToF_GetFilterJumpCount(ToF_Sensor_t sensor);
+
+/* ---- Bulk helper ---- */
+
+/* Read all three sensors into `out` (indexed by ToF_Sensor_t).
+ * Works in either mode: continuous sensors are polled non-blocking, others
+ * are read single-shot. Sensors that failed init are filled with an invalid
+ * measurement. Returns TOF_OK only when all three produced a valid reading. */
+int ToF_ReadAll(ToF_Measurement_t out[TOF_SENSOR_COUNT]);
+
+/* Read all three, falling back to the newest good reading when a free-running
+ * sensor has nothing new yet. THIS IS WHAT A MOVING ROBOT SHOULD CALL.
+ *
+ * Continuous ranging produces a result about every TOF_INTER_MEASUREMENT_MS
+ * while the control loop runs every CONTROL_SAMPLE_TIME_S, so most polls
+ * legitimately find nothing new. ToF_ReadAll() reports that as an invalid
+ * measurement, and a wall follower reads invalid as "no wall" -- it would drop
+ * its reference and pick it up again several times a second. This holds the
+ * last good reading instead, and only gives up on it once it is older than
+ * max_age_ms, which is what tells a slow sensor apart from a dead one.
+ *
+ * Returns TOF_OK only when all three produced a reading, fresh or held. */
+int ToF_ReadAllLatest(ToF_Measurement_t out[TOF_SENSOR_COUNT],
+                      uint32_t max_age_ms);
+
+/* Poll ONE sensor, in rotation, and fill the other two from the cache.
+ * THIS IS WHAT A MOVING ROBOT SHOULD CALL EVERY CONTROL CYCLE.
+ *
+ * Talking to all three at once costs about 35 ms of I2C, and the control loop
+ * is stopped for every millisecond of it. Spread across three calls no single
+ * cycle blocks for more than about twelve, while each sensor is still
+ * refreshed every three cycles -- comfortably inside TOF_INTER_MEASUREMENT_MS,
+ * so nothing is sampled less often than before. It is the same work unbunched.
+ *
+ * The side pair stops being simultaneous, by two cycles at most. At cruise
+ * that is a couple of millimetres along the corridor and a fraction of one
+ * across it, well inside what the span check already tolerates. */
+/* !! FILLS ALL FIVE. out[] must be TOF_SENSOR_TOTAL long. !!
+ * The rotation covers the angled pair too, since it became the wall
+ * follower's preferred lateral reference. A 3-element array here overruns. */
+int ToF_PollOneLatest(ToF_Measurement_t out[TOF_SENSOR_TOTAL],
+                      uint32_t max_age_ms);
+
+/* Read all three, WAITING for a genuinely new measurement from each.
+ * THIS IS WHAT A STATIONARY ROBOT SHOULD CALL.
+ *
+ * The counterpart to the above, and the distinction is about independence
+ * rather than speed. Voting several times at a cell centre only means anything
+ * if the votes are separate measurements; repeated non-blocking reads would
+ * return one sample several times and make a 5-sample vote look confident
+ * about a single reading. In single-shot mode this is ToF_ReadAll() unchanged,
+ * since that already blocks for a fresh measurement. */
+int ToF_ReadAllFresh(ToF_Measurement_t out[TOF_SENSOR_COUNT]);
+
+/* Read accounting. tof_stale_drops is the one worth watching: it counts
+ * readings that aged out of the cache entirely, meaning a sensor stopped
+ * producing rather than merely not being ready yet. It should stay at zero.
+ * The ratio of fresh to cached says whether the loop is outrunning the
+ * sensors, which with a 10 ms loop and a 40 ms sensor it should be, about
+ * one fresh read in four. */
+extern volatile uint32_t tof_fresh_count;
+extern volatile uint32_t tof_cached_count;
+extern volatile uint32_t tof_stale_drops;
+
+#endif /* TOF_SENSORS_H */

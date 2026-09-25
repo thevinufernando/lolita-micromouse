@@ -25,7 +25,7 @@ scope until the motion primitives are trusted.
 | Motors | 2× N20 gear motor with quadrature encoder, differential drive |
 | Motor driver | DRV8833, IN/IN mode, 4 PWM channels |
 | IMU | ICM-42688-P accel + gyro over SPI1. **No magnetometer.** |
-| Range | VL53L0X ToF — **hardware present, not integrated in firmware yet** |
+| Range | 3× VL53L0X ToF (front/left/right) behind a TCA9548A I2C mux |
 | Power | 3S LiPo |
 
 Note HCLK is 48 MHz, not 96. `SystemCoreClock` reflects HCLK and the DWT cycle
@@ -39,6 +39,7 @@ counter runs at it. Do not assume 96 MHz when doing cycle math.
 | TIM2 | Left encoder, quadrature (TI12), PA0/PA1 |
 | TIM3 | Motor PWM ×4, period 4799, PC6–PC9 |
 | SPI1 | IMU, master, mode 0, prescaler /2 → **24 MHz** (PA5/6/7 + PA4 CS) |
+| I2C1 | TCA9548A mux → 3× VL53L0X, 100 kHz, PB6 SCL / PB7 SDA |
 | GPIO | PC3 `MCU_LED`, PB14 `DRV_STBY`, PA4 `IMU_NCS` |
 | SWD | PA13/PA14 + PB3 SWO |
 
@@ -80,9 +81,10 @@ belong there and CubeMX adds them when you enable a peripheral.
 
 ### Host-side tests
 
-`tests/` contains a host harness for the EKF; see `tests/README.md`. Run it
-after any change to `EKF.c` — it catches maths errors that on-target testing
-cannot.
+`tests/` contains host harnesses for the EKF and the ToF noise filter; see
+`tests/README.md`. Run the relevant one after any change to `EKF.c` or
+`tof_filter.c` — they catch maths errors that on-target testing cannot, and
+the ToF suite has already caught one real design defect (see §9).
 
 ---
 
@@ -92,9 +94,17 @@ cannot.
 Core/Inc, Core/Src
 ├─ Control/LowLevel/    PID.c  EKF.c  straightline_controller.c  turn_controller.c
 │                       control_config.h  ← ALL tuning lives here
+├─ Maze/                maze_map.c  wall_sense.c  wall_follow.c
+│                       navigator.c           ← reactive exploration (no solver)
 ├─ Encoders/            encoders.c
 ├─ Motors/              DRV8833.c
 ├─ Sensors/ICM-42688-P/ ICM42688.c
+├─ Sensors/TCA9548A/    TCA9548A.c            ← I2C mux channel select
+├─ Sensors/VL53L0X_Driver/ tof_sensors.c      ← our ToF driver (this is the one to edit)
+│                       tof_filter.c          ← range noise filter (host-tested)
+├─ Sensors/VL53L0X/     stock ST API — DO NOT EDIT (see §9)
+│  ├─ Core/             vl53l0x_api*.c        ← ST, verbatim
+│  └─ Platform/         vl53l0x_platform.c    ← ST's file, REWRITTEN for STM32 HAL
 ├─ Tests/               test_harness.c  ← ACTIVE_TEST + all on-target Test_* routines
 └─ Utils/               dwt_timer.c
 tests/                  host-side EKF verification (separate from Core/Src/Tests/ above)
@@ -208,7 +218,7 @@ There are no magic numbers scattered in the controllers. Change values there,
 rebuild, flash.
 
 `Core/Inc/Tests/test_harness.h` has an `ACTIVE_TEST` switch selecting one of
-11 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
+18 test routines (implemented in `Core/Src/Tests/test_harness.c`). Set it,
 rebuild, flash, and read results in live-watch.
 
 | # | Test | Purpose |
@@ -223,6 +233,13 @@ rebuild, flash, and read results in live-watch.
 | 8 | `TEST_IMU_RAW` | **Run first after IMU wiring** — gyro sign check |
 | 9 | `TEST_YAW_ESTIMATE` | Rotate by hand, watch fusion |
 | 10 | `TEST_GYRO_BIAS` | Bias + stationary drift measurement |
+| 11 | `TEST_TOF_SINGLE` | **Run first after ToF wiring** — mux + single-shot ranging |
+| 12 | `TEST_TOF_CONTINUOUS` | Free-running ranging, same distances |
+| 13 | `TEST_TOF_MODE_CYCLE` | Mode switching and the stop path |
+| 14 | `TEST_MAZE_RUN` | **Moves.** Reactive navigation, wall map, one run |
+| 15 | `TEST_FLOODFILL_RUN` | **Moves.** The ported flood-fill solver |
+| 16 | `TEST_TOF_ANGLED` | **Run first after wiring the 45° pair** — all 5 sensors |
+| 17 | `TEST_TOF_LIVE` | All 5, continuous, **never halts** — the one for live-watching |
 
 ### Bring-up order for the IMU
 
@@ -245,6 +262,24 @@ PID gains. Overshoot ⇒ the configured wheel base is too small. Same logic for
 `TurnController_Init()` runs a stationary gyro bias calibration, so **the robot
 must be still and level at power-on.** It rejects the calibration if it detects
 motion above `IMU_GYRO_BIAS_MAX_DPS`.
+
+### What the LED is telling you
+
+The robot has no screen, so every indicator is this one LED. They are
+deliberately distinguishable:
+
+| Pattern | Meaning |
+|---|---|
+| 3 slow blinks (300/300 ms) | boot: IMU up |
+| 6 fast blinks (80/80 ms) | boot: IMU not found, running encoder-only |
+| 2 fast blinks | boot: ToF init failed |
+| **long–short–short ×3** | **GOAL REACHED** (all four centre cells visited, or speed run complete) |
+| **5 even blinks (150 ms)** | **back at the start**, about to speed run |
+| steady 1 Hz (100/900 ms) forever | a test halted on a full trace buffer |
+| continuous fast toggle | a ToF test is running |
+
+The two maze milestones use a **rhythm**; everything else uses a **rate**.
+That is the point — rates all look alike from across a maze, rhythms do not.
 
 LED at boot: **3 slow blinks = IMU up**, **6 fast blinks = IMU not found,
 running encoder-only**. The turn controller degrades gracefully rather than
@@ -277,15 +312,2390 @@ failing, so a silent fallback is possible — check `tm_imu_ok`.
 
 Currently **out of scope** unless explicitly requested:
 
-- VL53L0X / wall detection — driver files not present yet
-- Any maze-solving algorithm (flood fill, DFS, …)
-- IMU in the straight-line controller
+- **Any goal-seeking maze solver** (flood fill, DFS, …). The robot explores by
+  wall following, which visits cells but does not aim at anything. Porting the
+  flood fill from `MicroMouseAlgorithm` replaces `decide()` in
+  `Maze/navigator.c` and nothing underneath it.
 - Magnetometer — **not present in hardware**, so absolute heading is
-  impossible. Yaw is always relative to the last reset.
+  impossible. Yaw is always relative to the last reset. The wall follower's
+  standing tilt is the closest thing to an absolute reference: holding a wall
+  at its setpoint while the gyro drifts requires a persistent tilt, so that
+  tilt *is* the drift, and it is bled back into the heading target.
+
+**No longer out of scope**, as of 2026-09-12 — earlier revisions of this file
+said all four were deliberately absent:
+
+- Wall detection — `Maze/wall_sense.c` turns distances into booleans. Still
+  **front/left/right only**; the angled pair is deliberately kept out of the
+  wall/no-wall decision and is used purely for centring.
+- ToF in the straight-line controller — `runForwardFused()` centres on
+  whichever side wall is in range.
+- IMU in the straight-line controller — it holds fused heading, not encoder
+  tick difference.
+- Reactive navigation — `Maze/navigator.c` chooses each move from live sensor
+  readings.
+
+---
+
+## 9. ToF ranging (VL53L0X + TCA9548A)
+
+Five VL53L0X sensors provide distance readings. **Distances only** — see §8 for
+what is deliberately absent.
+
+### Sensor geometry, and the two counts
+
+Three **navigation** sensors (front/left/right, orthogonal) plus a 45°
+**angled** pair added 2026-09-18. Robot pointing north, viewed from above:
+
+```
+        NW  \         | N            /  NE
+             \        |             /
+          [L45]     [FRONT]     [R45]
+              <--15mm-->   <--15mm-->
+   W  [LEFT] ....................... [RIGHT]  E
+```
+
+| Sensor | Direction | Mux ch | Consumed by |
+|---|---|---|---|
+| `TOF_FRONT` | north | 0 | navigation |
+| `TOF_LEFT` | west | 3 | navigation |
+| `TOF_RIGHT` | east | 4 | navigation |
+| `TOF_LEFT_45` | north-west | 1 | **wall-follow centring** |
+| `TOF_RIGHT_45` | north-east | 2 | **wall-follow centring** |
+
+⚠️ **`TOF_SENSOR_COUNT` is 3 and `TOF_SENSOR_TOTAL` is 5, and the gap is
+load-bearing.** Since 2026-09-18 the angled pair IS consumed — by
+`wall_follow.c` for lateral centring — but the split remains, because the two
+counts mean different things: `TOF_SENSOR_COUNT` is *"sensors that detect
+walls"* (still front/left/right, as asked), `TOF_SENSOR_TOTAL` is *"sensors on
+the robot"*. The poll rotation and `WallFollow_Update()` use TOTAL;
+`wall_sense.c` and the maze layer use COUNT. Raising `TOF_SENSOR_COUNT` to 5
+would:
+
+1. Feed 45° readings into `wall_sense.c`'s threshold tables, which have exactly
+   three positional entries — putting diagonal distances into the wall/no-wall
+   decision, which is explicitly not wanted.
+2. Break `wall_sense.c`'s `{0,0,0}` initialisers and per-sensor threshold
+   arrays.
+
+(The poll rotation and the `STRAIGHT_TOF_DIVIDER` assert already moved to
+`TOF_SENSOR_TOTAL` when the angled pair was integrated, so those no longer
+depend on this number.)
+
+**Array sizes are a memory-safety boundary, and the four bulk reads are no
+longer uniform.** `ToF_PollOneLatest()` fills `out[TOF_SENSOR_TOTAL]` (five);
+`ToF_ReadAll`, `ReadAllLatest` and `ReadAllFresh` still fill
+`out[TOF_SENSOR_COUNT]` (three). A caller sizing its array from the wrong one
+reads or writes past the end of its own stack, which compiles silently. Check
+the prototype, not the habit.
+
+Use `ToF_NavSensorsReady()` — not `ToF_Init()`'s return — to ask whether
+navigation can run: a loose wire on an unused angled sensor must not read as a
+degraded navigation subsystem.
+
+⚠️ **The five sensors are NOT concentric.** Each angled sensor sits
+`TOF_ANGLED_INBOARD_MM` (15 mm) inboard of the side sensor beside it. So the
+tempting identity *"angled × cos(45) = side reading"* is **false here** — it
+assumes a shared origin, and they are 15 mm apart along the very axis the side
+sensor measures. At maze wall distances (~35 mm) that error is enormous. Any
+real fusion must put both readings into a common robot frame using the offset
+**and** the rotation. Bearings are `TOF_ANGLED_*_BEARING_DEG`, signed to match
+§4's convention (positive = anticlockwise), so left-45 is +45 and right-45 −45.
+
+The angled offsets (`TOF_OFFSET_*_45_MM`) are **unmeasured, held at 0 — and
+centring does not need them.** The error is a *difference* between the pair, so
+any bias common to both subtracts out exactly, along with corridor width. They
+would only matter if something ever used an angled reading on its own.
+
+### The ST API is vendor code
+
+Everything under `Sensors/VL53L0X/` is ST's official API (STSW-IMG005 v1.0.4),
+included verbatim so a future ST release is a drop-in replacement. **Do not
+edit it**, and do not reformat it to match house style.
+
+The one exception is `Platform/vl53l0x_platform.c`. ST ships that file as a
+Win32 reference port that drives a Nucleo over a COM port via
+`ranging_sensor_comms.dll`; it cannot build for this target. It has been
+replaced wholesale with a direct STM32 HAL I2C implementation. If the API is
+ever updated, this is the only file that needs re-porting.
+
+Three other files from ST's `Platform/` folder are Win32-only and are
+**deliberately not in `CMakeLists.txt`**: `vl53l0x_i2c_platform.c`,
+`vl53l0x_i2c_win_serial_comms.c` and `vl53l0x_platform_log.c`. Adding them
+breaks the build. Their declarations are bypassed by the HAL port.
+
+Write application code against `tof_sensors.h`, never against the ST API
+directly — the wrapper is what guarantees the mux is on the right channel.
+
+### The mux
+
+All VL53L0X parts share factory address `0x29`, so each sits on its own
+TCA9548A channel and the MCU opens exactly one at a time. The alternative —
+reassigning addresses at boot — needs one XSHUT GPIO per sensor and must be
+redone on every power cycle, so it was not used.
+
+Consequences worth knowing:
+
+- **Every access is channel-scoped.** Each `ToF_*` entry point selects the
+  channel before touching a sensor. This is also why the ST API must not be
+  called directly: an API call on the wrong channel silently talks to a
+  different sensor at the same address and returns a perfectly plausible
+  number.
+- **A swapped channel mapping is nearly invisible.** `TOF_CHANNEL_*` in
+  `control_config.h` must match the Main PCB. Get it wrong and every reading
+  is valid but attributed to the wrong direction.
+- The mux driver caches the active channel, so re-selecting the same one
+  costs nothing. `TCA9548A_DisableAll()` parks the bus.
+
+### Accuracy: noise and bias are separate problems
+
+This trips people up, so it is worth being explicit. The pipeline is:
+
+```
+raw from sensor  ──►  + TOF_OFFSET_*_MM  ──►  filter  ──►  distance_mm
+                          (fixes bias)      (fixes noise)
+```
+
+**Noise** is random spread between consecutive readings of a stationary
+target. Measured on this robot: a wall at a true 80 mm reads 83–90 mm.
+Handled by `tof_filter.c`.
+
+**Bias** is a consistent over- or under-read — in that same measurement, every
+sample was high. **Filtering cannot fix this.** The average of biased samples
+is equally biased; you get a beautifully stable wrong number. Handled by the
+per-sensor `TOF_OFFSET_*_MM` constants.
+
+> If readings are stable but wrong → adjust the offsets.
+> If they are centred but jumpy → adjust the filter.
+> Never try to cancel a constant error by tuning filter constants.
+
+Offsets are per-sensor because bias comes from cover glass, mounting depth and
+the module's own calibration. Measure each with `TEST_TOF_SINGLE` against a
+ruler at a distance you actually care about (80–100 mm for maze walls) and set
+the offset to `(true − measured)`. VL53L0X error is not perfectly constant with
+range, so a single offset is a linear fix to a mildly nonlinear problem —
+calibrate near the distance you drive at.
+
+### The noise filter
+
+Two stages, each aimed at a different failure mode (full rationale in
+`tof_filter.h`):
+
+1. **Median** over the last 3 raw samples — rejects the occasional wild
+   outlier from a bad reflection. A minority of arbitrarily-wrong values
+   cannot move a median at all.
+2. **EMA** over the median output — smooths the dense small jitter.
+
+A plain moving average was rejected: its lag would feed a wall-following
+controller a stale distance, which is a textbook route to oscillation, and the
+lag gets worse exactly when you lengthen the window to reduce noise.
+
+Measured on the host harness against the real noise band: **σ 2.27 mm → 0.94 mm**
+(2.4× reduction) with the mean preserved.
+
+**The jump detector is the part that matters for maze solving.** Smoothing
+assumes the signal is roughly constant, and that assumption breaks at the most
+important moment — when a side wall ends and the reading legitimately jumps
+from ~80 mm to ~250 mm. That jump is *signal*, not noise; an EMA would ramp
+across it and the robot would believe in a wall that is no longer there for the
+whole ramp. So a step larger than `TOF_FILTER_JUMP_THRESHOLD_MM` snaps the
+filter to the new value instead.
+
+⚠️ **The jump detector tests the RAW sample, not the median — do not "tidy"
+this.** The host test caught the defect: a real transition arrives as one new
+value against a window of old ones, so `{86, 86, 250}` medians to `86` and the
+median stage suppresses the first sample of every genuine step exactly as if it
+were an outlier. The cost of testing raw is one sample of overshoot on a large
+lone outlier, which the median then pulls back — much cheaper than being blind
+to an opening.
+
+Call `ToF_ResetFilter()` after anything that breaks continuity between
+readings, such as a pivot turn that leaves a sensor facing a different wall.
+
+### Units
+
+Distances are **millimetres**, unsigned — the ST API's native unit. Note the
+motion controllers use **cm**; converting is the caller's job.
+
+`ToF_Measurement_t` carries both `distance_mm` (filtered — use this) and
+`raw_mm` (offset-corrected, unfiltered — for diagnosis). Both include the
+offset.
+
+An invalid reading is `TOF_DISTANCE_INVALID` (0xFFFF), never a stale value, so
+ignoring a return code yields an obviously-wrong number rather than a
+plausible old one. `TOF_ERROR_RANGE` means the sensor answered but the
+measurement is unusable (usually nothing in range) — a normal condition, not a
+fault. The raw ST `RangeStatus` is kept in the measurement struct for
+diagnosis.
+
+### Modes
+
+Both are exposed because they suit different phases:
+
+| Mode | Call | Use |
+|---|---|---|
+| Single | `ToF_ReadSingle()` | Blocks ~30 ms per read. Bring-up, stationary checks. |
+| Continuous | `ToF_StartContinuous()` then `ToF_ReadContinuous()` | Sensor free-runs; reads are cheap and bounded. What a moving robot wants. |
+
+Continuous uses `CONTINUOUS_TIMED_RANGING`, not back-to-back: back-to-back
+pins the sensor at full duty and floods the bus when the consumer reads slower
+than the sensor produces. `TOF_INTER_MEASUREMENT_MS` sets the pace.
+
+`ToF_ReadContinuous(..., wait_for_new = 0)` is the non-blocking form — it
+returns `TOF_ERROR_TIMEOUT` when no new sample has landed yet. In a loop faster
+than the sensor that is expected, not an error.
+
+### Init and failure behaviour
+
+`ToF_Init()` runs the full ST sequence per sensor — `DataInit`, `StaticInit`,
+`PerformRefSpadManagement`, `PerformRefCalibration` — then applies the profile
+from `control_config.h`. Budget ~50–100 ms per sensor at boot.
+
+Two ordering rules inside that sequence are load-bearing:
+
+1. `DataInit` → `StaticInit` → reference calibrations. Mandated by the API.
+2. **VCSEL periods before the timing budget.** Changing a VCSEL period changes
+   how long a measurement takes, and the API recomputes the budget against the
+   current periods — set the budget first and it is silently readjusted.
+
+Reference calibration runs at boot rather than loading stored constants,
+because these sensors have not been characterised on this chassis yet. Once
+they have, caching the results would remove most of that boot cost.
+
+Like the IMU, **failure is not fatal**: a bad sensor is marked not-ready and
+skipped by every later call (so it cannot stall a loop with repeated I2C
+timeouts), while the healthy ones stay usable. `ToF_Init()` still returns
+`TOF_ERROR` if any sensor failed — use `ToF_IsSensorReady()` to find out which.
+**2 fast LED blinks at boot** flags a ToF init failure.
+
+### Bring-up order
+
+0. **For the 45° pair, use `TEST_TOF_ANGLED` (test 16) instead** — the ordinary
+   ToF tests go through `ToF_ReadAll()`, which by design covers only the three
+   navigation sensors, so they cannot see the angled pair at all. Expect
+   `tm_tof_ready == 0x1F`; `0x07` means the angled pair did not initialise, so
+   check `TOF_CHANNEL_LEFT_45` / `_RIGHT_45` against the board first. Read
+   `tm_tof_l45_mm` / `tm_tof_r45_mm`. In a corridor both should be roughly
+   equal and **longer** than the side readings (the diagonal path is longer) —
+   but do *not* expect `side / cos(45)`, see the geometry warning above.
+1. `TEST_TOF_SINGLE` (test 11). Check `tm_tof_ready` **first**: bit0 front,
+   bit1 left, bit2 right, bit3 left-45, bit4 right-45. An all-zero mask means
+   the *mux* never answered — that is a wiring or address problem, not a
+   sensor problem.
+2. With the three navigation bits set, hold a wall at a known distance in front of
+   each sensor and check `tm_tof_front_mm` / `_left_mm` / `_right_mm` against
+   a ruler. Confirm each sensor responds to the direction it is named for —
+   this is the check that catches a swapped `TOF_CHANNEL_*` mapping.
+3. **Calibrate the offsets.** With a target at a known distance, compare the
+   settled `tm_tof_*_mm` against a ruler and set `TOF_OFFSET_*_MM` to
+   `(true − measured)`. Do this per sensor; do it before judging the filter.
+4. **Check the filter is working.** Watch `tm_tof_*_raw_mm` next to
+   `tm_tof_*_mm`: raw should visibly jitter while filtered sits still. If both
+   jitter equally the filter is not engaging.
+5. **Check `tm_tof_*_jumps` does not climb while the robot is stationary.** If
+   it does, `TOF_FILTER_JUMP_THRESHOLD_MM` is below the actual noise floor and
+   the smoothing is being defeated — raise it.
+6. `TEST_TOF_CONTINUOUS` (test 12). Same distances, free-running.
+   `tm_tof_error_count` rising while `tm_tof_sample_count` stays static is the
+   real fault signal; both rising together just means polling outpaced the
+   sensor.
+
+### Tuning
+
+All in `control_config.h` under the ToF section. The master knob is
+`TOF_TIMING_BUDGET_US` (speed vs. accuracy) — for a moving micromouse, sample
+rate matters more than the last millimetre, so lower this before touching
+anything else. `TOF_VCSEL_PERIOD_*` are left at ST's defaults deliberately:
+maze walls are under 20 cm away, and buying range the robot will never use
+costs ambient-light immunity.
+
+Filter knobs:
+
+| Constant | Effect |
+|---|---|
+| `TOF_FILTER_EMA_ALPHA` | Smoothing vs. lag. Lower = smoother/slower. 1.0 disables. Governs small jitter only — large steps bypass it. |
+| `TOF_FILTER_JUMP_THRESHOLD_MM` | Step size treated as real. Must sit above the noise spread (~7 mm) and below the smallest real transition (~100 mm). |
+| `TOF_OFFSET_*_MM` | Per-sensor bias. Not a filter knob — see the accuracy note above. |
+
+After changing `tof_filter.c`, run the host suite (`tests/README.md`) —
+several of its cases encode design decisions that are easy to undo by
+accident.
 
 ---
 
 ## Change log
+
+### 2026-09-19 (newest) - Reverted: the handover projection braked for walls a maze away
+
+The handover projection from earlier today was **wrong in practice and is
+reverted.** It argued that a cruise exit is a promise the NEXT segment can
+stop, so the guard should project this segment's travel plus a full chained
+pitch. The argument holds. The result did not:
+
+```
+tm_maze_trace_count   12        (26 the run before)
+tm_chain_wall_stops   1 of 11 segments
+rec 11  (0,10) E  front 408 mm, 0/5 front votes, move FAILED
+```
+
+A wall two cells out reads about 405 mm at a decision point, and
+`405 - (127 + 192) = 86 mm` trips the guard. Two cells is most of a maze, so
+the robot stopped at nearly every cruise exit and braked for walls it was
+nowhere near -- reported as "turns far before the front wall", and visible in
+the trace as a failed move with the front sensor reading 408 mm and no wall
+voted at all.
+
+Back to projecting to THIS segment's endpoint: a wall one cell ahead stops, two
+cells cruises, and the 405 mm reading that stalled the run no longer stops
+anything.
+
+**The handover case is now a KNOWN, DOCUMENTED GAP.** A short from-rest segment
+can still hand over at cruise to a chained segment that cannot stop -- which is
+the real failure from the run before this one. It is left uncovered rather than
+papered over, because the obvious fix is precisely the one that had to be
+reverted. Any narrower fix has to satisfy both ends: **a wall one cell ahead
+must stop, and a wall two cells ahead must not.**
+
+**The host tests were not pinning any of this, and that is the more important
+finding.** They computed `- 2.0f * cell_mm` inline, so they tested arithmetic
+written in the test rather than the rule the firmware applies -- and passed
+identically with the firmware projecting one pitch or two. The rule now lives
+in a single `WOULD_STOP(front, segment)` helper shaped like the source, and the
+assertions are stated as the two competing failures plus the known gap.
+
+Verified by mutation: reintroducing the extra pitch in the helper makes four of
+those checks fail. Before the rewrite it made none fail. **A test that cannot
+fail is not evidence, and three of these guards have now been changed while the
+suite stayed green.**
+
+### 2026-09-19 (SUPERSEDED - reverted above) - The cruise exit is a promise about the NEXT segment
+
+**The goal-latch fix worked.** All four goal cells visited, the blink fired,
+and the phase reached `EXPLORE_TO_START`:
+
+```
+rec 21   51.70 s  (7,8)  GOAL
+rec 22   55.70 s  (8,8)  GOAL
+rec 23   59.42 s  (8,7)  GOAL
+rec 24   69.77 s  (7,7)  GOAL   (+10.35 s -- one cell plus the 4.2 s blink)
+rec 25   74.70 s  (7,7)  front 42 mm, 5/5 votes, move FAILED
+final phase = EXPLORE_TO_START
+```
+
+So the transition is fixed. The malfunction is the very next move: leaving the
+goal, the robot drove into a wall and stall-aborted.
+
+**`tm_chain_wall_stops` was 0 -- the front-wall guard did not fire, and it
+should have.** The arithmetic says so directly: front read 289 mm, and
+
+```
+289 - 192 (a chained pitch) = 97 mm, below the 120 mm trip point -> STOP
+```
+
+**Why it did not.** The guard subtracts `distance`, the length of THIS
+segment. The blink calls `CellMotion_StopAtCell()`, so the robot was at REST
+entering that move -- and a from-rest segment covers only
+`NAV_CELL_CM - CELL_DECISION_OFFSET_CM` = 127 mm, not a full 192:
+
+```
+289 - 127 = 162 mm  ->  above the trip point  ->  cruise exit allowed
+```
+
+The next segment was chained, covered a full 192 mm from there, and finished
+**30 mm past the wall**. The guard answered honestly and had been asked the
+wrong question.
+
+**EXITING AT CRUISE IS A PROMISE THAT THE NEXT SEGMENT CAN STOP**, so the
+projection has to reach past the handover: this segment's travel PLUS a full
+chained pitch. Testing only this segment's own endpoint is right only when the
+two are the same length, which is exactly when it does not matter.
+
+That is the third time in this series that a guard has been correct in logic
+and wrong in WHERE it was evaluated -- the corroboration gate sampled while
+the distance was changing by design, the first chain guard sampled while the
+wall was a cell away by design, and this one measured the wrong segment. The
+pattern is worth naming: **when a test reads a sensor, check what the reading
+means at the moment the test runs.**
+
+**The cost, stated plainly:** this stops one cell earlier than before. A wall
+two cells ahead now ends the cruise where only one cell did; three cells still
+cruises. One extra stop per wall-ended corridor, against driving into a wall.
+Worth it here, and the host test pins both halves so the trade cannot drift.
+
+Also worth noting for the next reader: the blink turning the robot from
+"rolling" to "at rest" is what exposed this. A guard whose behaviour depends
+on the robot's motion state will be exercised differently at a milestone than
+anywhere else in a run.
+
+### 2026-09-19 (earlier) - The goal was found and then walked away from
+
+**A real algorithm bug, fixed upstream and re-ported.** The robot entered all
+four goal cells and kept exploring as though it had not:
+
+```
+rec 21   51.95 s  (7,8)  GOAL
+rec 22   55.85 s  (8,8)  GOAL
+rec 23   59.59 s  (8,7)  GOAL
+rec 24   65.91 s  (7,7)  GOAL   <- fourth and final
+rec 25   70.96 s  (6,7)         <- left the block, never transitioned
+```
+
+It then wandered into the dead end at (8,3) and drove into a 5/5 front wall,
+which is the second symptom -- a consequence, not a separate fault.
+
+**THE BUG IS AN ORDERING WINDOW IN `Main.c`.** A cell is marked visited AFTER
+the move, at the bottom of the loop; the "have all four goal cells been
+visited" test runs at the TOP, guarded by "am I currently inside the 2x2 goal
+block":
+
+```
+top:     if (in goal block && all four visited) -> EXPLORE_TO_START
+         ... choose direction, turn, move, update pose ...
+bottom:  visited_to_goal[y][x] = true
+```
+
+So the fourth and final goal cell is marked one full iteration before anyone
+looks -- and that iteration is free to walk the robot straight back out. When
+it does, the guard is false, the test never runs again, and the mouse explores
+forever having already solved the maze. Nothing is lost; the flags are all set.
+It is a missed window, not missing data.
+
+**Fix: re-run the completion test immediately after the mark**, while the robot
+is still standing in the cell it just entered -- a guarded `continue`. It costs
+one extra pass through the top of the loop and moves nothing else.
+
+**Done upstream first, then re-ported**, which is the workflow this file's
+header asks for. `MicroMouseAlgorithm` was not on this machine; it is now
+cloned at `D:/Projects/MicroMouseAlgorithm`, which is where
+`tests/floodfill_diff.sh` looks by default. **`floodfill_diff.sh` still reports
+PORT IS FAITHFUL across all seven seeded mazes**, so the guarantee is intact.
+The upstream change is committed to nothing -- it sits uncommitted on that
+repo's `main` for the owner to review and push.
+
+**The existing mazes could not have caught this, and that is worth knowing.**
+Both the patched and unpatched builds reach `SPEED_TO_GOAL` in simulation: in
+those mazes the solver happens to stay inside the goal block on the critical
+iteration, so the window exists but is never entered. A test that hopes a maze
+finds the ordering is not a test of the ordering.
+
+So `tests/floodfill_goal_latch_test.c` drives it directly -- walks the four
+goal cells in the order the hardware did, asserts the transition is reachable
+while still in the block, then steps to (6,7) and asserts the guard has gone
+false with all four flags still set. That is the failure, stated as the
+property rather than as a maze.
+
+### 2026-09-19 (earlier) - The drift happens in the third of a cell after a pivot
+
+Best run yet, and the two guards added today both worked:
+
+```
+tm_maze_trace_count   48        (trace no longer truncating)
+tm_maze_complete      1         goal identified
+tm_chain_wall_stops   1         <- the front-wall guard FIRED, first time ever
+tm_maze_abort_reason  6         STALLED, aborted in ~2 s, not an 8 s timeout
+```
+
+**The failure is now purely lateral, and it is in the backtrack**, at pose
+(2,0) WEST -- two cells from home:
+
+```
+rec 45  131.65 s  (3,0) W  left 52   just after a turn, centred
+rec 46  132.99 s  (2,0) W  left 37   -15 mm
+rec 47  137.81 s  (2,0) W  left 30   -22 mm, jammed on the left wall
+```
+
+A steady ~11 mm per cell into the left wall, starting immediately after a
+pivot.
+
+**The follower had the authority and was not given the chance.** At 15 mm of
+error the loop can deliver 25 mm of correction per cell against 11 mm of
+drift. Two things spend that:
+
+1. `WallFollow_Reset()` zeroes the tilt at every pivot, and rebuilding it at
+   `WALL_FOLLOW_TILT_SLEW_DPS` (20 deg/s) takes 0.5 s -- **70 mm of a 192 mm
+   cell at half authority or less**.
+2. `WALL_FOLLOW_URGENT_ERR_MM` was **20 mm**, so the fast 40 deg/s slew only
+   armed once 57% of the 35 mm nominal clearance was already gone. In this run
+   the error crossed 0 -> 15 mm entirely inside the slow window, so the fast
+   slew never armed at all.
+
+**`WALL_FOLLOW_URGENT_ERR_MM` 20 -> 8.** This shortens the weak window rather
+than making the correction larger; the tilt clamp is untouched. It now arms
+with 27 mm of clearance in hand instead of 15.
+
+8 mm is the floor worth using: filtered side-reading noise is ~0.94 mm sigma,
+so 8 mm is 8.5 sigma and noise cannot reach it. The host test now asserts that
+relationship against the noise figure rather than against a literal, so
+lowering the threshold again cannot silently turn into "arms on noise".
+
+**The alternative was rejected for now.** Carrying the lean through a pivot --
+the lateral offset survives an in-place turn even though the heading does not
+-- attacks the root cause more directly, but contradicts the stated reason for
+the reset in `WallFollow_Reset()` and risks applying a lean about the wrong
+axis after a 90 degree turn. Worth trying if the threshold change is not
+enough, as a single change on its own.
+
+### 2026-09-19 (earlier) - Wedged is not the same as stopped
+
+The robot now reaches and identifies the goal on most runs. This one explored,
+found the goal, and failed on the way back:
+
+```
+tm_maze_complete      1         goal identified
+tm_maze_moves         27
+tm_maze_abort_reason  2         MOVE_FAILED (timeout, not stall)
+sl_stall_abort        0         <- the stall detector did NOT fire
+final pose            (7,7) SOUTH, phase EXPLORE_TO_START
+wall_front_mm         311       left 220, right 94 -- nothing close
+```
+
+The trace timestamps show what happened:
+
+```
+rec 25   77.05 s  (7,8) forward, ok        +1.48 s   normal
+rec 26   78.53 s  (7,7) forward, ok
+rec 27   87.56 s  (7,7) FAILED             +9.04 s   ran to timeout
+```
+
+Same pose at 26 and 27 -- the pose never advanced. The robot covered 140 mm of
+a 192 mm cell in nine seconds and hit `CONTROL_MOVE_TIMEOUT_MS`.
+
+**The user reports it was physically stuck against a wall.** No ToF beam showed
+it: front 311 mm, left 220, right 94. So the obstruction was a corner, a post,
+or contact at an angle -- geometry none of the five sensors points at.
+
+**Why the stall detector missed it, and this is the whole fix:**
+
+```
+measured creep            1.55 cm/s   (140 mm / 9.04 s)
+STRAIGHT_STALL_RATE_CMS   1.50 cm/s   <- missed by five hundredths
+needed to finish in 8 s   2.40 cm/s
+commanded cruise         14.00 cm/s   (it managed 11%)
+```
+
+The detector asks "is the robot stationary". A robot jammed on something does
+not stop dead -- **it creeps**. There was a dead band between 1.5 cm/s and the
+2.4 cm/s needed to finish, in which a move is doomed but invisible, and it
+simply burned the full timeout.
+
+The test now also asks **"is this move going to finish"**: is the measured
+speed below what is needed to cover the distance remaining in the time left
+before the timeout. That requirement tightens by itself as the deadline
+approaches, so it stays in step with `CONTROL_MOVE_TIMEOUT_MS` without a second
+constant to drift against it. `STRAIGHT_STALL_RATE_CMS` is kept as the floor,
+so a move is never failed for being slower than a rate it was never asked to
+beat.
+
+Three guards keep it honest: `STRAIGHT_PROGRESS_MARGIN` (0.5) only ever relaxes
+the requirement, `STRAIGHT_PROGRESS_MIN_MS` (1500) disables the test near the
+deadline where the required rate would tend to infinity, and
+`STRAIGHT_PROGRESS_MAX_CMS` (4.0) confines it to creeping rather than to a move
+merely behind schedule.
+
+**Per-wheel travel is now in the trace.** `left_travel_tmm` and
+`right_travel_tmm`, tenths of a mm, signed. Nothing recorded could say whether
+both wheels were dragging or one was doing all the work, and those are
+different faults: symmetric slip is traction or loading, a large asymmetry is
+one wheel binding or an encoder not counting. Given the loose wheel found
+earlier, that distinction is worth having. `MazeTrace_t` is 60 bytes now; the
+stride assert moved with it.
+
+**`MAZE_TRACE_CAPACITY` 64 -> 128.** The previous 82-move run filled the buffer
+at move 64, so the failure was in the unrecorded tail and had to be
+reconstructed from live globals -- which only ever hold the LAST value of
+anything. 128 records at 60 bytes is 7.7 KB of a 128 KB part; RAM is now 21.9%.
+
+**Note what this change does and does not do.** It makes a wedged move fail in
+about two seconds instead of eight, with an honest reason, instead of grinding.
+It does not stop the robot getting wedged. If the next run still wedges, the
+per-wheel figures are the thing to read: a large left/right asymmetry points at
+the drivetrain, near-equal travel at both wheels points at the robot being
+driven into geometry the sensors cannot see.
+
+### 2026-09-19 (earlier) - A loose wheel, and a guard asking the question at the wrong moment
+
+**The hardware was the dominant variable all along.** A wheel was loose for
+every run in this series, which is why run length swung 57 / 13 / 57 with no
+code change that explained it. With it fixed:
+
+```
+tm_maze_moves         82        (was 12 on the previous run)
+tm_maze_complete      1         reached the goal and identified it
+tm_maze_trace_count   64        THE TRACE BUFFER FILLED
+tm_chain_gap_ms_max   4 ms      the blink stop is working
+tof_stale_drops       0         12388 fresh / 47346 cached
+```
+
+82 moves against a 64-record buffer, so the last 18 are unrecorded. The
+recorded tail is healthy -- every move `ok`, backtracking down the west wall
+toward (0,0).
+
+**The failure is at the very end:** `tm_maze_abort_reason` = 6
+(`NAV_END_STALLED`), phase still `EXPLORE_TO_START`, live pose (4,9) EAST with
+`wall_front_mm` = **39 mm**. Nose against a wall, commanded hard, going
+nowhere.
+
+**And `tm_chain_wall_stops` was 0 again -- the guard has never once fired.**
+The gating fix from earlier today was correct and was in the flashed build, but
+it exposed a second, larger error underneath it: **the guard asks its question
+at the one moment it cannot be true.**
+
+It runs at the START of a segment, standing at the previous cell's decision
+point, which is a full cell pitch from the wall the segment will finish in
+front of. The reading there is ~192 mm LARGER than the threshold by
+construction:
+
+```
+wall 1 cell ahead  -> front reads 135 mm at the decision point  (threshold 135)
+wall 2 cells ahead -> front reads 327 mm
+```
+
+So "is the wall close now" is guaranteed to answer no. The question that
+matters is where the sensor will read **when this segment ends**, which is the
+reading now less the distance the segment is about to cover:
+
+```
+front_at_end_mm = front_now_mm - distance_cm * 10
+```
+
+With that projection the geometry works out exactly as intended: a wall one
+cell ahead projects to -57 mm and forces a rest exit; two cells ahead projects
+to 135 mm and correctly keeps its cruise exit, because the next segment
+re-evaluates one cell closer and still inherits the full braking offset.
+
+`CELL_CHAIN_WALL_MARGIN_MM` (15 mm) keeps that two-cell boundary on the cruise
+side rather than resolving it by floating-point equality. Without it, a wall
+anywhere in sight two cells out costs a full stop -- most of a maze, and
+chaining would be off in all but name.
+
+**The lesson, and it has now cost three runs:** a guard that reads a sensor
+must be evaluated where the reading MEANS something. Twice in this series the
+logic was right and the evaluation point was wrong -- the corroboration gate
+sampled while the distance was changing by design, and this one sampled while
+the wall was a cell away by design. `tm_chain_wall_stops` reading 0 is the
+symptom to watch; it should now be roughly one per wall-ended cell.
+
+**Trace capacity is now the binding constraint on diagnosis.** 64 records
+against 82 moves means the failure was invisible in the trace and had to be
+reconstructed from live globals. Worth raising `MAZE_TRACE_CAPACITY` before the
+next long run -- at 56 bytes a record, 128 records is 7 KB of a 128 KB part.
+
+### 2026-09-19 (earlier) - The chain guard was dead on arrival
+
+The front-wall chain guard added earlier today **never fired once**:
+
+```
+tm_chain_wall_stops   0        over 12 chained segments
+tm_chain_gap_ms_max   3 ms     (the blink fix DID work -- was 4226)
+tm_maze_abort_reason  2        MOVE_FAILED
+sl_stall_abort        1        commanded hard, went nowhere
+```
+
+**The bug was the precondition I wrote**, not the threshold:
+
+```c
+if (ToF_ReadAllLatest(fm, ...) == TOF_OK && fm[TOF_FRONT].valid && ...)
+```
+
+`ToF_ReadAllLatest()` returns `TOF_OK` only when **all three** navigation
+sensors serve a fresh reading. A side sensor looking at an opening makes it
+return `TOF_ERROR` -- and that is most corridors. This run's rec 11 had the
+right sensor at 701 mm and rec 10 had it invalid outright. The `&&`
+short-circuited and the front reading was never examined.
+
+Whether the FRONT reading is usable is a per-sensor question that
+`fm[TOF_FRONT].valid` already answers exactly. The aggregate return is about
+the other two, which this decision does not care about. The check is now
+`(void)`-called for its side effect and gated on the per-sensor flag alone.
+
+Also fixed: the array was declared `fm[TOF_SENSOR_TOTAL]` while
+`ToF_ReadAllLatest()` fills only `TOF_SENSOR_COUNT`, leaving the angled entries
+uninitialised for anyone who later read them.
+
+With the fix, this run's own numbers show the guard working: the approach went
+front 264 -> 84 mm, and the chained target is 135 mm, so the segment would have
+been forced to a rest exit well before 84.
+
+**The 13-cell run was NOT a regression from these changes.** The guard was
+inert, and the blink stop only fires at the goal, which this run never reached.
+The failure at rec 12 -- pose (2,10), `left = 24 mm` (below
+`WALL_FOLLOW_USABLE_MIN_MM`, correctly rejected), `wf_side = L45`,
+`sl_stall_abort` set -- is the long-standing lateral one: jammed against a side
+wall while steering on a single angled beam. Different failure from the
+57-cell run, which could not STOP for a front wall it had detected.
+
+Run length is swinging widely (57, then 13) on a mechanism that has not
+changed. `wf_switches` was 1.31/cell here against 2.1/cell in the 57-cell run,
+so the thrashing metric does not track run length either. **Reference
+selection remains the outstanding problem** and is now the only significant one
+left in the wall follower.
+
+### 2026-09-19 (earlier) - Two ways to drive blind into a detected wall
+
+57 cells, goal reached and identified, clean backtracking. Then the robot hit
+a front wall. **It had detected that wall perfectly** -- rec 55 shows the front
+flag set with 5 of 5 votes at 81 mm. Nothing was wrong with the sensing. Two
+separate defects let it drive in anyway, and one of them was mine.
+
+**1. The goal blink ran while the robot was rolling.**
+
+```
+tm_chain_gap_ms_max   4226 ms
+goal blink pattern    4200 ms
+```
+
+Those are the same number. The comment I wrote when adding the indicator
+claimed the robot was "standing at a cell centre, motors already braked". That
+is true only WITHOUT cell chaining -- and `MAZE_CONTINUOUS_CELLS` is 1, so a
+forward move ends early and returns with the robot STILL AT CRUISE so the next
+move can continue. The milestone fires on that path too. The motors held their
+last command open-loop for the whole 4.2 s: about 59 cm, three cells, blind.
+
+`API_setColor()` now calls `CellMotion_StopAtCell()` first. That does nothing
+when the robot is already at rest, so the unchained path is unchanged; on the
+chained path it drives the remaining decision offset and brakes, exactly as a
+turn would.
+
+**2. Chaining committed to a cruise exit it could not brake from.**
+
+A chained segment aims to finish when the front sensor reads
+`WALL_FRONT_ALIGN_MM + CELL_DECISION_OFFSET_CM*10` = 70 + 65 = **135 mm**, the
+offset being the distance needed to stop from cruise. At the decision point the
+front read **81 mm** -- already 54 mm past the distance at which the segment is
+able to finish. There was nowhere to put the deceleration, so it drove to 38 mm
+and the move failed (`tm_maze_abort_reason` = MOVE_FAILED).
+
+The offset is correctly sized; nothing was CHECKING it against the front wall
+before committing to chain. Now `CellMotion_Forward()` reads the cached front
+distance before building the segment, and if it is at or inside the chained
+target the segment exits AT REST instead of at cruise. Costs nothing in an open
+corridor (the reading is out of range and the check is skipped) and costs one
+stop where there is a wall -- the stop the robot had to make anyway, taken
+while it is still affordable. `s_rolling` follows the actual exit speed, or the
+next segment would build its feedforward for a cruise entry it does not have.
+
+`tm_chain_wall_stops` counts it. Zero in open corridors; roughly one per cell
+that ends at a wall. **Front-wall collisions WITH this at zero would mean the
+guard is not seeing the wall** -- look at the front reading, not this counter.
+
+**Two diagnostic traps worth recording**, both of which cost time here:
+
+- `sl_align_reason` is a LIVE global. A cell ending in a turn runs a second
+  segment that overwrites it, so its value describes some later move, not the
+  cell being examined. It read BIG_DELTA for a cell whose actual delta was
+  1.1 cm.
+- The trace's `left_mm`/`right_mm` are IN-FLIGHT readings, taken while the side
+  sensors lead the axle by `TOF_SIDE_AHEAD_CM` and are already looking into the
+  next cell. At rec 55 they read 166/135 against wall flags that were set --
+  not a contradiction, just a different measurement. The FLAGS are the vote;
+  the distances are not.
+
+**Still open:** `wf_switches` was 121 over 57 cells, 2.1 per cell, worse than
+the 1.86 before. Reference thrashing remains unaddressed.
+
+### 2026-09-19 (earlier) - I killed the front alignment. Reverted.
+
+The corroboration gate added earlier today made front-wall behaviour WORSE,
+exactly as reported. The logs say so without ambiguity:
+
+```
+sl_align_applied   0        <- it never fired, on any cell, all run
+sl_align_delta_cm  0.00
+sl_align_reason    4        = SL_ALIGN_BIG_DELTA
+tm_maze_trace_count 22 cells, wedged at (6,8) with front = 256 mm
+```
+
+**Why the gate could never work**, and it is not about noise:
+
+- The align check runs once per ToF rotation (50 ms) and the robot closes
+  ~7 mm in that time. The reading is SUPPOSED to change between samples, so
+  "consecutive readings must agree" is in direct conflict with approaching.
+- `TOF_FILTER_EMA_ALPHA` is 0.2, so on a ramp the filtered value lags by
+  roughly step/alpha -- about 35 mm here -- and its per-update step keeps
+  changing as the EMA catches up. Nothing settles while closing.
+- The filter's jump detector SNAPS to the raw value on a large step, which is
+  precisely what a front wall entering range looks like. It resets any
+  agreement count at the one moment the alignment most needs to fire.
+
+So the gate opened only late and slow, by which point the demanded correction
+had grown past `WALL_FRONT_ALIGN_MAX_CM` and was refused as `BIG_DELTA`. Net
+effect: plain odometry into every front wall, landing wherever accumulated
+error put it.
+
+**Reverted.** The call site keeps the reasoning as a comment and
+`wall_follow_host_test.c` now pins the arithmetic that defeats it -- the
+closing distance per check, the EMA lag exceeding the jump threshold -- so the
+idea is not re-derived from scratch. **If single-sample front noise is ever
+worth attacking again, do it where the sample is PRODUCED** (a front-specific
+filter tuned for a closing target), not by gating the one decision that has to
+happen while the robot is moving.
+
+**A compounding factor, not mine:** `WALL_FRONT_ALIGN_MM` is committed at 70,
+down from the 80 set on 2026-09-18. At 70 the pivot centre sits 108.7 mm from
+the wall face against a 77.8 mm half-diagonal -- 30.9 mm of clearance, still
+positive, so a well-placed stop clears. But with the alignment dead the stop
+was never well-placed. No alignment plus a tighter target is what produced
+contact. 70 is left as the deliberate choice it appears to be; if contact
+continues once the alignment is working again, 80 buys 10 mm back.
+
+**What this run did confirm:** the axis clamp is active -- `sl_axis_clamped`
+shows it engaging -- and the 18-degree crab did not recur.
+
+**What it did NOT fix: reference thrashing.** 41 switches over 22 cells is
+1.86 per cell, against 53 over 29 (1.83) before. Unchanged. The clamp bounds
+how far a bad reference can steer the robot; it does nothing about how often
+the reference changes. That remains the outstanding item, and hysteresis on
+the selection is the next thing to try once the alignment is confirmed
+working again.
+
+### 2026-09-19 (earlier) - It was never the turn. It was an 18 degree crab.
+
+Best run yet: 29 cells, reached the goal, identified it, blinked. Then a turn
+that "looked like more than 90 degrees" left the robot mis-oriented and it
+wedged. **The turn was accurate.** The logs are unambiguous:
+
+```
+rec  pose   yaw_deg   heading_target   off-axis   wf_side
+25  (6,7)   -97.43      -90.00          7.4       NONE
+27  (7,8)   -97.88      -90.00          7.9       NONE
+28  (7,8)  -108.15      -90.00         18.2       L45   <- wedged
+```
+
+`heading_target` is a clean -90.00 at every single cell, so the turn
+controller is commanding exactly 90 degrees and hitting it. What the eye reads
+as an overshooting turn is a robot **pivoting from an already-crabbed
+heading**: it entered the turn 7.9 degrees off, so it left 7.9 degrees off.
+
+**Where the crab comes from.** The live wall-follow terms add up exactly:
+
+```
+wf_tilt_deg    -10.00   (PINNED at WALL_FOLLOW_MAX_TILT_DEG)
+wf_drift_deg    -5.69   (limit 8.0)
+               ------
+total lean     -15.69   commanded, not error
+wf_error_mm    -28.07   past WALL_FOLLOW_URGENT_ERR_MM, so the urgent slew
+                        was driving the tilt to its clamp as fast as allowed
+wf_switches        53   across 29 cells -- the reference changed twice a cell
+```
+
+Both corrections are added to the heading target and **nothing bounded their
+SUM**. They are clamped separately, so 10 + 8 = 18 degrees of lean was legal.
+The robot was faithfully driving where it had been told to.
+
+**Fix: `STRAIGHT_MAX_AXIS_LEAN_DEG` (12).** The commanded heading is now
+clamped to within 12 degrees of the nearest multiple of 90. The clamp goes on
+the SUM, in straightline_controller.c where the heading target is assembled,
+because bounding either term alone leaves the other free and either can reach
+the limit by itself.
+
+12 sits deliberately above `WALL_FOLLOW_MAX_TILT_DEG` (10) so full cornering
+authority survives, and below the 18 that wedged the robot. **The maze is
+axis-aligned** -- a fact about the world, not an assumption about the sensors
+-- so a command further off-axis than this is wrong whatever the readings say:
+the lateral error that would justify it is wider than the corridor.
+
+`sl_axis_clamped` is new telemetry. In a healthy cell it reads 0; sustained 1
+means the follower is asking for a lean the geometry forbids, and `wf_side`
+plus `wf_error_mm` say which reference is lying.
+
+**Second fix, for the user's observation that front-wall stops are sometimes
+good and sometimes far too close.** The alignment fires ONCE per move and
+permanently moves the endpoint, off a SINGLE front sample -- so a noisy
+reading is committed, not averaged away. Filtering does not cover this:
+approaching at cruise the true distance moves several mm per update so the EMA
+trails a moving target, and the filter's jump detector deliberately SNAPS to
+the raw value on a large step, which is exactly what a front wall entering
+range looks like.
+
+`WALL_FRONT_ALIGN_AGREE_N` (2) and `_AGREE_MM` (12): consecutive readings must
+now agree within 12 mm before the endpoint moves. Two samples cannot both be
+the same outlier. Costs one update, about 7 mm of approach, which the room
+test already has margin for; a disagreement resets the count so a noisy patch
+defers the alignment rather than acting on it.
+
+**Still open, and the likelier root cause: 53 reference switches in 29 cells.**
+Every switch changes what "centred" means, and a single-beam reference (L45,
+which was active at the wedge) holds a DISTANCE rather than a difference -- so
+if that distance is wrong the loop leans permanently to satisfy it, and the
+lean IS the heading error. The axis clamp bounds the damage; it does not stop
+the thrashing. Reference hysteresis is the next thing to try if this run still
+crabs.
+
+### 2026-09-19 (earlier) - The LED says when the goal is reached
+
+The robot had no way to say it had found the goal. It does now: **long–short–
+short, three times** (~4.2 s), and **5 even blinks** on returning to the start
+before the speed run.
+
+**Hooked in `mms_api.c`, NOT in `floodfill_run.c`, and that placement is the
+whole point.** The algorithm already calls `API_setColor()` at both milestones
+-- those calls are in the upstream original -- and `API_setColor` was a no-op
+stub in the shim. So the indicator needed **zero changes to the ported
+algorithm**, and `tests/floodfill_diff.sh` keeps its guarantee that the port
+matches `MicroMouseAlgorithm` action for action. (That test links
+`floodfill_sim_api.c` rather than `mms_api.c`, so it never sees this at all.)
+`git diff` confirms `floodfill_run.c` and `maze.c` are byte-identical.
+
+**The trap worth recording: `API_setColor` is called from SIX places, and most
+are not events.**
+
+```
+'R' at goal      all four centre cells confirmed visited    BLINK
+'R' speed done   speed run reached the goal                 BLINK
+'G' at start     ONCE before the run begins, not a result   ignored
+'G' back home    returned to start, about to speed run      blink
+'B' / 'Y'        EVERY ORDINARY CELL of every phase         ignored
+```
+
+`'B'`/`'Y'` fires on every cell entered, so a naive implementation would stop
+the robot for a second in each of ~250 cells. Only `'R'` and `'G'` are handled.
+The startup `'G'` is suppressed by `s_run_started`, set on the first forward
+move -- without it the robot blinks "returned to start" before it has moved.
+That flag is deliberately NOT cleared by `MMS_ApiReset()`, which also runs
+between phases: clearing it there would silence the genuine return-to-start
+blink every time.
+
+Blocking is safe here and nowhere else: a milestone fires with the robot
+standing at a cell centre, motors already braked, before the flood fill has
+chosen its next move. The blink occupies the same gap `NAV_SETTLE_MS` already
+does -- no move is in flight and no control loop is starved.
+
+Patterns are in `control_config.h` under MAZE MILESTONE LED PATTERNS, chosen
+against the four indicators already in use (see section 6). Boot, halt and
+test-running are all RATES; the milestones are RHYTHMS, because rates are
+indistinguishable from across an arena.
+
+### 2026-09-19 (later) - The reference selection works; the RECOVERY does not
+
+First run on the reading-space constants. **The angled work is now doing what
+it was built to do**, which the logs show for the first time:
+
+```
+rec  pose    front left right | wall_side
+11  (1,10)     275   189    77 | R45      <- single angled beam
+12  (2,10)     457    76  ----  | BOTH
+13  (2,9)      594    27    82 | ANGLED   <- the pair, finally
+14  (2,9)      462    46   287 | L45      <- move FAILED here
+```
+
+Every tier appears -- ANGLED, L45, R45, BOTH. Before the reading-space fix
+`wf_side` had never once reached ANGLED. The near-field gate is also working:
+at rec 13 the left sensor read 27 mm, below `WALL_FOLLOW_USABLE_MIN_MM`, and
+was correctly refused rather than steered on.
+
+**But the robot still wedged, and the reason is recovery speed, not reference
+choice.** At rec 13 the left reading of 27 mm means a true gap near 10 mm --
+the robot was already ~25 mm off centre when ANGLED engaged, and one cell was
+not enough to pull that back before the walls changed again.
+
+**Why one cell was not enough.** `WallFollow_Reset()` zeroes the tilt at every
+pivot, and `WALL_FOLLOW_TILT_SLEW_DPS` then rebuilds it at 20 deg/s:
+
+```
+time to the 10 deg clamp   0.50 s
+distance covered at cruise   70 mm
+cell pitch                  192 mm   -> 36% of the cell spent ramping
+```
+
+So the cell that INHERITS a pivot's lateral error is the one with the least
+authority to remove it, at roughly half average tilt for its first third. That
+is exactly the user's observation: fine on the opening straight, wrong after
+turns.
+
+**Fix: `WALL_FOLLOW_URGENT_ERR_MM` (20 mm) and `WALL_FOLLOW_URGENT_SLEW_DPS`
+(40 deg/s).** Past 20 mm of lateral error -- over half the 35 mm nominal
+clearance, so the robot is nearer contact than centre -- the tilt slews at
+40 deg/s instead of 20, reaching the clamp in 35 mm of travel rather than 70.
+Below the threshold nothing changes, so ordinary corridor behaviour is
+untouched. It is a faster slew, not a step: the target still moves
+continuously.
+
+**40 is a ceiling, not a preference, and the host test enforced it.** 60 was
+tried first and refused. The cascade rule: the inner heading loop delivers
+`STRAIGHT_YAW_KP / TURN_FF_GAIN` = 4 deg/s of turn rate per degree of heading
+error, and its linear range is `STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP` = 11.0
+degrees, so a target ramping at R costs R/4 degrees of standing error and R
+must stay under 44. At 60 the cost is 15 degrees against an 11 degree range --
+the heading loop SATURATES and delivers less correction, not more. The test now
+asserts this symbolically so it cannot drift.
+
+**`WALL_FRONT_ALIGN_MM` deliberately LEFT at 80.** The front-wall contact looks
+like a forward-position problem and is not one: at an 80 mm target the pivot
+centre sits 118.7 mm from the wall face against a 77.8 mm half-diagonal, so
+clearance is 40.9 mm -- and still 42.6 mm with 20 mm of lateral error. There is
+no shortage of forward room. The contact comes from the lateral error rotating
+into the forward direction during the pivot, which is what the urgent slew
+addresses. Raising the target further would only spend forward odometry
+accuracy on a problem that is not forward.
+
+### 2026-09-19 - Everything the loop compares is a READING. I got that wrong.
+
+The 52 -> 35 setpoint change from 2026-09-18 was **wrong and made the robot
+worse**: 26 cells became 13, ending pressed against a wall with `wf_side` at
+NONE. Reverted.
+
+**Why it was wrong.** The follower computes
+
+```
+wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM
+```
+
+and `left_mm` is a RAW READING -- `TOF_OFFSET_*` are all 0, so it carries the
+full ~17 mm near-field over-read. Both sides of that subtraction have to be in
+the same space. A setpoint of 52 is what the sensor ACTUALLY SAYS when the
+robot is centred, so the bias cancels and a centred robot is told zero error. A
+setpoint of 35 mixes a biased reading with a true distance: the centred robot
+reads 52, is told it is 17 mm too FAR, and drives 17 mm INTO the wall. The
+original comment defending 52 was correct; the reasoning that replaced it was
+not.
+
+**The same mistake was in the angled constants, and it explains why angled
+centring almost never engaged.** `TOF_ANGLED_NOMINAL_MM` was 70.7 -- true
+geometry -- but the angled beams carry the same over-read, so a centred robot
+reads ~88 and the pair sums to ~175 against a window centred on 141.4. The sum
+sat 1 mm inside the tolerance edge, so any noise rejected it. `wf_side` never
+showed ANGLED in any logged run. Now reading-space throughout:
+
+| constant | was | now |
+|---|---|---|
+| `TOF_ANGLED_NOMINAL_MM` | 70.7 | **87.7** |
+| `TOF_ANGLED_SPAN_MM` | 141.4 | **175.4** |
+| `TOF_ANGLED_MIN/MAX_MM` | 25 / 130 | **35 / 150** |
+
+The lateral error maths needed no change: `(L45-R45)/2 * cos45` is a
+difference, so the bias cancels exactly. Only the acceptance windows were wrong.
+
+**Two real improvements, both from the user's suggestion to lean on the angled
+pair:**
+
+1. **`WALL_FOLLOW_USABLE_MIN_MM` (32 mm)** -- side readings below this are now
+   refused. The VL53L0X does not merely read short below ~30 mm, it reads
+   ERRATICALLY: the stuck run had the right sensor reporting 5 mm with the
+   robot against that wall. The loop was steering on noise. Set above the
+   datasheet floor, not at it, because accuracy is already degrading there.
+
+2. **`WALL_FOLLOW_L45` / `_R45` -- a single angled beam now outranks a single
+   side wall.** Both need a setpoint and carry the bias, but the angled beam
+   holds its reference ~88 mm out instead of ~52, far from the floor, and is
+   1.414x more sensitive per mm of lateral movement. Preference order is now:
+   angled pair, side pair, one angled beam, one side wall.
+
+`far_confidence()` gained an explicit gate argument, because ramping the angled
+beam to the SIDE gate (110) gave it a 22 mm ramp that bottomed out well inside
+its own 150 mm window. The side wrapper is unchanged.
+
+**The lesson, worth stating plainly:** with `TOF_OFFSET_*` at 0 every distance
+constant compared against a reading must be expressed as a reading. Constants
+derived from maze geometry are in a different space and cannot be mixed. The
+one exception is any DIFFERENCE between two same-side-bias sensors, where the
+bias cancels -- which is why the two-wall and two-angled paths are immune and
+were never affected by either bug.
+
+The host suite now pins this: it asserts the setpoints are readings, that they
+are NOT the true gap, and that a centred robot clears the angled span check by
+a wide margin rather than sitting on its edge.
+
+### 2026-09-18 (SUPERSEDED - see 2026-09-19) - The setpoint change that failed
+
+A 26-cell run reached the goal and stuck on the way back, at pose (7,7). The
+suspicion was the VL53L0X near-field floor -- side readings below ~30 mm going
+unusable. **The logs say otherwise.** Read back over SWD:
+
+```
+rec  pose   F L R   front  left  right    wf_side
+22  (8,8)   0 1 0     200    87   ----    LEFT
+23  (8,7)   0 1 0     391   113   ----    LEFT
+24  (7,7)   0 1 0     310    44    300    LEFT
+25  (7,7)   0 1 0     170    36    307    LEFT   <- stuck
+```
+
+Every side reading is ABOVE 36 mm, so the floor was never reached. And
+`wf_side` is 1 (LEFT), not 4 (ANGLED) -- correctly, because the right wall is
+307 mm away and does not exist there, so the angled span check refused the pair
+and fell back to single-wall following. Both subsystems did exactly the right
+thing.
+
+**The bug is that single-wall following was aiming at the wrong place.**
+`wf_error_mm` read -16.0, which is exactly `36 - WALL_FOLLOW_SETPOINT_LEFT_MM`
+with that setpoint at 52. A robot 1 mm from centre was being told it was 16 mm
+too close to the left wall and asked to move right -- into a wall it could not
+see. With a 55 mm half-width in a 180 mm corridor, holding 52 on one side
+leaves 18 mm on the other.
+
+**Why 52 was wrong, and why the argument for it was subtly wrong too.** The
+comment above those constants said a measured reading makes the sensor's
+over-read "cancel exactly". That holds for keeping a CONSTANT DISTANCE from a
+wall. It does not hold for keeping the robot CENTRED, because the centre is
+defined by the corridor geometry and the bias sits between the reading and the
+geometry. Holding a biased reading holds a biased position. Section 9's
+noise-vs-bias rule applied one level up and was missed.
+
+Geometry: `(180 - 110) / 2 = 35 mm`. The measured 52 is that 35 plus ~17 mm of
+per-sensor over-read.
+
+**THIS ALSO RESOLVES THE 104.3 vs 124 CONFLICT** flagged when the angled pair
+went in. Hiruna's stationary `L + R = 104.3` and the geometric prediction of
+~124 were never contradictory: 2 x 52.1 = 104.3 is the same 34 mm of total bias
+seen from the other side. Both numbers were reading-space; neither was the true
+gap. The angled centring was deliberately derived from mounting geometry alone
+so it never depended on either, which is why it works.
+
+`WALL_FOLLOW_SETPOINT_LEFT_MM` / `_RIGHT_MM` 52 -> 35.
+
+Two consequences, both accepted:
+
+- **The two-wall path is untouched.** It uses only `(LEFT - RIGHT)`, and both
+  moved equally, so the difference is identical. Only the single-wall path --
+  the one that failed -- behaves differently.
+- `far_confidence()` ramps from the setpoint, so lowering it widens the ramp
+  and trims gain slightly at a given reading (44 mm: 1.00 -> 0.92). Mild and
+  arguably more honest. If single-wall correction turns sluggish, raise
+  `WALL_FOLLOW_FAR_CONF_FLOOR` rather than putting the setpoint back.
+
+**This is option 2 of two, chosen for blast radius.** The proper fix is
+`TOF_OFFSET_LEFT_MM`/`_RIGHT_MM` = -17, making every reading a true distance
+and removing this class of error everywhere -- but every other side-distance
+constant (`WALL_SIDE_THRESHOLD_MM`, `WALL_FOLLOW_USABLE_MAX_MM`,
+`WALL_FOLLOW_SPAN_MM`, the angled window) was tuned against raw readings and
+must move together. Do it as one deliberate change. **Until then the setpoints
+are true-space and the thresholds are reading-space, and that split is a trap
+for the next reader** -- it is called out at both constants.
+
+Three host tests had hard-coded 40 mm as an example of "too close", true only
+while the setpoint was 52; they failed correctly when it moved and are now
+expressed relative to the setpoint. Same rot Hiruna hit with the 94 mm
+usable-gate case. One test asserted setpoints and span describe the same cell,
+which is deliberately no longer true -- it now checks the property that still
+holds, that a centred robot's READINGS pass the span check.
+
+### 2026-09-18 (later) - A ToF test that does not stop
+
+Selecting `TEST_TOF_CONTINUOUS` to watch the sensors gave readings for a few
+seconds, then the LED changed from a fast flicker to a slow 1 Hz blink and the
+distances froze.
+
+**That was not a fault.** Every ToF test except the angled one calls
+`ToF_HaltIfBufferFull()`, which parks in a `while(1)` on 100 ms / off 900 ms as
+soon as `tm_tof_history` reaches its 200 records -- four to eight seconds at a
+20 ms cycle. The halt is deliberate and stays: the history buffer does not
+wrap, so stopping is exactly what preserves a run for reading back over SWD
+afterwards. It is also what made the 47-cell maze trace recoverable.
+
+It does make those tests useless for simply watching the sensors, which is what
+`TEST_TOF_LIVE` (17) is for. No flight recorder, no halt, runs until power-off.
+
+- **Continuous, through `ToF_PollOneLatest()`** -- deliberately the same call
+  the wall follower makes while driving, rather than a loop of
+  `ToF_ReadSingle()`. A test that exercises a different path from the robot
+  proves nothing about the path the robot uses.
+- All five sensors, so `tm_tof_l45_mm` / `_r45_mm` update alongside the three
+  navigation distances. `tm_tof_ready` is re-read every cycle, so a sensor that
+  drops off the bus AFTER init is visible -- the boot latch cannot show that.
+- `tof_stale_drops` is the number worth watching: any increase means a sensor
+  stopped producing, as opposed to merely not being ready yet, and it should
+  stay at zero. `tof_fresh_count` against `tof_cached_count` says whether the
+  loop is outrunning the sensors, which at a 10 ms cycle and a 40 ms sensor it
+  should be.
+- Cycle period is `CONTROL_SAMPLE_TIME_S`, so a full rotation of five sensors
+  takes the same wall-clock time it does when driving.
+
+The LED still toggles once per cycle. A fast blink means the loop is alive; if
+this test ever shows the slow 1 Hz blink, something called the halt, and that
+WOULD be a real fault.
+
+### 2026-09-18 (earlier) - The side pair goes blind exactly where it is needed
+
+An arena run traversed the outer corridors well and turned the corners, then
+entered each following corridor off-centre and never recovered, accumulating
+error until it contacted a wall. The user's diagnosis -- that the ToF sensors
+stop reading below about 30 mm -- is right, and the geometry says it is not
+marginal but structural:
+
+```
+corridor inner width   180 mm
+side sensor span       110 mm
+  -> centred, each side sensor sees (180-110)/2 = 35 mm
+  -> the VL53L0X floor is ~30 mm
+  -> FIVE MILLIMETRES of margin when everything is perfect
+```
+
+Ten millimetres of lateral error puts the near sensor at 25 mm and it stops
+reporting. So the follower loses its reference at exactly the error it exists
+to remove, and the offset persists into the next cell. That is the observed
+failure, and no amount of gain tuning reaches it.
+
+**The angled pair does not have the problem.** Looking diagonally the path is
+1/cos(45) = 1.414x longer, so a centred robot reads 70.7 mm -- more than twice
+the floor -- and stays valid out to ~30 mm of error, by which point the robot is
+nearly touching a wall:
+
+```
+lateral error   near side sensor   angled pair
+     0 mm            35 mm         70.7 / 70.7
+    10 mm            25 mm BLIND   84.9 / 56.6
+    20 mm            15 mm BLIND   99.0 / 42.4
+    30 mm             5 mm BLIND  113.1 / 28.3
+```
+
+**`WALL_FOLLOW_ANGLED` is now the preferred reference**, above `BOTH`. The side
+pair is untouched and remains the fallback for junctions, openings and front-wall
+approaches, where the angled beams leave the corridor.
+
+The error is `(L45 - R45)/2 * cos(45)`. Subtracting cancels corridor width, both
+mounting offsets and any common-mode bias -- the same argument that makes the
+side difference trustworthy, with a 1.41x better lever arm. **That is also why
+this works with `TOF_OFFSET_*_45_MM` still at 0**: a bias common to both sensors
+subtracts out, so the angled pair needs no calibration to centre correctly.
+
+**The `cos(45)` is a unit conversion, not a fudge.** `(L45-R45)/2` is in mm
+along the beam; multiplying by cos(45) converts to mm of lateral offset, which
+is what lets `WALL_FOLLOW_KP_DEG_PER_MM` carry over from the side pair
+unchanged. Drop it and the loop runs 41% hot with no symptom but overshoot. The
+host test sweeps +/-25 mm and asserts the reported error equals the true offset.
+
+**The poll rotation went 3 -> 5, and it costs almost nothing.** The sensors
+free-run at 40 ms and the loop runs at 10 ms, so the old 3-cycle rotation polled
+each sensor every 30 ms -- faster than it could produce, with three polls in
+four already finding nothing new. At 5 cycles each is polled every 50 ms, still
+far inside `TOF_MAX_SAMPLE_AGE_MS` (120). Readings are up to 20 ms older, about
+3 mm of travel at cruise. `STRAIGHT_TOF_DIVIDER` follows to 5 and its static
+assert now binds to `TOF_SENSOR_TOTAL`, preserving the invariant it always
+encoded: one follower update per complete rotation.
+
+`WALL_FOLLOW_UPDATE_S` derives from the divider, so it became 50 ms. **The slew
+limit is a RATE, so time-to-full-lean is unchanged at 0.50 s and the cascade
+rule is unaffected** -- that rule depends on `R * TURN_FF_GAIN /
+STRAIGHT_YAW_LIMIT`, in which the interval does not appear. Only the step
+granularity coarsens, 0.6 -> 1.0 degrees per update, which the slew limit
+bounds anyway.
+
+**Maze geometry is now stated rather than implied.** `MAZE_CORRIDOR_INNER_MM`
+(180) and `MAZE_WALL_THICKNESS_MM` (12) join `NAV_CELL_CM` (19.2), with the
+relation written down: pitch = inner + one wall. Anything counting CELLS wants
+the pitch; anything reasoning about what a SIDE SENSOR SEES wants the inner
+width, and confusing them is a 12 mm error -- most of the lateral tolerance.
+
+**Unresolved, and deliberately routed around.** The stated 110 mm span in a
+180 mm corridor predicts the side pair should read L+R ~ 124 mm with its known
++27 mm over-read, but Hiruna measured 104.3 mm stationary on 2026-09-12. Those
+cannot both be right. Rather than pick, the angled path was derived purely from
+the stated mounting geometry, so it does not depend on either figure, and
+`WALL_FOLLOW_SPAN_MM` was left alone so the side-wall fallback behaves exactly
+as before. **If the angled centring misbehaves, resolve that 20 mm discrepancy
+before tuning anything** -- it means one of the two measurements describes a
+robot or a corridor that is not the one being driven.
+
+- `wf_side` reads 4 for angled, 3 for the side pair -- added to the live-watch
+  list. If it never reaches 4 in a corridor, the span check is rejecting the
+  pair; widen `TOF_ANGLED_SPAN_TOL_MM` before suspecting the sensors.
+- Wall DETECTION is unchanged and still uses front/left/right only, as asked.
+  The IMU fusion and `yaw_estimator.c` were not touched.
+- Verified: warning-free clean build, all seven host suites pass. **Not yet run
+  on the robot.**
+
+### 2026-09-18 - Two angled sensors, wired in but deliberately not consumed
+
+The remaining two VL53L0X footprints are populated: a 45 degree pair on mux
+channels 1 and 2, left-angled looking north-west and right-angled north-east.
+They are initialised, readable and tested. **Nothing above the driver uses
+them, on purpose** -- the maze stack keeps running on the same three sensors it
+was tuned against, and enabling the pair is a separate, deliberate piece of
+work.
+
+**The whole design turns on not raising `TOF_SENSOR_COUNT`.** Growing that enum
+from 3 to 5 looks like the obvious way to add sensors and is the one thing that
+must not happen here. It would have broken three things at once:
+
+- the `_Static_assert` tying `STRAIGHT_TOF_DIVIDER` to it;
+- the round-robin ToF poll, which would stretch from a 3-cycle rotation to 5,
+  cutting the wall follower's refresh rate by 67% and spending two cycles per
+  rotation on readings nothing reads. That 3-cycle timing was arrived at over
+  several arena runs and is not free to give back;
+- `wall_sense.c`'s per-sensor threshold tables, which are three positional
+  entries indexed by sensor id.
+
+So the enum now carries **two** counts. `TOF_SENSOR_COUNT` (3) is unchanged and
+still means "sensors the navigation stack consumes"; `TOF_SENSOR_TOTAL` (5)
+means "sensors physically on the robot" and is what init, the per-sensor state
+arrays and the bounds checks use. The angled ids sit after the boundary.
+
+**The bulk reads stay at 3, and that is a memory-safety boundary, not a
+preference.** `ToF_ReadAll`, `ReadAllLatest`, `PollOneLatest` and
+`ReadAllFresh` all fill a caller-supplied `out[TOF_SENSOR_COUNT]`; every caller
+in the tree declares a 3-element array, and C passes it as a bare pointer. A
+well-meaning edit raising those loops to `TOF_SENSOR_TOTAL` writes two elements
+off the end of a stack buffer and compiles silently. The comment at
+`ToF_ReadAll` says so at the point of temptation.
+
+**`ToF_NavSensorsReady()` is new and is the question maze code should ask.**
+`ToF_Init()` returning `TOF_ERROR` now means "something among the five failed",
+which is the wrong test for a maze run: a loose wire on a sensor nothing
+consumes must not read as a degraded navigation subsystem. Init still reports
+all five honestly, because the point of this change is to verify the new pair.
+
+**The sensors are NOT concentric, and that is the trap worth writing down.**
+There was no room on the chassis, so each angled sensor sits 15 mm inboard of
+the side sensor beside it. The natural cross-check -- "the 45 degree reading
+times cos(45) should equal the side reading" -- is therefore WRONG, because it
+assumes a shared origin and they are 15 mm apart along exactly the axis the
+side sensor measures. At the ~35 mm the side sensors actually see, that is a
+first-order error, not a rounding one. `TOF_ANGLED_INBOARD_MM` and
+`TOF_ANGLED_*_BEARING_DEG` record the mounting so a future consumer can build a
+proper common-frame transform instead of rediscovering this.
+
+- `TOF_OFFSET_LEFT_45_MM` / `_RIGHT_45_MM` are **unmeasured, held at 0**. The
+  other three sensors' ~+27 mm near-field over-read does not transfer: it was
+  measured square-on, and a 45 degree target returns weaker signal, which is
+  what drives that over-read in the first place.
+- `TEST_TOF_ANGLED` (test 16) reads all five and refreshes the ready mask every
+  cycle, so a sensor dropping off the bus after init is visible.
+  `tm_tof_ready` is now 5 bits: `0x1F` is everything, `0x07` means the angled
+  pair did not come up, `0x00` means the mux never answered.
+- `tm_tof_l45_*` / `tm_tof_r45_*` are written only by that test. During a maze
+  run they stay `TOF_DISTANCE_INVALID`, which is correct rather than a fault.
+- Boot is ~100-200 ms longer: two more sensors each running reference SPAD
+  management and reference calibration. It happens while the robot must be
+  stationary for the gyro bias calibration anyway.
+
+Verified: warning-free build on `TEST_FLOODFILL_RUN`, `TEST_TOF_ANGLED`,
+`TEST_TOF_SINGLE` and `TEST_MAZE_RUN`; all seven host suites pass; **no file
+under `Core/Src/Maze/` or `Core/Src/Control/` was modified.** The flood-fill
+differential test could not run here -- the sibling `MicroMouseAlgorithm` repo
+is not on this machine -- but no flood-fill source was touched.
+
+### 2026-09-12 (earlier) - The lean never got built, and the last 5 cm were blind
+
+Two measurements finally separated what had been one confused symptom.
+
+**The front-wall stop spread is 16 to 83 mm against a 75 mm target**, across
+nine walled stops, every one of which DID align. So the alignment fires and the
+robot still stops anywhere across 67 mm. The cause is that the alignment
+happens on the long segment, which ends a braking offset short of the cell
+centre, and the five centimetres that follow were pure odometry with the
+front-wall correction explicitly disabled. Every bit of slip, carried residual
+and arrival slop in those five centimetres landed straight in the gap.
+
+**The stop segment now aligns too, against the real 75 mm target.** The old
+reasoning -- that the long segment already applied the correction and a second
+would double it -- was wrong. The long segment's alignment places the DECISION
+POINT; this is a second and much better look, with the wall going from 125 mm
+to 75, which is the closest and most accurate reading the front sensor ever
+gets. It needs room to decelerate into, so `CELL_DECISION_MARGIN_CM` goes
+1.5 -> 3.0 and the stop segment is 6.5 cm rather than 5.0. The in-flight wall
+window shrinks from 8.6 cm of travel to 7.1, still about 13 rotations.
+
+**And the wall follower was not failing to correct, it was never getting to
+act.** Pairing each move's exit error against its entry error splits cleanly by
+segment type:
+
+```
+segments that CONTINUE at speed (lean kept)      error moves 24 to 38 mm
+segments that START from rest   (lean zeroed)    error moves 1 mm
+```
+
+Ten cells in a row entered at -22 and left at -22, entered at 23 and left at
+23. A pivot resets the tilt to zero, so every move after a turn rebuilds its
+lean from nothing, and at `WALL_FOLLOW_TILT_SLEW_DPS` of 15 with a 33 ms sweep
+that is half a degree per update -- 0.4 s to reach 6 degrees, on a 1.26 s move
+whose first 0.5 s is spent accelerating.
+
+`WALL_FOLLOW_TILT_SLEW_DPS` 15 -> 20, with `STRAIGHT_YAW_LIMIT` 80 -> 88 to pay
+for it. **30 was the first attempt and the host test refused it, correctly.**
+The ramp cost as a fraction of the inner loop's linear range is
+`R * TURN_FF_GAIN / STRAIGHT_YAW_LIMIT` -- the proportional gain cancels, so no
+amount of retuning `STRAIGHT_YAW_KP` buys any of it back, and 30 against a
+limit of 80 spends 75% of the range before the tilt asks for anything. 20
+against 88 is 5.0 degrees of 11.0, which keeps the margin. 88 is itself the
+most that coexists with cruise: feedforward at 14 cm/s is 112 units and
+112 + 88 is exactly `CONTROL_MAX_SPEED`.
+
+**A real ordering bug, found while reading that path.** `CellMotion_Forward()`
+installed the wall follower's cell context and then called the move, whose
+`WallFollow_Reset()` promptly cleared it. So every move starting from rest --
+after a pivot, most of them -- ran with no map veto and a crossing distance of
+zero, which told the follower its side sensors were already looking into the
+next cell from the first millimetre. The context now travels WITH the move, in
+`StraightMove_t.cells`, and is applied after the reset, which is the only
+ordering that cannot go wrong.
+
+Also: a cell the robot chained straight through has no stop of its own, and was
+reporting the previous cell's. Two rows of the trace carried the same number
+and a cell with no wall ahead appeared to have stopped 60 mm from one.
+
+### 2026-09-12 (previous) - Committing to a stop is not the same as stopping driving
+
+The user's observation was that the front-wall gap varies noticeably from cell
+to cell, and that a cell which stopped short put the robot into a post. The
+cause is one line, and the exit-error measurement added last time is what made
+it findable.
+
+**The last 15 mm of every move was a coast.** `arriving` latched the moment the
+robot first came within `DISTANCE_TOLERANCE_CM` and the command was zeroed from
+there. The profile already plans a deceleration that reaches zero exactly at
+the target; releasing the drive 15 mm early throws that plan away and lets
+friction finish the move instead. How far a coast carries depends on the speed
+the robot happened to have when it crossed the band, and that varies with how
+much it was lagging -- 6 to 9 cm/s in the logs, which on this chassis is 12 to
+20 mm of roll. So the robot stopped anywhere across about a centimetre, with a
+front wall right there to make it obvious.
+
+The command is now CLAMPED AGAINST THE DIRECTION OF TRAVEL rather than removed.
+That is what the latch was always for: refusing to drive backwards into a band
+the robot has passed, since reversing is the one direction this chassis has no
+lateral sensing for. Driving forward to a target it has not yet reached was
+never the thing to prevent.
+
+No stiction floor in that branch, deliberately. The floor exists to raise a
+command too small to move the robot, and at the end of a stop a command too
+small to move the robot is the correct answer -- flooring it would put back the
+overshoot this removes.
+
+**Narrowing the tolerance instead would have been a trap**, and it is worth
+writing down why. `short_of_it`, which arms the breakaway, uses the same
+constant. Tighten the completion band alone and a robot resting 5 mm short
+neither completes nor gets a pulse, and the move runs to the 8 s timeout.
+Tighten both and every cell ends with a full-scale breakaway lurch. The band is
+not the problem; what happens inside it was.
+
+**`stop_front_mm` now records the outcome.** `align_delta_cm` says how far the
+endpoint was moved and `F_mm` says what the sensor predicted on the way in, but
+nothing said where the robot actually came to rest -- which is the only thing
+that decides whether the pivot happens at the cell centre. It is read from the
+front sensor at rest, after the settle, and the reader prints the spread. That
+spread is where every subsequent move begins.
+
+`MazeTrace_t` is 56 bytes. 64 records is 3584 bytes of a 128 KB part.
+
+From the run itself, the alignment is now working and the lateral loop is not:
+
+```
+front alignment     11 of 19 cells, mean -1.02 cm
+reasons             fired x11, no wall x5, too far x3
+entry lateral error worst -40 mm, 9 of 17 cells over 15 mm
+```
+
+All three "too far" cells read about 265 mm predicted at the centre, which is a
+wall two cells away being correctly refused. The reason codes are earning their
+place.
+
+**And the exit errors say the wall follower is doing almost nothing.** On
+eleven of seventeen moves the lateral error at the end matched the error at the
+start to within 2 mm -- entered at -19 and left at -19, entered at 25 and left
+at 25, entered at 33 and left at 34. A whole cell of travel with no correction
+at all. That is the next thing to chase, and it is a different problem from the
+alignment.
+
+### 2026-09-12 (previous) - The gate was inside the wall cluster
+
+The alignment fixes worked. It fired on 10 of 17 cells against 1 of 19, mean
+correction +0.54 cm rather than a single 3.5 cm lunge, and the reasons are
+honest now: five cells had no wall in range, two had one too far to use. The
+longitudinal axis is no longer the problem.
+
+**The robot still clipped a post, and the trace names the cycle.** On the last
+move, 7.1 cm in, fused yaw jumped from -91.5 to -85.1 in about 100 ms and to
+-80.3 in the next -- eleven degrees anticlockwise in 200 ms, with the encoder
+distance spiking to 19 cm/s against a 14 cm/s cruise. That is a body pivoting
+about a contact point with the far wheel running free, at exactly the travel
+where the post sits between the cell being left and the one being entered.
+
+**It went in blind.** `err_mm` reads 0.0 for the first 830 ms of that move --
+the cell it was crossing has no side walls at all, so the follower had nothing
+to hold. The error was not accumulated there; the move STARTED 34 mm out, and
+so did the one before it.
+
+**`WALL_FOLLOW_USABLE_MAX_MM` 95 -> 110, and the run's own readings are the
+argument.** The side sensors returned 33, 41, 47, 51, 54, 56, 60, 64, 67, 68,
+70, 83, 84, 88, 93, 96 and 97 for walls, and 192, 229, 498, 534 and 575 for
+openings. There is a clean gap between 97 and 192 -- and the gate sat at 95,
+INSIDE the wall cluster, discarding the 96 and the 97.
+
+That is the worst possible place to go blind. A reading near the gate means a
+large lateral error, which is when the correction matters most. And because the
+gate is also the far end of the confidence ramp, a reading that did survive at
+93 mm was worth only 0.30 of full gain, capping the lean at 3 degrees against an
+error asking for 15 -- about 10 mm of correction per cell, while the robot was
+entering cells 25 to 38 mm out. At 110 the same reading is worth 0.52 and may
+lean 5.2 degrees.
+
+**And the measurement that should have existed three runs ago.** `entry_err_mm`
+says what a move started with; nothing said what the previous one ENDED with,
+so "the pivot throws the robot sideways" has been inference every time. A move
+that ends centred followed by one that starts 25 mm out convicts the pivot; a
+move that ends 25 mm out convicts the move. Those want opposite fixes.
+
+`exit_err_mm` is the last lateral reading a move had a reference for.
+`MazeTrace_t` is 52 bytes for it, which is what the stride assert is for, and
+the reader now prints the mean and worst jump across each cell boundary. 64
+records at 52 bytes is 3328 bytes of a 128 KB part.
+
+One test was quietly not testing anything. `wall_follow_host_test.c` checked
+that "a reading at the edge of usable range stays timid" using a hard-coded
+94 mm, written when the gate was 95 -- it stopped testing the edge the moment
+the gate moved. It is expressed at the gate now, plus two new cases pinning the
+97-versus-192 separation the change rests on.
+
+### 2026-09-12 (earlier) - "Late" is not "in trouble"
+
+Second run with the reason codes, and they earned their place immediately --
+though the first thing they proved was that they were lying.
+
+**Fourteen of nineteen cells reported the alignment as FIRED while exactly one
+correction had been applied.** `CellMotion_Record()` read `sl_align_reason`
+live, and a cell that ends in a turn runs a SECOND segment to come to rest
+before the record is written. That segment deliberately does no alignment, so
+it reset the reason on the way past. Same class of bug as the in-flight walls,
+same fix: the outcome is latched in `cell_motion.c` the moment the forward
+returns, along with the delta and the applied flag. A log that confidently
+reports the opposite of what happened is worse than one that reports nothing.
+
+**The five honest cells said the new gate was refusing good chances.** Four of
+them declined with the profile already over -- and that gate was mine, added
+last time to stop the alignment firing on a wedged robot. It conflated two
+different things. The robot routinely lags its reference by several
+centimetres, so the profile finishes while the robot is still travelling at
+cruise with the front wall at the best reading it will ever give. Refusing
+there throws away the single best chance of every move.
+
+`stall_since_ms` is the honest test and already existed: non-zero only while
+the robot is commanded above the stiction floor and going nowhere. That is what
+"in trouble" means; "past the end of the plan" is just late.
+
+**And the room test was pairing the robot's distance with the reference's
+speed.** `has_room` asks whether the ROBOT can stop in the distance IT has
+left, so the momentum in that question is the robot's. Using `ref_vel` was
+inconsistent in both directions: it demanded room the robot did not need early
+in a move, when the reference was still ramping, and then demanded none at all
+once the profile ended -- which is exactly when the robot is still at cruise.
+It now brakes from a lightly filtered measured speed, seeded from the segment's
+entry speed so a chained continuation does not begin by believing it is
+stationary.
+
+Where the run actually stands, with the alignment still barely working:
+
+```
+walls read in flight   17 of 19      longest think gap   3 ms
+worst loop cycle       12 ms         straight cell       1.31 s
+entry lateral error    worst -53 mm, 9 of 17 cells over 15 mm
+gyro vs encoder yaw    43 deg apart, 234 rejected updates
+```
+
+**The wall it clipped is a lateral failure, not a longitudinal one.** Entry
+error after a pivot reached -53 mm in a 124 mm corridor, which puts a corner of
+the chassis into the wall line. The chain is: the alignment does not fire, so
+the robot pivots off the cell centre, and a pivot converts longitudinal offset
+into lateral offset almost one for one. Cells 15 and 16 show it happening in an
+open region with no side walls at all -- error went from -24 mm to -53 mm
+across one pivot and one cell, with nothing able to correct it.
+
+### 2026-09-12 (previous) - The alignment window closed when the speed went up
+
+Chaining worked. 89% of wall readings came free from the in-flight vote, the
+longest the motors ran open-loop waiting for the solver was 3 ms against the
+107 ms the margin buys, no loop cycle exceeded 13 ms, and a straight cell took
+1.39 s against 3.5 before. The run ended wedged at (4,7) after 19 cells.
+
+**The front-wall alignment fired once in nineteen cells, and that once was
+wrong.** Three separate faults, all found from that one number.
+
+**It fired on a move that had already failed.** The room test scales the
+braking requirement by the REFERENCE velocity, so once the profile runs out
+that term is zero and the requirement collapses to
+`WALL_FRONT_ALIGN_ROOM_CM` alone. The gate therefore springs open on exactly
+the moves that are going badly. The wedged move sat grinding at 4.7 cm/s
+against a profile asking 14, long past the end of its plan, and the alignment
+chose that moment to extend the target by another 3.54 cm. It is now gated on
+the profile still running: retargeting rebuilds a plan, and there is no plan
+left to rebuild.
+
+**`WALL_FRONT_ALIGN_BEST_MM` was an absolute distance and should have been a
+margin.** The window in which the alignment may fire is bounded below by the
+room it needs to stop and above by the reading it is willing to wait for. A
+chained segment ends a braking offset short of the cell centre, which moves its
+target from 75 mm to 125 mm -- so the lower bound followed the endpoint while
+the upper bound stayed pinned to the sensor, and the window narrowed from 85 mm
+of travel to 25. It is `WALL_FRONT_ALIGN_BEST_MARGIN_MM` now, 125 mm above
+whatever the move is actually aiming at, which reproduces the old behaviour
+exactly at the old target.
+
+**A rebuilt profile dropped the exit speed.** The retarget called
+`MotionProfile_InitFrom()`, which always ends at rest, so an alignment firing
+on a chained segment would have braked the robot to a stop at the decision
+point -- and the stop segment that followed would have built its feedforward
+believing it started at cruise. Rebuilding may change WHERE a segment ends,
+never HOW it ends.
+
+**And the reason it declined is now recorded per cell.** `SL_ALIGN_*` says
+which of the six tests stopped it, packed into the three spare bits above the
+vote tallies because `MazeTrace_t` has no padding left and its stride is
+load-bearing. This run could not distinguish "an arena with nothing to align
+against" from "a window that has closed", and those want opposite responses --
+the answer turned out to be both, and it took an hour of inference.
+
+Two smaller things from the same log:
+
+- **The vote tallies did not rotate with the walls.** A cell entered and then
+  turned in showed `0 0 1` beside `5/1/5`, because `rotateCell()` in the shim
+  turned the flags and the distances and left the counts behind. Telemetry
+  only, but a log that contradicts itself is worse than one that says nothing.
+- **Entry lateral error got worse, not better**: worst -40 mm with 9 of 16
+  cells over 15 mm, against 6 of 49 before. That is the next thing to look at
+  and it is not an alignment problem -- the alignment fixes the longitudinal
+  axis, and a cell that STARTS 40 mm off centre was placed there by the turn
+  before it.
+
+### 2026-09-12 (earlier) - The robot stops being stopped
+
+A 51-cell run took 3.5 s per cell. Of that, 0.8 s was `NAV_SETTLE_MS` standing
+still on purpose, 0.3 s was a five-vote wall read standing still to look, and
+1.0 s of the 2.4 s of driving was ramping to and from a speed held for barely a
+second. A third of every cell was spent not moving, and most of the rest was
+spent changing speed.
+
+**`MAZE_CONTINUOUS_CELLS` makes a forward end at cruise instead of at rest.**
+It stops driving `CELL_DECISION_OFFSET_CM` short of the cell centre -- the last
+point from which the robot can still stop AT the centre -- and returns with the
+robot rolling. Whatever the solver decides next is still available: another
+forward simply continues, and a turn is preceded by a stop segment that drives
+the remaining offset. A chained cell is one cell pitch at cruise, 1.37 s, with
+no ramps in it at all.
+
+The solver is an ordinary blocking loop and could not be asked to decide in
+advance, because what it decides depends on walls the robot has not reached. So
+the move ends early rather than the decision happening late. Between the two
+the motors hold their last command open-loop for however long the solver takes
+-- about a millisecond in the exploration phases -- and
+`CELL_DECISION_MARGIN_CM` is what pays for it. `tm_chain_gap_ms_max` is the
+number that says whether it still does; 1.5 cm buys 107 ms at cruise.
+
+**Nothing above the motion layer changed.** Every entry point that needs the
+robot standing still calls the stop itself -- both pivots, `CellMotion_Observe()`
+and `CellMotion_EndRun()` -- so a caller cannot forget, and the reactive
+navigator, which observes at every cell, never chains and behaves exactly as it
+did. The flood fill is untouched and `floodfill_diff.sh` still passes on all
+seven mazes.
+
+**Walls are read while moving.** The side sensors lead the axle by
+`TOF_SIDE_AHEAD_CM`, so they cross into the cell being entered a third of the
+way through the move and are still inside it when the segment ends -- about
+8 cm of travel, or 15 round-robin rotations at cruise. Votes are counted
+exactly as the stationary read counts them, strict majority with an invalid
+reading voting "no wall", so the answer does not depend on whether the robot
+happened to be moving. **The front sensor is compensated for the distance still
+to run**, because a segment that deliberately ends short would otherwise miss
+every front wall: one at the far side of the next cell reads about 190 mm from
+where the segment ends, against a 150 mm threshold meant for a robot at the
+centre. Fewer than `WALL_FLIGHT_MIN_SAMPLES` rotations and the robot stops and
+votes, which is slow and right. `tm_chain_flight_reads` against
+`tm_chain_stop_reads` says how often that happens.
+
+**A turn no longer re-reads the cell.** The snapshot is robot-relative so a
+pivot invalidated it, and the shim responded by observing again -- a settle and
+a five-vote sweep, better than a second, to rediscover something the algorithm
+had already written into `v_walls`/`h_walls` a moment earlier. It now reads the
+rotated view back out of the map. The distances rotate with the flags, with the
+side turned away from reported as unmeasured rather than filled in with a
+number that means something else.
+
+**`NAV_PIVOT_SETTLE_MS` split off from `NAV_SETTLE_MS`.** They were the same
+800 ms constant guarding different things. The wall-reading pause is now rare
+and can stay generous; the pause after a pivot is on the critical path of every
+turn and was spending two thirds of a second re-confirming what the turn
+controller had just confirmed with `TURN_PROFILE_SETTLE_MS`.
+
+**Speed 10 -> 14 cm/s, acceleration 20 -> 28.** The ceiling here has never been
+top speed -- it is the 130-unit knee where this motor stops answering a larger
+command, above which the feedback has no authority. Feedforward at 14 cm/s is
+112 units, still under it, with 88 of the 200-unit budget left for the loop.
+16 cm/s would put the feedforward AT the knee and is where this drivetrain
+needs gearing rather than tuning. Raising `CONTROL_MAX_SPEED` does not buy it
+back.
+
+Supporting changes:
+
+- **`MotionProfile_InitFromTo()`** -- the general form, with a terminal
+  velocity. `Init` and `InitFrom` are wrappers, deliberately, so an error in
+  the general form shows up in the existing rest-to-rest tests. It reports
+  infeasible when the distance is shorter than `|v0^2 - v_end^2| / 2a` and
+  builds that minimum instead, because a reference that reverses to make the
+  arithmetic work would drive the robot backwards. Three new host tests cover
+  cruise-to-cruise, the two ends of a corridor, and both refusals.
+- **`StraightMove_t`** replaces the loose arguments to the fused move.
+  `runForwardFused()` is now every option at its default.
+- **`keep_odometry` is separate from `keep_wall_follow`, and that separation is
+  load-bearing.** The chained caller computes each segment's length from an
+  absolute odometer; zeroing the encoders inside the segment would move that
+  frame out from under it between the caller reading it and the segment
+  starting. **`YawEstimator_RebaseEncoders()` is now tied to the reset**, since
+  it adds the current yaw to an origin whose "since reset" term it assumes is
+  zero -- calling it without having reset double-counts the whole heading the
+  robot has turned through since the last real reset.
+- **`WallFollow_NewSegment()`** restarts only the movement detector's travel
+  baseline. Calling `WallFollow_Reset()` at a cell boundary instead would drop
+  a good reference and step the tilt to zero, which is the exact discontinuity
+  the slew limit exists to prevent.
+
+What to read first in the next run: `tm_chain_gap_ms_max` against the 107 ms
+the margin buys, the flight-vs-stop read ratio, and whether the per-cycle
+period histogram still tops out near 12 ms now that the loop is doing the wall
+vote as well.
+
+### 2026-09-12 (earlier) - The flood fill, ported
+
+`MicroMouseAlgorithm/maze.c` and `Main.c` now drive the robot, under
+`Core/{Inc,Src}/Maze/floodfill/`. They came across essentially unchanged:
+`main()` is `FloodFill_Run()` and `debug_log()`'s body moved out, because it was
+`fprintf(stderr)`. Every line of `floodfill_phase()`, `updateWalls()`,
+`getBestDirection()`, `checkDeadEnd()` and `floodfill_speed_run()` is the
+original. `ACTIVE_TEST` is `TEST_FLOODFILL_RUN`.
+
+**`tests/floodfill_diff.sh` is the reason to trust that.** It builds the
+original and the port into two binaries, links both against the same simulated
+maze, and compares their transcripts action for action over seven seeded mazes.
+Everything about the builds is identical except which copy of the algorithm
+they contain, so "the algorithm did not change" is checked rather than
+asserted. Run it after touching anything under `floodfill/`; if it diverges,
+change `MicroMouseAlgorithm` first and re-port.
+
+**The one adaptation: wall readings are cached per cell.**
+`API_wallFront/Left/Right` are called several times per cell -- once in
+`updateWalls()`, again in `getBestDirection()` -- which is free on the simulator
+and about 200 ms a time here. `mms_api.c` reads the cell once on arrival and
+serves every query from that snapshot. The differential test runs each maze
+both ways and the transcripts match, so this saves time without changing a
+decision.
+
+**A failed turn is reported one call late.** `API_turnLeft/Right` return void,
+so a timed-out pivot is latched and returned from the next `API_moveForward()`,
+which `Main.c` already treats as a crash. The trace shows the failure on the
+move after the turn.
+
+**THE ALGORITHM OWNS THE POSE AND THE MAP.** `mouse_x`, `mouse_y`, `mouse_dir`,
+`v_walls` and `h_walls` are defined in `floodfill_run.c`; `maze_map.c` used to
+define its own copies under the same names, which was harmless only while the
+two never met in one binary. It is now a view over that state, keeping only
+what the algorithm has no use for: walls by compass side, robot-relative walls
+of an arbitrary cell, the next cell along a heading, and a visited bitmap. The
+types are the algorithm's -- `bool` walls, `int` pose -- and the reader follows
+the pose width change.
+
+Nothing may write the pose except whoever is driving. Two writers would
+disagree the first time a move failed, and every wall recorded afterwards would
+land in a cell the robot never entered.
+
+**`cell_motion.c` is the layer both drivers stand on**: observe, turn, forward,
+plus the residual carry, the front-wall alignment interaction, the wall
+follower's cell context and the per-cell trace. It was private to
+`navigator.c`; re-implementing it for the flood fill would have meant
+re-learning every hard-won rule in it. The right-hand rule stays in
+`navigator.c`, so `TEST_MAZE_RUN` still works.
+
+Costs about 4.9 KB of bss, against roughly 16 KB used of 128 KB.
+
+### 2026-09-12 (head) - A move was ending while the robot was still moving
+
+21 cells, ended on a genuine wedge. The per-cell entry error, added last time,
+paid for itself immediately.
+
+**The completion test checked position and not speed.** A robot crossing into
+the tolerance band at cruise declared the move finished and then carried on for
+however far it took to stop. Measured at a median 11.2 cm/s against a profile
+asking for 10, exiting a 1.5 cm band, landing 22 to 25 mm past target.
+
+That would be a rounding error if the robot only drove straight. It does not. A
+90 degree turn converts longitudinal error into LATERAL error almost one for
+one, and the new per-cell record shows it plainly: a cell that finished 22 mm
+off was followed by a move beginning 17 mm off centre, where every other entry
+error in that run was inside 7 mm. The completion tolerance was setting the
+floor on how well placed the robot could be after any turn.
+
+`STRAIGHT_SETTLE_SPEED_CMS` now requires the robot to be stopped as well as
+close. **Arrival is latched**, which is the part that matters: without it the
+speed condition makes things worse, because a robot that coasts through the
+band coasts back out, the test un-arms, the command returns, and it hunts --
+eventually backwards on a breakaway pulse, which is the one direction this
+chassis has no lateral sensing for. Latching turns "close enough" into a
+decision made once, and the command goes to zero from that moment.
+
+**The tolerance stays at 1.5.** Narrowing it now would fight the latch rather
+than help: where the robot comes to rest is decided by braking, and a smaller
+band only delays the commitment until later in the deceleration, leaving less
+room to stop. The band decides WHEN to commit; committing early is what makes
+the stop accurate.
+
+**The stall abort now waits for the breakaway to have had its turn.** It ran on
+a private 1200 ms clock and could cut the pulse sequence off before it had
+spent its budget, which is how a move gets abandoned somewhere the robot could
+plainly have driven on. It is gated on `sl_breakaway_count` reaching
+`STRAIGHT_BREAKAWAY_MAX` now.
+
+Still open: the alignment fired on 11 of 21 cells with a mean correction of
++1.73 cm and three clamped at the 4 cm limit. Systematically positive
+corrections of that size mean the robot arrives consistently short of where the
+front wall says it should be, and that bias is not yet explained. It was
+deprioritised earlier as a longitudinal problem; the entry-error data is what
+makes it a lateral one.
+
+### 2026-09-12 (current) - Stop grinding, stop guessing
+
+Four changes off one run, three of them fixes and one a measurement.
+
+**The alignment was asking the wrong body about room to stop.** The rebuilt
+profile starts where the REFERENCE is, so that is the distance it covers, but
+whether there is room to decelerate is a question about the ROBOT -- which is
+behind the reference by whatever it is lagging, 2 to 3 cm normally and 9 cm
+when it is fighting something. Asking the reference made the alignment refuse
+itself on exactly the moves that were going badly, and front-wall stops went
+from an 11 mm spread to 54 in one run. Now `remaining_robot` decides whether it
+may fire and `remaining_ref` is what the profile is built from.
+
+**A move that is not happening is now abandoned.** The existing breakaway only
+arms once the profile has FINISHED, so the case it was never written for is a
+robot wedged in the MIDDLE of a move. One was measured at 3.8 cm/s against a
+profile asking for 10, command pinned between 155 and 176 of 200, steering
+clipped on 124 of 200 cycles, reference 9.3 cm ahead, grinding for over two
+seconds. `STRAIGHT_STALL_RATE_CMS` and `STRAIGHT_STALL_ABORT_MS` end the move,
+and `NAV_END_STALLED` says so -- a wedge and a timeout are different failures
+wanting different answers, and reporting both as MOVE FAILED sent a run's worth
+of investigation at the steering when the cause was mechanical.
+
+**The integral has a third gate.** `conf` guards against a reference not worth
+believing and the clamp guards against the loop already asking for everything
+it can. Neither covers the loop asking correctly and the ROBOT not answering.
+That run drove the term to -7.66 of a +/-8 limit, most of it manufactured while
+wedged. `WALL_FOLLOW_MIN_TRAVEL_CMS` stops it learning when the wheels are not
+making ground -- lateral authority comes from leaning while moving forward, so
+with no forward motion there is nothing to learn from the correction failing to
+arrive. The travel sample is taken at the TOP of `WallFollow_Update`, before
+the no-reference path returns, or a stretch of cells with no wall comes back as
+one enormous step over a single interval and reads as a robot sprinting.
+
+**And the measurement, which is why this run was worth it.** A robot came out
+of a dead end 46 mm further from the same wall than it went in, across one 180
+and one cell of travel, and nothing recorded which of the two did it. The
+per-cycle trace only survives the last move. `MazeTrace_t` is 48 bytes now and
+carries `entry_err_mm`, the lateral error each arriving move STARTED with, plus
+`align_delta_cm` so which moves aligned is a fact rather than an inference from
+where the robot stopped. Paired with `move_error_cm` this says whether a cell's
+offset was inherited or created.
+
+If pivots turn out to be throwing the robot tens of millimetres sideways, the
+lateral loop is being asked to clean up after a far larger disturbance than
+anything it has been tuned against, and no amount of gain work fixes that. The
+reader prints the worst entry error and how many cells exceed 15 mm.
+
+### 2026-09-12 (earlier) - Align late, and tell the follower where it is
+
+Two faults from one move in the last run.
+
+**The alignment never fired, and never could have.** It looked only during the
+first quarter of the move -- exactly when the front wall is furthest and its
+reading worst. That move began with the wall at 407 mm and the window shut at
+5.1 cm of travel with the wall still 356 mm off, six millimetres outside range.
+About half the forward moves in that run could never align at all.
+
+The real limit on firing late is physical, not a fraction: there must be room
+to decelerate to the new endpoint from the speed the reference is doing. So the
+window is gone and the gate is now `remaining >= v^2/(2a) + WALL_FRONT_ALIGN_ROOM_CM`,
+with the alignment preferring to wait until the wall is inside
+`WALL_FRONT_ALIGN_BEST_MM` and falling back on a distant reading only when it
+is running out of room.
+
+That needs a profile that starts at the reference's current velocity, so
+`MotionProfile_InitFrom()` was added and `MotionProfile_Init()` became a
+`v0 = 0` wrapper over it -- deliberately, so an error in the general form shows
+up in the existing rest-to-rest tests rather than only in the arena. It returns
+0 when the move is shorter than the braking distance and builds the hardest
+stop instead, because a reference that reverses to make the arithmetic work
+would drive the robot backwards.
+
+**The side sensors are 4 cm ahead of the axle (measured), so they cross the
+cell boundary at 5.6 cm of a 19.2 cm move.** They spend more than two thirds of
+every move looking at the cell being ENTERED, and nothing in the firmware knew
+it. In the failing move the follower tracked the right wall of the cell it was
+leaving for 3.4 cm past the boundary, read that wall's recession as the robot
+drifting, and leaned 4.68 degrees into the opposite wall. The left sensor
+touched it. Lateral error sat between -21 and -26 mm for all 200 cycles and
+never improved, even with the tilt pinned at the clamp for 63 of them.
+
+`WallFollowCells_t` now carries what the map knows about both cells plus the
+crossing distance, set by the navigator before each forward move and cleared by
+`WallFollow_Reset()`.
+
+**THE MAP MAY ONLY WITHHOLD TRUST, NEVER ADD IT.** A reference is dropped when
+the applicable cell is surveyed and records no wall there. A wall the map
+believes in but the sensor cannot see is never conjured into one. That
+direction is the whole safety argument: a wrong pose makes the loop more
+cautious rather than more confident, and this robot has driven off the edge of
+its own map before. The host test asserts no combination of inputs can create a
+reference.
+
+This needed the map to be able to say "I do not know". `MazeMap_UpdateWalls()`
+only ever sets a wall to 1, so a zero meant "no wall seen here", which reads
+identically to open -- every unexplored cell would have reported as wide open
+and vetoed everything. A 32-byte visited bitmap and `MazeMap_IsKnown()` close
+that. `MazeMap_CellWalls()` is the read mirror of `UpdateWalls`, kept beside it
+because a left/right swap in that arithmetic produces a map that is plausible,
+self-consistent and mirrored. `MazeMap_Advance()` is now written in terms of a
+new `MazeMap_NextCell()` so the two cannot disagree about where the edge is.
+
+An unsurveyed next cell contributes no opinion, which is the common case on a
+first pass and leaves the follower exactly as it behaved before.
+
+### 2026-09-12 (head) - The alignment was commanding the robot backwards
+
+The round-robin poll did what it was meant to: every cycle 10-13 ms, nothing
+over 25, the loop running free for a whole move. The run reached 43 cells
+against 29 the time before and failed only on its last turn. Front-wall stops
+held at 73-91 mm, mean 85, across 19 cells.
+
+**With the loop fast, a defect that had always been there became visible.** The
+front-wall alignment added its correction to the profile's OUTPUT, which moves
+the origin by the same amount as the endpoint. A correction that shortens the
+move therefore commands the robot backwards before it has gone anywhere:
+
+    t(ms)   ref_cm   act_cm    base   steer      yaw
+      110    -2.58     0.00   -45.0   -12.3  -1444.71
+      322    -1.66     0.01    45.0   -35.6  -1444.85
+      832     3.12     0.24   137.6   -33.4  -1446.29
+
+Standing still was not the expensive part -- stiction held the robot, so it
+never actually reversed. The expensive part is that the lateral loop ramps its
+tilt through those 800 ms, and a heading correction with no forward motion is
+not a translation, it is a PIVOT. The robot turned 1.6 degrees on the spot and
+entered the cell already yawed, which is the opposite of what the alignment
+exists to do. It bites on every negative correction, and therefore on the turn
+cells, which are the ones with a front wall to align against.
+
+The profile is now REBUILT rather than translated: a new profile for what
+remains, anchored at the reference position the move has already reached, with
+a clock to match. Anchoring on the reference rather than on the robot is the
+part worth stating -- anchoring on the robot would step the reference back by
+however far it currently lags, which is the same defect in a smaller size.
+
+Its velocity restarts from zero, which is why the alignment stays confined to
+the opening of a move: there the reference is barely moving and the
+discontinuity lands in a term the position loop covers easily. Position itself
+never jumps, and that is the property the distance loop actually closes on.
+
+`motion_profile_host_test.c` pins it, including a check that reproduces the old
+translation and asserts it does step backwards, so the defect cannot return
+quietly.
+
+Still open after this run: the robot ran 23-28 mm toward the left wall for six
+cells in the bottom-left corridor and could not recover inside a cell, with the
+loop holding -5.76 of learned drift plus a pinned -10 of tilt. The 16 degree
+heading errors there are the commanded state, not error. And 11 stale ToF drops
+appeared for the first time -- a sensor going 120 ms without producing, 11 times
+in about 25000 reads.
+
+### 2026-09-12 (current) - A taper instead of a cliff, and the poll unbunched
+
+The anti-windup worked: the integral stayed between +0.92 and -2.14 across 28
+cells against the previous run's pin at -8.00, and front-wall stops came in at
+74-89 mm, mean 83, against the 87 mm target. Neither of those is the problem any
+more.
+
+**The single-wall rule was keying on the sign of the error when it should have
+keyed on the size.** Any long reading got a fifth of the gain and a 2.5 degree
+cap. The robot then carried a 14 mm error for a full second against a right wall
+reading 76 mm -- twelve millimetres long, where an opening reads 240 and the
+95 mm usable gate already rejects one -- and the rule throttled a correction
+that was entirely correct. The proof arrived a moment later: when the left wall
+came into range it agreed, too close on the left by 14 where the right had said
+too far by 12. That cell ended 28 mm off centre and the turn out of it jammed
+44 degrees short.
+
+Confidence is now a ramp: 1.0 at the setpoint, falling to
+`WALL_FOLLOW_FAR_CONF_FLOOR` at the usable gate, multiplying both the gain and
+the tilt clamp. The ramp's two ends are the two things already known -- a close
+return can only be a wall, and a reading at the gate is about to be discarded --
+so only the middle is interpolated.
+
+The integral gets a threshold rather than a taper, at `WALL_FOLLOW_TRUST_CONF`.
+The proportional term may act on a doubtful reference in proportion to the
+doubt, because it forgets the moment the reference changes; an integrator does
+not forget, and a wrong guess accumulated into it is held until something else
+unwinds it.
+
+**The ToF poll went round-robin.** `ToF_PollOneLatest()` talks to one sensor per
+control cycle and serves the other two from the held-reading cache, replacing a
+sweep of all three every fourth cycle. Same I2C work, same per-sensor rate,
+unbunched: 35 ms of blocked loop becomes about 12. `STRAIGHT_TOF_DIVIDER` went
+4 -> 3 and now means one complete rotation, with a static assert tying it to
+`TOF_SENSOR_COUNT` -- if those disagree the wall follower either sees repeated
+samples or misses some, and neither failure announces itself in the arena.
+
+The side pair stops being simultaneous by at most two cycles, which at cruise is
+a couple of millimetres along the corridor and a fraction of one across it, well
+inside what the span check already tolerates.
+
+Expect the period histogram to read about 12 ms throughout with nothing above
+25. If it still shows 35s, the rotation is not happening.
+
+### 2026-09-12 (earlier) - The integral was the thing moving, not the alignment
+
+First run on continuous ranging. Mode switching worked: both failure flags read
+0, 3870 fresh reads against 3 held, no stale drops. The run reached 33 cells,
+up from 27.
+
+**Front-wall alignment got much better and is not the problem.** Stop distances
+against the 87 mm target spanned 67-92 mm, mean 81. The previous run spanned
+42-112. Nothing about the alignment gain wants reducing; it was starved of
+sweeps, and now it is not.
+
+**The lateral integral was winding on position error.** Per-cell it moved as
+much as 3.3 degrees, pinned at WALL_FOLLOW_KI_LIMIT_DEG for a stretch, and
+since it is added to the heading target it then held the robot 7 degrees off the
+maze. The heading errors of +11 to +14.7 degrees in the late half of that run
+were this term's own output, not something it was correcting.
+
+The cause is that a single-wall cell routinely shows 20-25 mm of lateral error
+where the two-wall corridor the gain was sized against shows 8. Two fixes, and
+both are needed:
+
+- **Anti-windup**, the ordinary kind: stop integrating while the proportional
+  term is clamped. A large lateral error is a POSITION error and belongs
+  entirely to P. Only what P cannot remove is evidence of a standing bias, and
+  while P is pinned there is no such evidence to be had.
+- **`WALL_FOLLOW_KI_DEG_PER_MM_S` 0.10 -> 0.04.** The host test shows why the
+  gain alone was not enough: at 0.04 the measured cell still moves the term
+  about 1.3 degrees, better than 3.3 and still far too much for something
+  learning a property of the robot. The gate is what removes it.
+
+**The loop is four times better and not yet fixed.** Periods now read 10 ms for
+150 cycles and 35 ms for 49, so 53% of the move still has the loop stopped,
+down from 81%. The 35 ms is I2C traffic for three sensors rather than ranging
+latency, so the remaining move is to read one sensor per control cycle and let
+the held-reading cache cover the other two: four cycles would cost about 48 ms
+instead of 65, and no single cycle would exceed about 12.
+
+### 2026-09-12 (last) - The control loop was open 81% of the time
+
+Measured from the raw straight trace: 60 cycles at 10 ms and 19 at 138 ms. Of
+3222 ms in one move, 2622 were spent inside a blocking sensor read with the
+motors holding a stale command.
+
+`ToF_ReadAll()` does three blocking single-shot reads at about 46 ms each. The
+driver has had a non-blocking continuous mode all along -- its own header calls
+it "what a moving robot wants" -- and the maze run simply never turned it on.
+Only two test-harness functions did.
+
+**This was not a tuning problem, it was why several tuning problems could not be
+fixed.** Every PID was told each 138 ms gap was 10 ms, which multiplies the
+derivative by 13.8. From the trace, across one sweep the heading error moved
+5.66 deg, the D term computed `0.20 * 5.66 / 0.010` = 113 units, P added 42, and
+the steering clamped at its limit. With the true period it is 8 units and
+nothing saturates. Every steering slam in the late half of that run was this
+arithmetic, not a collision. The wall follower had the same bug at a quarter
+scale: its slew and integral used a nominal 40 ms against a real 168.
+
+Switching the mode is one call. These were the consequences, and two of them
+would have broken the robot outright:
+
+- **A non-blocking read with nothing new invalidates the measurement.** Polling
+  a 40 ms sensor from a 10 ms loop means three reads in four come back invalid,
+  and `usable()` in `wall_follow.c` reads invalid as "no wall" -- the loop would
+  drop its reference, slew to zero, re-acquire, and flicker at the poll rate.
+  `ToF_ReadAllLatest()` holds the newest good reading and serves it with an age.
+  The age limit is what tells a slow sensor from a dead one; without it a failed
+  sensor's last reading is served forever and the robot steers to a wall that is
+  not there. `tof_stale_drops` counts that and should be zero.
+- **`WallSense_ReadCell()` votes five times with no delay.** Single-shot made
+  each vote an independent measurement. Free-running, five back-to-back reads
+  return one sample five times and report it as a unanimous 5/5.
+  `ToF_ReadAllFresh()` waits for a genuinely new measurement per vote. Costs
+  about 200 ms per cell, down from 690.
+- **`ToF_ResetFilterAll()` after a pivot stopped being a guarantee.** It exists
+  because the stored samples describe a heading the robot no longer holds.
+  Single-shot guaranteed the next sample was triggered after it; free-running
+  does not, and the sample in flight may have been captured mid-rotation. It now
+  arms a per-sensor discard: the next sample is consumed, latch cleared, never
+  decoded, so the first reading the filter sees provably started after the reset.
+- **Stopping continuous mode moved onto the critical route.** A stop is only a
+  request and the part is undefined if reconfigured during the window. Every
+  `break` in `Navigator_Run()` already fell through to one cleanup point, so the
+  stop lives there, and a failure is recorded in `tm_maze_tof_stop_fail` rather
+  than swallowed.
+
+`MAZE_TOF_CONTINUOUS` is the rollback: set it to 0 and everything behaves as it
+did before. `TOF_MAX_SAMPLE_AGE_MS` is 120, two measurement periods plus a
+timing budget, which is 1.2 cm of travel at cruise.
+
+**Nothing else was retuned, on purpose.** `TOF_FILTER_EMA_ALPHA` stays at 0.2
+because per-sample noise rejection does not change with rate, only the time
+constant, from about 840 ms to 200 -- which is the point. `STRAIGHT_TOF_DIVIDER`
+stays at 4, which gives a 40 ms sweep at a true 10 ms loop and already matches
+`TOF_INTER_MEASUREMENT_MS`. `TOF_FILTER_JUMP_THRESHOLD_MM` stays at 30, and
+`tof_filter_host_test.c` gained a case proving it: at 40 ms and 10 cm/s a
+genuine approach is 4 mm per sample and must not trip the detector, while a wall
+ending still must.
+
+New suite `tof_cache_host_test.c` pins the age-gate rule, including the
+unsigned-subtraction idiom against the tick counter's 32-bit wrap.
+
+**The pass/fail test is the timing, not the feel.** The reader now histograms
+the per-cycle period from the straight trace. It should print 10 ms and nothing
+above 25. If it still shows 138s, continuous mode did not start -- check
+`tm_maze_tof_start_fail` before concluding anything about the tuning.
+
+### 2026-09-12 (latest) - One integrator, and where it is applied
+
+The lateral loop was not converging: a run showed the robot visibly yawed left
+with the left wall in view and no correction arriving. Two causes, both about
+structure rather than gains.
+
+- **The correction had a ceiling it could not pass.** The integral added in the
+  previous change sat INSIDE the tilt sum, so the total lateral authority was
+  bounded by `WALL_FOLLOW_MAX_TILT_DEG`. If the yaw estimate is off from the
+  maze by more than that clamp, the robot cannot recover: to drive straight it
+  must command the full offset, the clamp stops it short, and it keeps turning
+  the same wrong way for as long as the wall lasts. The proportional term
+  saturates first and the integral, sharing the same budget, then has nothing
+  left to give.
+
+  The integral now goes to the **heading target**, outside the tilt clamp, via
+  `WallFollow_GetDriftDeg()`. The proportional term keeps its full tilt budget
+  for position. `WALL_FOLLOW_KI_LIMIT_DEG` is 8 degrees and is deliberately
+  LARGER than the tilt clamp -- `wall_follow_host_test.c` asserts that
+  ordering, which is the inverse of the check it replaced.
+
+  The linear-range rule still applies, but to the heading loop's ERROR, not to
+  how far the setpoint has moved. A setpoint the robot tracks costs no error.
+  What has to stay small is the integral's RATE, and the test checks that.
+
+- **There were two integrators doing one job.** `WALL_FOLLOW_DRIFT_BLEED`
+  integrated the TILT, and the tilt contained the integral -- two integrators
+  in series on one error, with no clamp on the outer one and no way for them to
+  agree on which owned the correction. The bleed is gone. One term now does
+  both jobs and it is the drift corrector, integrating the lateral error. The
+  reasoning that motivated the bleed is unchanged: a tilt the robot must hold
+  forever is the gyro being wrong, because a centred robot needs no tilt to
+  stay centred. It just arrives one integration earlier.
+
+- **Turns inherit the bias too.** `turn_controller.c` adds the learned drift
+  where the target is USED, the same way the straight move does; the
+  accumulator stays nominal. Without it every turn landed the robot at a
+  heading the loop already knew was wrong, and the next straight spent its
+  first stretch turning out of it.
+
+**Then the clamp itself went up, 6 -> 10, with its two companions.** The log
+justified it: five consecutive cells asked for more tilt than the clamp could
+give, two of them for more than twice it (13.5 and 12.8 degrees against a 6
+degree clamp). The robot spent the stretch pinned at the limit, drifted into
+the wall anyway, and wedged -- the next straight held ~180 of 200 command units
+for a second and a half while making 2.9 cm/s against a profile asking 10.
+
+Raising the clamp alone would have re-created the bang-bang failure the note at
+`WALL_FOLLOW_MAX_TILT_DEG` describes, so all three moved together:
+
+| constant | was | now | why |
+|---|---|---|---|
+| `WALL_FOLLOW_MAX_TILT_DEG` | 6 | 10 | covers the 27 mm worst case actually recorded |
+| `STRAIGHT_YAW_LIMIT` | 60 | 80 | widens the inner loop's linear range to 80/8 = 10 first |
+| `WALL_FOLLOW_TILT_SLEW_DPS` | 30 | 15 | see below |
+
+The slew limit was the quiet one. The inner loop buys `STRAIGHT_YAW_KP /
+TURN_FF_GAIN` = 4 deg/s of turn rate per degree of heading error, so following a
+setpoint that ramps at R deg/s costs R/4 degrees of standing error. At 30 that
+was 7.5 degrees -- the whole linear range, spent on the ramp before the tilt
+asked for anything. A slew limit reads like a safety measure; it is also a
+load, and it was saturating the loop it exists to protect.
+
+`wall_follow_host_test.c` now asserts the cascade rule symbolically
+(`WALL_FOLLOW_MAX_TILT_DEG <= STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP`) and the
+ramp cost separately, so these cannot drift apart again.
+
+**Watch for corner swing.** The cost of 10 degrees is half a chassis length
+times sin(10) rather than sin(6), roughly 3.5 mm more on a 100 mm body in a
+124 mm corridor. If the robot starts clipping walls mid-corridor rather than at
+junctions, this is the first thing to look at. The clamp is only reached at
+20 mm of error; a well-centred robot never sees it.
+
+Instrumentation, since the complaint was about a heading that no log showed:
+
+- `StraightTrace_t` is 40 bytes and carries `yaw_deg`, `tilt_deg`, `drift_deg`
+  and `err_mm`. `yaw_err` alone says the inner loop is happy; it cannot say
+  whether the heading it is happy about is the right one. Capacity is 200, up
+  from 120, which was running out four fifths of the way through every move.
+- `MazeTrace_t` is 40 bytes and carries `drift_deg` per cell, because the term
+  is supposed to CONVERGE over a run and that is not visible in one move.
+- The reader prints the heading swept per move, the drift at every cell, and a
+  verdict on whether it settled, is still climbing, or is pinned at the limit.
+  Pinned means mechanical asymmetry, not a gain to trim.
+
+### 2026-09-12 (later) - Front-wall alignment, and backing out of dead ends
+- **The forward axis is now closed-loop.** The side walls always held the
+  robot's lateral position; nothing held its longitudinal position except
+  odometry. A pivot swaps the two axes, so an uncontrolled forward axis
+  reappears one move later as a clearance problem -- which is exactly why
+  back-to-back turns were far worse than corridors. Measured over one 24-cell
+  run: worst off-centre 6.5 mm in the corridor stretch, 23.0 mm in the
+  turn-dense stretch, with the front-wall gap at the ten walled stops
+  scattered over 50-110 mm. Same 60 mm, seen from two directions.
+- `runForwardFused()` now retargets so the move ENDS at `WALL_FRONT_ALIGN_MM`
+  from a wall ahead, when one is in range. Applied at most once and only in
+  the first quarter of the move: the retarget translates the profile, and a
+  step that arrives after the robot has braked would need a few cm closed from
+  rest, which this drivetrain cannot do.
+- **New `runReverseFused()`.** `runForwardFused()` and it are now two thin
+  wrappers over one `runFused()`; reverse needed no second copy of the loop
+  because the profile, the encoders and `applyMinSpeed()` were all already
+  signed. Two things did need flipping and are marked `!! DIRECTION !!`:
+  the wall follower (tilting the nose left walks the robot left going
+  forwards and RIGHT going backwards, so an unflipped cascade is positive
+  feedback in reverse), and the stiction-floor gate (`ref_acc >= 0` meant
+  "not braking" only going forwards; it is now `ref_acc * ref_vel >= 0`).
+- **Dead ends back out instead of pivoting in place.** `NAV_ACT_AROUND` is now
+  reverse one cell, then turn 180. Same two moves as before in the opposite
+  order, ending in the same cell facing the same way for the same cost -- the
+  host test asserts that equivalence. The gain is that the pivot happens after
+  a full cell of lateral correction rather than the instant the robot arrives.
+  Every pivot that succeeded in that run was within 8.5 mm of centre; the one
+  that jammed was 24 mm out.
+- **The reverse is the best-referenced move the robot makes.** Backing out, the
+  wall it just faced stays in view the whole way, so the move is measured
+  against the wall instead of counted in ticks -- and it corrects the error the
+  robot ARRIVED with, which odometry cannot. Arrive 50 mm from the wall and it
+  reverses 22.9 cm; arrive at 110 mm and it reverses 16.9 cm. Both finish in
+  the same place.
+- Added `MazeMap_Retreat()`, `sl_align_delta_cm` / `sl_align_applied`
+  telemetry, and `WALL_FRONT_ALIGN_MM` / `_RANGE_MM` / `_MAX_CM` to
+  `control_config.h`.
+- `WALL_FOLLOW_KP_DEG_PER_MM` raised 0.25 -> 0.50 (one cell of travel now
+  removes 81% of a lateral error rather than 57%), and
+  `TURN_PROFILE_MAX_DPS` lowered 120 -> 90 after a trace showed the command
+  saturated through every cruise and the robot delivering only 113 dps.
+
+
+### 2026-09-12 - Reactive navigation, split out of the test harness
+- **The scripted arena route is gone.** `TEST_MAZE_RUN` used to drive a fixed
+  sequence (forward, forward, turn right, forward). The robot now stops at
+  each cell centre, reads its three ToF sensors, and picks the next action
+  from what it saw, so the same binary runs any arena. Right-hand wall
+  following, not flood fill: it knows nothing about where a goal is.
+- **New module `Maze/navigator.c/.h`.** The behaviour does not belong in the
+  test harness -- everything else there is bring-up scaffolding that exercises
+  one subsystem and is then never touched again, whereas this is the robot's
+  actual job and is what the flood fill eventually replaces. `test_harness.c`
+  dropped from 989 to 754 lines and now calls `Navigator_Run()`.
+  `MazeTrace_t` and the `tm_maze_*` telemetry moved with it; the names did not
+  change, so the SWD reader is unaffected.
+- **Every action ends in one cell of forward motion.** The turn only chooses
+  which way to leave. The first version treated "turn right" as a complete
+  action and `tests/navigator_host_test.c` caught it: the robot reached the
+  opening, turned into it, saw another open right, and pivoted back down the
+  corridor it came from without entering the new cell. On hardware that would
+  have looked like a turn-tuning problem.
+- **Decisions read the SENSORS, never the map.** The map has the outer
+  boundary pre-set and never clears a wall, so deciding from it would let one
+  bad reflection close a corridor for the rest of the run.
+- **Every pivot now resets the ToF filter and the wall follower.** Nothing did
+  this before. The median and EMA stages carry several samples across a turn,
+  and the jump detector only rescues large steps -- so turning from one wall
+  to another at a similar distance slipped through as a slow ramp. It mattered
+  little with a fixed route; it matters a lot when the next reading picks the
+  next turn.
+- **A failed move no longer writes walls into the map.** The pose is
+  deliberately not advanced on failure, so the robot is between cells and the
+  readings belong to no cell the map can name. They are still logged, because
+  they are the evidence of what went wrong.
+- Runs are bounded four ways, reported in `tm_maze_abort_reason`: cell budget,
+  failed move, returning to the start cell, or a full trace buffer. A wall
+  follower in open space circles forever and a bench arena has no outer
+  boundary to stop it.
+- `MazeTrace_t` gained the chosen action and the per-sensor vote tallies,
+  packed into padding the compiler was already inserting, so it stays 36 bytes
+  and the reader's stride is unchanged. A 3-2 vote on the FRONT sensor is now
+  visible -- that is the reading that decides whether the robot drives into a
+  wall.
+- Added `tests/navigator_host_test.c` (9 checks) and a `tests/README.md`
+  section.
+
+
+### 2026-09-11 — ToF noise filtering + per-sensor offsets
+- Bench measurement with the sensors working: a wall at a true 80 mm read
+  83–90 mm. That is **two** problems — ~7 mm of spread (noise) on top of a
+  ~+6 mm consistent over-read (bias) — and they are now handled separately,
+  because filtering cannot fix bias.
+- Added `Sensors/VL53L0X_Driver/tof_filter.c/.h`: median (3-sample) feeding an
+  EMA, plus a step detector. Median kills lone outliers, EMA smooths dense
+  jitter. A plain moving average was rejected — its lag into a wall-following
+  controller invites oscillation, and worsens as you lengthen the window.
+  Host-measured: **σ 2.27 mm → 0.94 mm**, mean preserved.
+- **The jump detector tests the RAW sample, not the median.** The host test
+  caught this as a real defect: a genuine wall transition arrives as one new
+  value against a window of old ones, so `{86, 86, 250}` medians to `86` and
+  the median stage suppressed the first sample of every real step exactly as
+  if it were an outlier — leaving the robot blind to an opening for two more
+  samples, which is the failure the detector exists to prevent. Cost of the
+  fix is one sample of overshoot on a large lone outlier; documented and
+  asserted in test 5.
+- Added per-sensor `TOF_OFFSET_*_MM` to `control_config.h`, applied **before**
+  filtering so the filter smooths an already-centred signal and the jump
+  threshold compares corrected values. Currently all 0 — they need measuring
+  against a ruler (see §9). Offset application clamps at 0 so a negative
+  offset cannot underflow `uint16_t` into a huge distance.
+- Added `TOF_FILTER_EMA_ALPHA` (0.2) and `TOF_FILTER_JUMP_THRESHOLD_MM` (30).
+  30 mm sits between the ~7 mm noise floor and the ~100 mm+ real transitions.
+- `ToF_Measurement_t` now carries `raw_mm` alongside `distance_mm`, so
+  bring-up can tell a noisy sensor from a badly-tuned filter.
+- Filter continuity is broken on genuine faults (bus error, blocking timeout,
+  invalid range) but **deliberately not** on the non-blocking
+  `TOF_ERROR_TIMEOUT` path — that fires whenever polling outpaces the sensor,
+  and resetting there would clear the history on most calls and destroy the
+  smoothing entirely.
+- Added `tests/tof_filter_host_test.c` (8 cases) and expanded
+  `tests/README.md`. Test 2 asserts a *limitation* on purpose — that the
+  filter does not remove bias — so nobody tries to fix a constant error with
+  filter constants.
+- `test_harness.c/.h`: added `tm_tof_*_raw_mm` and `tm_tof_*_jumps` telemetry.
+  Jump counts climbing while stationary means the threshold is below the noise
+  floor.
+- Channel mapping corrected to front=0, left=3, right=4 (was 0/1/2).
+
+### 2026-09-10 — VL53L0X ToF ranging brought up
+- Added ST's official VL53L0X API (STSW-IMG005 v1.0.4) under
+  `Sensors/VL53L0X/`, verbatim. The five `Core/` sources are in the build;
+  see §9 for the three Win32-only `Platform/` files that are deliberately
+  **not**.
+- **Re-ported `Platform/vl53l0x_platform.c`.** ST ships it as a Win32
+  reference implementation (`#include <Windows.h>`, talks to a Nucleo over a
+  COM port via `ranging_sensor_comms.dll`) which cannot build for this
+  target. Replaced with a direct STM32 HAL I2C implementation:
+  read/write byte/word/dword built on `HAL_I2C_Mem_Read` /
+  `HAL_I2C_Master_Transmit`, MSB-first packing for the sensor's big-endian
+  registers, and a 1 ms `VL53L0X_PollingDelay()`. This is the only ST file
+  modified, so an API update means re-porting one file.
+- Added `Sensors/TCA9548A/TCA9548A.c/.h` — mux channel select, with the
+  active mask cached so a repeat select costs no I2C traffic. Every sensor
+  read is wrapped in a select, so that mattered.
+- Added `Sensors/VL53L0X_Driver/tof_sensors.c/.h` — the application-facing
+  driver. Three sensors (front/left/right), single **and** continuous
+  ranging, distances in **mm**. Every entry point selects the mux channel
+  first. Continuous mode uses `CONTINUOUS_TIMED_RANGING` rather than
+  back-to-back, and `ToF_ReadContinuous()` has a non-blocking form for use
+  from a control loop.
+- Failure handling mirrors the IMU's: a sensor that fails init is marked
+  not-ready and skipped by later calls rather than retried, so one dead
+  sensor cannot stall a loop with repeated I2C timeouts. The rest stay
+  usable. **2 fast LED blinks at boot** = ToF init failure.
+- Invalid readings return `TOF_DISTANCE_INVALID` (0xFFFF) rather than a stale
+  distance, so ignoring a return code fails loudly. `TOF_ERROR_RANGE`
+  (sensor fine, nothing in range) is kept distinct from `TOF_ERROR` (bus
+  fault) — different problems, different fixes.
+- `control_config.h`: added the ToF section — mux channel mapping, timing
+  budget, inter-measurement period, VCSEL periods, signal/sigma limits.
+  Note **VCSEL periods must be set before the timing budget** or the API
+  silently recomputes the budget; the init order encodes this.
+- `test_harness.c/.h`: added tests 11 (`TEST_TOF_SINGLE`) and 12
+  (`TEST_TOF_CONTINUOUS`) plus `tm_tof_*` telemetry. `tm_tof_ready` is a
+  bitmask latched at boot so the mask is readable whatever test is selected —
+  all-zero means the mux never answered, which is the failure worth
+  distinguishing first.
+- `main.c`: `ToF_Init()` in `USER CODE BEGIN 2`, after the controllers.
+- **Wall detection is deliberately not implemented.** This change reports
+  distances and nothing more; interpreting them belongs with the maze logic.
 
 ### 2026-09-09 — Test harness pulled out of main.c
 - `main.c`'s `USER CODE` blocks had absorbed the entire test harness (20

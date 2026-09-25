@@ -1,4 +1,9 @@
 #include "straightline_controller.h"
+#include "yaw_estimator.h"
+#include "turn_controller.h"
+#include "wall_follow.h"
+#include "tof_sensors.h"
+#include "motion_profile.h"
 
 static Controller_t controller;
 
@@ -112,7 +117,10 @@ static void updatePID(float target_distance, float direction) {
 
         //Check whether target distance is reached, and stay there a few
         //cycles so we do not declare success while coasting through it
-        if (fabsf(measured - signed_target) < DISTANCE_TOLERANCE_CM) {
+        uint8_t within_tolerance =
+            (fabsf(measured - signed_target) < DISTANCE_TOLERANCE_CM);
+
+        if (within_tolerance) {
 
             settle_counter++;
 
@@ -147,6 +155,34 @@ static void updatePID(float target_distance, float direction) {
 
         //Straightline PID update
         steering = PIDController_Update(&controller.straight_pid, 0.0f, straightline_measurement);
+
+        /* ---------------- terminal deadband ----------------
+         * Once inside the tolerance band, stop driving and brake instead.
+         *
+         * Without this, applyMinSpeed() below floors the command to
+         * +/-CONTROL_MIN_MOVE_SPEED, so the controller kept shoving the robot
+         * at full stiction-breaking torque for the whole CONTROL_SETTLE_CYCLES
+         * window it was supposed to be settling in. That impulse is far
+         * coarser than STRAIGHT_TOLERANCE_CM, so it routinely knocked the
+         * robot straight back out of the band it had just reached -- a limit
+         * cycle that ends in CONTROL_MOVE_TIMEOUT_MS rather than a completed
+         * move.
+         *
+         * This is the same defect that was removed from turn_controller.c,
+         * where it was the single biggest cause of failed moves. The ratio is
+         * worse here: 45 speed units against a 0.7 cm band.
+         *
+         * Both PIDs are still evaluated above, deliberately, so the
+         * integrator and the derivative filter stay in step with the real
+         * error instead of seeing a discontinuity when driving resumes. */
+        if (within_tolerance) {
+
+            basespeed = 0.0f;
+            steering  = 0.0f;
+            Motor_Brake();
+
+            return;
+        }
 
         //Overcome gearbox stiction near the target
         float commanded = applyMinSpeed(basespeed);
@@ -214,4 +250,1112 @@ uint8_t runForwardDistance(float distance_cm) {
 uint8_t runBackwardDistance(float distance_cm) {
 
     return runDistance(distance_cm, -1.0f);
+}
+
+
+/* ==========================================================================
+ *            FUSED FORWARD MOVE: gyro heading + one-wall centring
+ * ======================================================================== */
+
+static PIDController yaw_pid;
+
+volatile float    sl_yaw_target_deg;
+volatile float    sl_yaw_error_deg;
+volatile float    sl_steering;
+volatile float    sl_basespeed;
+volatile uint32_t sl_sat_cycles;
+volatile float    sl_ref_cm;
+volatile float    sl_align_delta_cm;
+volatile uint8_t  sl_align_applied;
+volatile uint32_t sl_breakaway_count;
+volatile uint8_t  sl_align_reason;
+volatile uint8_t  sl_flight_samples;
+volatile uint8_t  sl_flight_front;
+volatile uint8_t  sl_flight_left;
+volatile uint8_t  sl_flight_right;
+volatile uint8_t  sl_flight_front_votes;
+volatile uint8_t  sl_flight_left_votes;
+volatile uint8_t  sl_flight_right_votes;
+volatile uint16_t sl_flight_front_mm;
+volatile uint16_t sl_flight_left_mm;
+volatile uint16_t sl_flight_right_mm;
+
+volatile float    sl_entry_err_mm;
+volatile float    sl_exit_err_mm;
+volatile uint8_t  sl_exit_valid;
+volatile uint8_t  sl_entry_valid;
+volatile uint8_t  sl_stall_abort;
+volatile uint8_t  sl_axis_clamped;
+
+/* The round-robin poll refreshes one sensor per control cycle, so a complete
+ * rotation is exactly TOF_SENSOR_TOTAL cycles -- which is when the wall
+ * follower has new data on every sensor it reads. If the two ever disagree the
+ * follower either sees repeated samples or misses some, and neither failure
+ * announces itself in the arena.
+ *
+ * TOTAL, not COUNT, since 2026-09-18: the follower now centres on the angled
+ * pair, so a "complete rotation" has to include them. The invariant is
+ * unchanged -- one follower update per full refresh -- only the number of
+ * sensors in a refresh moved. */
+_Static_assert(STRAIGHT_TOF_DIVIDER == (uint32_t)TOF_SENSOR_TOTAL,
+               "STRAIGHT_TOF_DIVIDER must equal TOF_SENSOR_TOTAL");
+
+volatile StraightTrace_t tm_sl_trace[SL_TRACE_CAPACITY];
+volatile uint32_t        tm_sl_trace_count;
+
+
+/* Steering priority allocation.
+ *
+ * base + steer can exceed the motor range, and letting the driver clip each
+ * wheel independently silently converts a pure steering command into a net
+ * speed change -- the robot stops turning as hard as it was told to, exactly
+ * when it is going fastest and needs it most. Reducing the COMMON MODE
+ * instead preserves the differential, so the robot gives up speed rather
+ * than giving up steering. */
+/* ======================= READING WALLS WHILE MOVING ======================
+ *
+ * The stationary read votes five independent sweeps standing at a cell centre,
+ * and costs the 800 ms settle that has to precede it. This does the same
+ * counting from samples taken on the way in, over the stretch of the move
+ * where the sensors are looking at the cell being entered.
+ *
+ * SAMPLED ONCE PER ROUND-ROBIN ROTATION, from the caller's ToF rotation, so
+ * every sensor contributes one reading per sample and no reading is counted
+ * twice. Polling faster would recount held values and make a handful of
+ * measurements look like a landslide.
+ *
+ * AN INVALID READING VOTES "NO WALL". That is not a shortcut -- it is what the
+ * stationary read does, and the two must agree or the map would depend on
+ * whether the robot happened to be moving when it looked. A side sensor in an
+ * open cell legitimately returns nothing at all, which is a real answer. */
+static struct {
+    uint8_t  samples;
+    uint8_t  votes[TOF_SENSOR_COUNT];
+    uint16_t valid[TOF_SENSOR_COUNT];
+    int32_t  sum_mm[TOF_SENSOR_COUNT];
+} s_flight;
+
+
+static void flightReset(void)
+{
+    s_flight.samples = 0U;
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+        s_flight.votes[i]  = 0U;
+        s_flight.valid[i]  = 0U;
+        s_flight.sum_mm[i] = 0;
+    }
+
+    sl_flight_samples     = 0U;
+    sl_flight_front       = 0U;
+    sl_flight_left        = 0U;
+    sl_flight_right       = 0U;
+    sl_flight_front_votes = 0U;
+    sl_flight_left_votes  = 0U;
+    sl_flight_right_votes = 0U;
+    sl_flight_front_mm    = TOF_DISTANCE_INVALID;
+    sl_flight_left_mm     = TOF_DISTANCE_INVALID;
+    sl_flight_right_mm    = TOF_DISTANCE_INVALID;
+}
+
+
+/* One rotation's worth. `remaining_cm` is how much further the robot has to go
+ * before it reaches the centre of the cell being read -- positive, and it is
+ * what makes the front sensor comparable with a stationary reading. */
+static void flightSample(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+                         float remaining_cm)
+{
+    if (s_flight.samples >= 250U) return;   /* counters are 8-bit */
+
+    s_flight.samples++;
+
+    for (uint8_t i = 0; i < TOF_SENSOR_COUNT; i++) {
+
+        const uint8_t ok = (m[i].valid && m[i].distance_mm != TOF_DISTANCE_INVALID);
+
+        /* THE FRONT SENSOR IS LOOKING PAST THE CELL CENTRE, by however far the
+         * robot still has to travel, so its raw reading says nothing directly.
+         * What decides a front wall is what it WILL read on arrival -- and
+         * subtracting the remaining travel is exact, because the sensor and
+         * the wall are both on the axis the robot is moving along.
+         *
+         * Without this a chained move, which deliberately ends short of the
+         * centre, would miss every front wall: one at the far side of the next
+         * cell reads about 190 mm from where the segment ends, against a
+         * 150 mm threshold meant for a robot standing at the centre. */
+        int32_t mm = ok ? (int32_t)m[i].distance_mm : 0;
+
+        if (i == TOF_FRONT && ok) {
+            mm -= (int32_t)(remaining_cm * 10.0f);
+            if (mm < 0) mm = 0;             /* already inside it */
+        }
+
+        const int32_t threshold = (i == TOF_FRONT)
+                                ? (int32_t)WALL_FRONT_THRESHOLD_MM
+                                : (int32_t)WALL_SIDE_THRESHOLD_MM;
+
+        if (ok) {
+            s_flight.valid[i]++;
+            s_flight.sum_mm[i] += mm;
+
+            if (mm <= threshold) s_flight.votes[i]++;
+        }
+    }
+}
+
+
+/* Decide, and publish. Strict majority of the samples taken, which on an even
+ * split answers "no wall" -- the safe direction to be wrong in, because a
+ * missed wall is seen again from the next cell whereas a phantom one is never
+ * cleared. Identical to the rule WallSense_ReadCell() uses. */
+static void flightPublish(void)
+{
+    sl_flight_samples = s_flight.samples;
+
+    const uint8_t n = s_flight.samples;
+
+    sl_flight_front_votes = s_flight.votes[TOF_FRONT];
+    sl_flight_left_votes  = s_flight.votes[TOF_LEFT];
+    sl_flight_right_votes = s_flight.votes[TOF_RIGHT];
+
+    sl_flight_front = (s_flight.votes[TOF_FRONT] * 2U > n) ? 1U : 0U;
+    sl_flight_left  = (s_flight.votes[TOF_LEFT]  * 2U > n) ? 1U : 0U;
+    sl_flight_right = (s_flight.votes[TOF_RIGHT] * 2U > n) ? 1U : 0U;
+
+    /* Mean of the VALID samples only, so one dropped reading does not drag the
+     * reported distance toward zero. */
+    sl_flight_front_mm = s_flight.valid[TOF_FRONT]
+        ? (uint16_t)(s_flight.sum_mm[TOF_FRONT] / s_flight.valid[TOF_FRONT])
+        : TOF_DISTANCE_INVALID;
+    sl_flight_left_mm  = s_flight.valid[TOF_LEFT]
+        ? (uint16_t)(s_flight.sum_mm[TOF_LEFT]  / s_flight.valid[TOF_LEFT])
+        : TOF_DISTANCE_INVALID;
+    sl_flight_right_mm = s_flight.valid[TOF_RIGHT]
+        ? (uint16_t)(s_flight.sum_mm[TOF_RIGHT] / s_flight.valid[TOF_RIGHT])
+        : TOF_DISTANCE_INVALID;
+}
+
+
+static void allocate(float base, float steer, float *left, float *right)
+{
+    if (steer >  STRAIGHT_YAW_LIMIT) steer =  STRAIGHT_YAW_LIMIT;
+    if (steer < -STRAIGHT_YAW_LIMIT) steer = -STRAIGHT_YAW_LIMIT;
+
+    float headroom = CONTROL_MAX_SPEED - fabsf(steer);
+
+    if (headroom < 0.0f) headroom = 0.0f;
+
+    if (base >  headroom) { base =  headroom; sl_sat_cycles++; }
+    if (base < -headroom) { base = -headroom; sl_sat_cycles++; }
+
+    sl_basespeed = base;
+    sl_steering  = steer;
+
+    /* !! SIGN !! Positive steer means turn LEFT (anticlockwise, +yaw), and by
+     * this project's convention that is right wheel forward, left wheel back.
+     * So steer SUBTRACTS from the left wheel. Getting this backwards turns the
+     * heading loop into positive feedback: a robot drifting clockwise gets
+     * steered further clockwise. Observed as 25-30 degrees of runaway in the
+     * first arena run. Cross-check against turn_controller's
+     * Motor_runSignedSpeed(-basespeed, +basespeed). */
+    *left  = base - steer;
+    *right = base + steer;
+}
+
+
+/* Shared implementation of every fused straight move. See StraightMove_t. */
+uint8_t runForwardMove(const StraightMove_t *mv)
+{
+    if (mv == 0 || controller.state != STRAIGHTLINE_IDLE) {
+        return 0;
+    }
+
+    const float distance_cm     = mv->distance_cm;
+    const float front_target_mm = mv->front_target_mm;
+
+    /* A SEGMENT THAT ENDS AT SPEED IS NOT FINISHED WHEN IT RETURNS. It hands
+     * the robot over still moving, so it must not brake, must not wait for a
+     * settle, and must not zero its own command on the way out. */
+    const uint8_t chaining = (mv->exit_speed_cms > 0.0f) && (distance_cm > 0.0f);
+
+    /* Encoders FIRST, then re-base the estimator onto the current yaw. REBASE,
+     * not reset: the heading this move inherits from the last turn is exactly
+     * what it exists to correct. See yaw_estimator.h.
+     *
+     * THE RESET IS SKIPPED WHEN THE CALLER TRACKS ITS OWN POSITION, and that
+     * is not a saving -- it is what keeps a run on ONE distance axis. See
+     * keep_odometry in straightline_controller.h. */
+    if (!mv->keep_odometry) {
+        Encoders_Reset();
+
+        /* !! THE REBASE BELONGS TO THE RESET AND NOTHING ELSE !!
+         *
+         * YawEstimator_RebaseEncoders() pins the encoder-yaw channel to
+         * wherever the estimate currently is, because zeroing the wheels
+         * would otherwise move that measurement out from under it. It adds
+         * the current yaw to an origin whose "since reset" term it ASSUMES is
+         * now zero.
+         *
+         * Call it without having reset and it double-counts: the differential
+         * travel accumulated so far is still in the sum, so the encoder
+         * channel jumps by the whole heading the robot has turned through
+         * since the last real reset. The EKF then either rejects every
+         * encoder update or, worse, believes some of them. A chained segment
+         * must leave the channel exactly as it found it. */
+        YawEstimator_RebaseEncoders();
+    }
+
+    const float odo0 = Encoder_getAverageDistance();
+
+    if (mv->keep_wall_follow) WallFollow_NewSegment();
+    else                      WallFollow_Reset();
+
+    /* AFTER the reset, never before -- WallFollow_Reset() clears the context. */
+    if (mv->cells) WallFollow_SetCells(mv->cells);
+
+    PIDController_Init(&controller.distance_pid);
+    PIDController_Init(&yaw_pid);
+
+    yaw_pid.Kp = STRAIGHT_YAW_KP;
+    yaw_pid.Ki = STRAIGHT_YAW_KI;
+    yaw_pid.Kd = STRAIGHT_YAW_KD;
+    yaw_pid.tau = CONTROL_DERIV_TAU_S;
+    yaw_pid.T = CONTROL_SAMPLE_TIME_S;
+    yaw_pid.limMin = -STRAIGHT_YAW_LIMIT;
+    yaw_pid.limMax =  STRAIGHT_YAW_LIMIT;
+    yaw_pid.limMinInt = -STRAIGHT_YAW_INT_LIMIT;
+    yaw_pid.limMaxInt =  STRAIGHT_YAW_INT_LIMIT;
+
+    /* Same trap as the turn controller: yaw is continuous, so a zeroed
+     * derivative history makes the first cycle see a step of the whole
+     * accumulated heading. */
+    yaw_pid.prevMeasurement = YawEstimator_GetYawDeg();
+
+    settle_counter    = 0;
+    sl_sat_cycles     = 0;
+    tm_sl_trace_count = 0U;
+
+    MotionProfile_t dist_profile;
+    (void)MotionProfile_InitFromTo(&dist_profile, distance_cm,
+                                   mv->entry_speed_cms, mv->exit_speed_cms,
+                                   STRAIGHT_PROFILE_MAX_CMS,
+                                   STRAIGHT_PROFILE_ACCEL_CMS2);
+
+    /* The in-flight wall reading belongs to this segment and nothing else, so
+     * it is cleared here whether or not the segment is going to take one. A
+     * stale answer served to the next cell is worse than no answer at all. */
+    flightReset();
+
+    /* The endpoint, which front-wall alignment may move once.
+     *
+     * THE PROFILE IS REBUILT, NOT TRANSLATED, and the difference is not
+     * cosmetic. The old version added the correction to the profile's output,
+     * which moves its ORIGIN by the same amount as its endpoint -- so a
+     * correction that shortens the move commands the robot BACKWARDS before it
+     * has gone anywhere. Measured: a -2.70 cm correction started the reference
+     * at -2.58, the command sat at -45 for 300 ms, and stiction held the robot
+     * still for 800.
+     *
+     * Standing still is not the expensive part. The lateral loop ramps its
+     * tilt during those 800 ms, and a heading correction with no forward
+     * motion is not a translation, it is a PIVOT -- the robot turned 1.6
+     * degrees on the spot and entered the cell already yawed, which is the
+     * opposite of what the alignment exists to achieve.
+     *
+     * So the new endpoint gets a new profile, anchored at the reference
+     * position the move has already reached. align_base_cm is where that
+     * profile starts and align_t0_s is when, and both are zero until the
+     * alignment fires. */
+    float   target_cm        = distance_cm;
+    float   align_base_cm    = 0.0f;
+    float   align_t0_s       = 0.0f;
+    uint8_t align_tried      = (front_target_mm > 0.0f) ? 0U : 1U;
+
+
+    sl_align_delta_cm = 0.0f;
+    sl_align_applied  = 0U;
+    sl_align_reason   = (front_target_mm > 0.0f) ? SL_ALIGN_NO_WALL
+                                                 : SL_ALIGN_FIRED;
+    sl_entry_err_mm   = 0.0f;
+    sl_entry_valid    = 0U;
+    sl_exit_err_mm    = 0.0f;
+    sl_exit_valid     = 0U;
+    sl_stall_abort    = 0U;
+
+    /* Breakaway detector state. See the BREAKAWAY PULSE block in
+     * control_config.h for why a proportional controller cannot restart this
+     * drivetrain on its own. */
+    float    prev_measured   = 0.0f;
+    /* SEEDED FROM THE ENTRY SPEED, not from zero. A chained segment's measured
+     * distance restarts at zero, so the first cycle's difference says the robot
+     * is stationary when it is doing cruise -- and this feeds the alignment's
+     * room test, which would then believe it needs no room at all. */
+    float    speed_ema       = mv->entry_speed_cms;
+    uint32_t stall_cycles    = 0;
+    uint32_t pulse_until_ms  = 0;
+    uint32_t stall_since_ms  = 0;   /* 0 = moving, or trying gently */
+    uint8_t  arriving        = 0U;  /* has been inside the band at least once */
+
+    sl_breakaway_count = 0U;
+
+    uint32_t start_ms = HAL_GetTick();
+    /* Both seeded from the move's own start, never from 0: a tick counter that
+     * has been running for minutes would otherwise make the first measured
+     * period enormous. */
+    uint32_t last_pid = start_ms;
+    uint32_t last_tof = start_ms;
+    uint32_t tof_div  = 0;
+    float    tilt_deg = 0.0f;
+
+    controller.state = STRAIGHTLINE_RUNNING;
+
+    while (1) {
+
+        YawEstimator_Predict();
+
+        uint32_t now = HAL_GetTick();
+
+        if (now - start_ms >= CONTROL_MOVE_TIMEOUT_MS) {
+            Motor_Brake();
+            /* The robot is not where this segment was aiming, so whatever the
+             * sensors saw on the way belongs to no cell anyone can name. */
+            flightReset();
+            controller.state = STRAIGHTLINE_IDLE;
+            return 0;
+        }
+
+        if (now - last_pid < (uint32_t)(CONTROL_SAMPLE_TIME_S * 1000.0f)) {
+            continue;
+        }
+
+        /* THE PERIOD IS MEASURED, NOT ASSUMED, and the difference is not
+         * small. A ToF sweep blocks this loop for 138 ms, so the real cadence
+         * is 10, 10, 10, 138 and repeat -- 81% of a move's wall-clock time is
+         * spent inside one of those reads with the motors holding a stale
+         * command.
+         *
+         * Telling a PID that a 138 ms step took 10 ms multiplies its
+         * derivative by 13.8. The trace shows exactly that: across one sweep
+         * the heading error moved 5.66 deg, the D term read it as
+         * 0.20 * 5.66 / 0.010 = 113 units, P added 42, and the steering
+         * clamped at its limit. With the true period it would have been 8
+         * units and nothing would have saturated. Every steering slam in the
+         * late half of that run is this arithmetic, not a collision.
+         *
+         * The blocking read is the real defect and wants fixing in the ToF
+         * driver. Until then the loop must at least be honest about how long
+         * it has been away. */
+        float dt_s = (float)(now - last_pid) * 0.001f;
+
+        /* Bounded so a debugger halt or a lost I2C transaction cannot hand the
+         * PIDs a period long enough to wind the integrator in one step. */
+        if (dt_s > CONTROL_SAMPLE_TIME_S * 40.0f) dt_s = CONTROL_SAMPLE_TIME_S * 40.0f;
+        if (dt_s < CONTROL_SAMPLE_TIME_S)         dt_s = CONTROL_SAMPLE_TIME_S;
+
+        last_pid = now;
+
+        controller.distance_pid.T = dt_s;
+        yaw_pid.T                 = dt_s;
+
+        YawEstimator_Correct();
+        YawEstimator_PublishTelemetry();
+
+        float measured   = Encoder_getAverageDistance() - odo0;
+        float elapsed_s  = (float)(now - start_ms) * 0.001f;
+
+        /* HOW FAST THE ROBOT IS ACTUALLY GOING, measured once and used by
+         * three different decisions below -- whether the move is finished,
+         * whether to fire a breakaway pulse, and whether to give up. They were
+         * separately re-deriving it or, worse, not asking at all. */
+        const float travelled = fabsf(measured - prev_measured);
+        const float speed_cms = travelled / dt_s;
+
+        prev_measured = measured;
+
+        /* Smoothed, because a single cycle's encoder difference at 10 ms is
+         * mostly quantisation and the room test below is a decision, not a
+         * trend. */
+        speed_ema += 0.25f * (speed_cms - speed_ema);
+
+        /* Profile time, which is move time until the alignment rebuilds the
+         * profile and restarts its clock. */
+        float prof_t_s   = elapsed_s - align_t0_s;
+
+        float ref_pos    = align_base_cm
+                           + MotionProfile_Position(&dist_profile, prof_t_s);
+        float ref_vel    = MotionProfile_Velocity(&dist_profile, prof_t_s);
+
+        sl_ref_cm = ref_pos;
+
+        /* FINISHED MEANS CLOSE ENOUGH *AND* STOPPED, and the second half was
+         * missing.
+         *
+         * The old test was position only, so a robot crossing into the
+         * tolerance band at full speed declared the move complete and then
+         * carried on for however far it took to stop. Measured: a median of
+         * 11.2 cm/s against a profile asking for 10, exiting a 1.5 cm band,
+         * and front-wall stops landing 22 to 25 mm past target.
+         *
+         * That overshoot would be a rounding error if the robot only ever
+         * drove straight. It is not, because a 90 degree turn converts
+         * longitudinal error into LATERAL error almost one for one -- a cell
+         * that stopped 22 mm short was followed by a move that began 17 mm off
+         * centre, against every other entry error in that run being inside
+         * 7 mm. The completion tolerance was setting the floor on how well
+         * placed the robot could possibly be after any turn, and no amount of
+         * lateral tuning gets underneath it. */
+        /* ARRIVAL IS LATCHED. Once the robot has been close enough once, it
+         * commits to stopping and the band is not consulted again.
+         *
+         * Without the latch the speed condition would make things worse rather
+         * than better: a robot that coasts through the band coasts back OUT of
+         * it, the completion test un-arms, the command returns, and it hunts
+         * -- eventually backwards, on a breakaway pulse, which is the one
+         * direction this chassis has no lateral sensing for. Latching turns
+         * "close enough" into a decision made once. */
+        /* A CHAINED SEGMENT IS FINISHED WHEN IT GETS THERE, full stop.
+         *
+         * None of the arrival machinery below applies: it is all about coming
+         * to rest at a point, and this segment is meant to be travelling when
+         * it reaches one. There is no band either -- the handover point is
+         * taken exactly, and whatever lag the robot has at that moment is
+         * measured and absorbed by the next segment rather than waited out.
+         *
+         * NO BRAKE ON THE WAY OUT. The motors keep their last command while
+         * the caller decides what happens next, which is the whole mechanism:
+         * see MAZE_CONTINUOUS_CELLS. */
+        if (chaining) {
+
+            if (measured >= target_cm) {
+                flightPublish();
+                controller.state = STRAIGHTLINE_IDLE;
+                return 1;
+            }
+        }
+        else {
+
+            if (!arriving && fabsf(measured - target_cm) < DISTANCE_TOLERANCE_CM) {
+                arriving = 1U;
+            }
+
+            if (arriving && speed_cms < STRAIGHT_SETTLE_SPEED_CMS) {
+
+                settle_counter++;
+                if (settle_counter >= CONTROL_SETTLE_CYCLES) {
+                    Motor_Brake();
+                    flightPublish();
+                    controller.state = STRAIGHTLINE_IDLE;
+                    return 1;
+                }
+            }
+            else {
+                settle_counter = 0;
+            }
+        }
+
+        /* ONE SENSOR EVERY CYCLE, rather than three every fourth.
+         *
+         * The same I2C work, unbunched. Three at once cost 35 ms and the loop
+         * was stopped for all of it -- measured at 10, 10, 10, 35 repeating,
+         * with 53% of a move spent not running. One at a time keeps every
+         * cycle near twelve, and each sensor is still refreshed every
+         * STRAIGHT_TOF_DIVIDER cycles, inside TOF_INTER_MEASUREMENT_MS, so
+         * nothing is actually sampled less often.
+         *
+         * Latest, not newest-only: on the cycles where a sensor has nothing
+         * new the held reading is served, because handing the wall follower an
+         * invalid measurement would make it drop and re-acquire its reference
+         * several times a second. */
+        /* TOF_SENSOR_TOTAL: ToF_PollOneLatest() fills all five, and the wall
+         * follower reads the angled pair out of the upper two. Sizing this
+         * TOF_SENSOR_COUNT would overrun the stack silently. */
+        ToF_Measurement_t m[TOF_SENSOR_TOTAL];
+
+        (void)ToF_PollOneLatest(m, TOF_MAX_SAMPLE_AGE_MS);
+
+        /* The wall follower runs once per complete rotation, when every sensor
+         * has been refreshed exactly once since it last looked. Running it on
+         * every cycle would feed it two thirds repeated data and make its slew
+         * limit and integral -- both rates -- act on samples that had not
+         * changed. */
+        if (++tof_div >= STRAIGHT_TOF_DIVIDER) {
+            tof_div = 0;
+
+            /* Its own interval, measured. The slew limit and the integral are
+             * rates, so they need the gap they are actually integrated over
+             * rather than the nominal one. */
+            float tof_dt_s = (float)(now - last_tof) * 0.001f;
+
+            if (tof_dt_s > WALL_FOLLOW_UPDATE_S * 10.0f)
+                tof_dt_s = WALL_FOLLOW_UPDATE_S * 10.0f;
+            if (tof_dt_s < WALL_FOLLOW_UPDATE_S)
+                tof_dt_s = WALL_FOLLOW_UPDATE_S;
+
+            /* `measured` is how far into the move the robot is, which is what
+             * tells the follower whether its side sensors are still looking at
+             * the cell being left or already at the one being entered. This
+             * module supplies the distance and nothing else -- which cells
+             * those are, and what the map knows about them, is the navigator's
+             * business. */
+            tilt_deg = WallFollow_Update(m, tof_dt_s, measured);
+
+            /* ONE ROTATION, ONE VOTE. Every sensor has been refreshed exactly
+             * once since the last time round, which is what makes these
+             * samples independent -- the same argument that makes the
+             * stationary read vote fresh sweeps rather than re-reads. */
+            if (mv->wall_window_cm >= 0.0f && measured >= mv->wall_window_cm) {
+                float remaining = mv->wall_centre_cm - measured;
+
+                if (remaining < 0.0f) remaining = 0.0f;
+
+                flightSample(m, remaining);
+            }
+
+            /* THE LATERAL ERROR THIS MOVE INHERITED, captured on the first
+             * sweep that has a reference at all.
+             *
+             * It answers a question no existing log could: does a PIVOT throw
+             * the robot sideways? One run came out of a dead end 46 mm further
+             * from the same wall than it went in, across one 180 and one cell
+             * of travel, and there was no way to tell which of the two did it.
+             * The per-cycle trace only survives the last move, so this belongs
+             * in the per-cell record where every move keeps one. */
+            if (!sl_entry_valid && wf_side != WALL_FOLLOW_NONE) {
+                sl_entry_err_mm = wf_error_mm;
+                sl_entry_valid  = 1U;
+            }
+
+            /* AND THE ERROR IT ENDS WITH. Kept as the LAST reading that had a
+             * reference at all, because the last few sweeps of a move are
+             * often taken across a cell boundary with nothing to see.
+             *
+             * This is the other half of entry_err_mm, and without it three
+             * runs' worth of "the pivot threw the robot sideways" has been
+             * inference. A move that ENDS centred and is followed by one that
+             * STARTS 25 mm out convicts the pivot; a move that ends 25 mm out
+             * convicts the move. Those want completely different fixes and
+             * there has been no way to tell them apart. */
+            if (wf_side != WALL_FOLLOW_NONE) {
+                sl_exit_err_mm = wf_error_mm;
+                sl_exit_valid  = 1U;
+            }
+            last_tof = now;
+
+            /* FRONT-WALL ALIGNMENT, applied at most once per move.
+             *
+             * FIRED AS LATE AS IT SAFELY CAN, which is the opposite of what it
+             * used to do. The old rule looked only during the first quarter of
+             * the move -- precisely when the wall is furthest and its reading
+             * worst -- and the two conditions fought each other: the window is
+             * at the start, the wall arrives at the end. Half the moves in a
+             * measured run never aligned at all, one of them missing by six
+             * millimetres of sensor reach.
+             *
+             * The limit on firing late is physical rather than a fraction of
+             * the move: there must be room to decelerate to the new endpoint
+             * from the speed the reference is actually doing. Below that, it
+             * fires on the best reading available; above it, it waits for a
+             * better one. */
+            /* NOT WHILE THE MOVE IS IN TROUBLE.
+             *
+             * Retargeting extends or shortens a move, and doing that to a robot
+             * that is already failing to make its current target only delays
+             * the moment someone admits it. One wedged move, grinding at
+             * 4.7 cm/s against a profile asking 14, had the alignment push its
+             * target out by a further 3.54 cm.
+             *
+             * The first attempt at this refused whenever the PROFILE had ended,
+             * and that was the wrong test -- it conflated "in trouble" with
+             * "late". The robot routinely lags its reference by several
+             * centimetres, so the profile finishes while the robot is still
+             * travelling at cruise with the front wall at its best reading yet.
+             * Refusing there threw away the single best chance of every move,
+             * and the log said so: four of the five uncontaminated cells in a
+             * 19-cell run declined with the plan already over.
+             *
+             * `stall_since_ms` is the honest test and it already exists: it is
+             * non-zero only while the robot is commanded above the stiction
+             * floor and going nowhere. It is one cycle stale here, which does
+             * not matter for a condition measured in hundreds of milliseconds. */
+            const uint8_t in_trouble = (stall_since_ms != 0U);
+
+            if (!align_tried && in_trouble) {
+                sl_align_reason = SL_ALIGN_STALLED;
+            }
+
+            if (!align_tried && !in_trouble) {
+
+                uint16_t f = m[TOF_FRONT].distance_mm;
+
+                /* REVERTED 2026-09-19: a consecutive-agreement gate was
+                 * tried here and KILLED the alignment outright --
+                 * sl_align_applied read 0 for a whole run and the robot drove
+                 * into front walls. Kept as a comment because the reasoning
+                 * looked sound and someone will think of it again.
+                 *
+                 * It required two successive front readings within 12 mm. That
+                 * fails for reasons that are not about noise at all:
+                 *
+                 *  - The check runs once per ToF rotation (50 ms) and the robot
+                 *    closes ~7 mm in that time, so the reading is SUPPOSED to
+                 *    change between samples. Agreement and approach are in
+                 *    direct conflict.
+                 *  - TOF_FILTER_EMA_ALPHA is 0.2, so on a ramp the filtered
+                 *    value lags far behind and its per-update step keeps
+                 *    changing as the EMA catches up.
+                 *  - The filter's jump detector SNAPS to the raw value on a
+                 *    large step, which is exactly what a front wall entering
+                 *    range looks like -- resetting the agreement count at the
+                 *    one moment the alignment most needs to fire.
+                 *
+                 * The gate therefore opened only late and slow, when the
+                 * demanded correction had grown past WALL_FRONT_ALIGN_MAX_CM,
+                 * so it was then refused as SL_ALIGN_BIG_DELTA. Net effect:
+                 * no alignment at all, on any cell, for the entire run.
+                 *
+                 * If single-sample noise is ever worth attacking again, do it
+                 * where the SAMPLE is produced -- a dedicated front-sensor
+                 * filter tuned for a closing target -- not by gating the one
+                 * decision that has to happen while the robot is moving. */
+
+                if (m[TOF_FRONT].valid
+                    && f != TOF_DISTANCE_INVALID
+                    && f <= WALL_FRONT_ALIGN_RANGE_MM) {
+
+                    /* Signed travel still needed for the sensor to read the
+                     * target. Works in BOTH directions unchanged: driving at a
+                     * wall the reading falls, so this is positive; backing away
+                     * it rises, so this is negative. */
+                    float to_go_cm   = ((float)f - front_target_mm) * 0.1f;
+                    float new_target = measured + to_go_cm;
+                    float delta      = new_target - target_cm;
+
+                    /* What is left to travel from where the REFERENCE has
+                     * reached, not from where the robot has. Anchoring on the
+                     * reference is what keeps it continuous: anchoring on the
+                     * robot would step the reference back by however far it
+                     * currently lags, which is the same defect in a smaller
+                     * size. */
+                    /* TWO DIFFERENT REMAINING DISTANCES, and using the wrong
+                     * one cost a run.
+                     *
+                     * The rebuilt profile starts where the REFERENCE is, so
+                     * that is the distance it has to cover. But whether there
+                     * is room to stop is a question about the ROBOT, which is
+                     * behind the reference by however much it is lagging --
+                     * 2 to 3 cm normally and 9 cm when it is fighting
+                     * something. Asking the reference produced an alignment
+                     * that refused itself on exactly the moves that were going
+                     * badly, and the front-wall stops went from an 11 mm
+                     * spread to 54. */
+                    float remaining_ref   = new_target - ref_pos;
+                    float remaining_robot = new_target - measured;
+
+                    /* Distance needed to come to rest from the speed THE ROBOT
+                     * is doing, plus a cushion.
+                     *
+                     * The robot's speed, not the reference's, because the test
+                     * below asks about the distance THE ROBOT has left -- and a
+                     * question about whether a body can stop in a gap has to
+                     * use that body's own momentum. Pairing the robot's
+                     * remaining distance with the reference's velocity was
+                     * inconsistent in both directions: it demanded room the
+                     * robot did not need early in a move, and then demanded
+                     * none at all once the profile ended, which is precisely
+                     * when the robot is still travelling at cruise. */
+                    const float braking_cm =
+                        (speed_ema * speed_ema)
+                        / (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2)
+                        + WALL_FRONT_ALIGN_ROOM_CM;
+
+                    const uint8_t has_room  =
+                        (fabsf(remaining_robot) >= braking_cm);
+                    /* CLOSE ENOUGH TO THE TARGET, not close enough to the
+                     * sensor. The reading worth waiting for is one taken near
+                     * where the move is going to end, so the threshold has to
+                     * move with the endpoint -- and a chained segment ends a
+                     * braking offset short of the cell centre, which puts its
+                     * target five centimetres further from the wall.
+                     *
+                     * As an absolute 200 mm this quietly stopped working when
+                     * that happened: the window where a reading is both good
+                     * enough and still leaves room to stop narrowed from 85 mm
+                     * of travel to 25, because its near end is set by the room
+                     * test and its far end was pinned to the sensor. */
+                    const uint8_t good_read =
+                        (f <= front_target_mm + WALL_FRONT_ALIGN_BEST_MARGIN_MM);
+
+                    /* Running out of room: this is the last sweep that can
+                     * still retarget, so take whatever reading is in range
+                     * rather than waiting for a better one that will arrive
+                     * too late to use. */
+                    const uint8_t last_chance =
+                        (fabsf(remaining_robot) < braking_cm
+                                                  + WALL_FRONT_ALIGN_ROOM_CM);
+
+                    /* Refuse a correction that would make the rest of the move
+                     * run backwards. A reference that has already passed the
+                     * new endpoint has nothing useful to do with this, and
+                     * reversing is never the answer. */
+                    /* Recorded in the order the tests are applied, so the
+                     * reason kept is the FIRST thing that stopped it rather
+                     * than the last thing checked. */
+                    if (!(good_read || last_chance))                      sl_align_reason = SL_ALIGN_TOO_FAR;
+                    else if (!has_room)                                   sl_align_reason = SL_ALIGN_NO_ROOM;
+                    else if (fabsf(delta) > WALL_FRONT_ALIGN_MAX_CM)      sl_align_reason = SL_ALIGN_BIG_DELTA;
+                    else if (remaining_ref * distance_cm <= 0.0f)         sl_align_reason = SL_ALIGN_NO_ROOM;
+
+                    if ((good_read || last_chance)
+                        && has_room
+                        && fabsf(delta) <= WALL_FRONT_ALIGN_MAX_CM
+                        && remaining_ref * distance_cm > 0.0f) {
+
+                        /* New profile from here, at the speed the reference is
+                         * already doing, and a clock to match. Continuous in
+                         * position AND velocity -- rebuilding from rest would
+                         * drop the feedforward to zero and command a brake and
+                         * a fresh start in the middle of a move the robot is
+                         * already making. */
+                        MotionProfile_t rebuilt;
+
+                        /* !! THE REBUILD MUST KEEP THE EXIT SPEED !!
+                         *
+                         * A chained segment hands the robot over still moving,
+                         * and a profile rebuilt to end at rest would brake to a
+                         * stop at the decision point. The caller would then
+                         * drive the stop segment believing it starts at cruise,
+                         * and its feedforward would be wrong for the whole of
+                         * it. Rebuilding is allowed to change WHERE the segment
+                         * ends, never HOW it ends. */
+                        if (MotionProfile_InitFromTo(&rebuilt, remaining_ref,
+                                                     ref_vel, mv->exit_speed_cms,
+                                                     STRAIGHT_PROFILE_MAX_CMS,
+                                                     STRAIGHT_PROFILE_ACCEL_CMS2)) {
+
+                            dist_profile  = rebuilt;
+                            target_cm     = new_target;
+                            align_base_cm = ref_pos;
+                            align_t0_s    = elapsed_s;
+
+                            sl_align_delta_cm = delta;
+                            sl_align_applied  = 1U;
+                            sl_align_reason   = SL_ALIGN_FIRED;
+                            align_tried       = 1U;
+                        }
+                        else {
+                            sl_align_reason = SL_ALIGN_INFEASIBLE;
+                        }
+                        /* Infeasible after all: leave the move alone. The
+                         * has_room test should have caught it, so this is the
+                         * profile generator having the last word on its own
+                         * arithmetic rather than a condition worth duplicating
+                         * here. */
+                    }
+                    /* Out of range: leave align_tried clear and look again on
+                     * the next sweep. The wall may simply not be the one this
+                     * move is aiming at yet. */
+                }
+            }
+        }
+
+        /* The cascade: lateral error tilts the HEADING TARGET, and the
+         * heading loop closes on that. The drift bleed rides along on the
+         * same signal. */
+        const float axis_deg = TurnController_GetHeadingTargetDeg();
+
+        float heading_target = axis_deg + WallFollow_GetDriftDeg();
+
+        sl_yaw_target_deg = heading_target + tilt_deg;
+
+        /* ================= THE COMMANDED HEADING MAY NOT LEAVE THE AXIS ====
+         *
+         * Two corrections are added above -- the tilt (clamped to
+         * WALL_FOLLOW_MAX_TILT_DEG) and the learned drift (clamped to
+         * WALL_FOLLOW_KI_LIMIT_DEG) -- and NOTHING bounded their SUM. They are
+         * clamped separately and they add, so the commanded heading could
+         * legally sit 18 degrees off the maze axis. It did:
+         *
+         *     wf_tilt_deg   -10.00  (pinned at its clamp)
+         *     wf_drift_deg   -5.69
+         *     measured yaw  -108.15 against a -90.00 heading target
+         *
+         * The robot drove a corridor 18 degrees crabbed, pivoted from that
+         * heading -- which looks exactly like a turn overshooting by 18
+         * degrees, and was not: turn_target_yaw_deg was a clean -90.00 at
+         * every cell -- and wedged on the next wall.
+         *
+         * THE MAZE IS AXIS-ALIGNED. That is a fact about the world, not an
+         * assumption about the sensors, and it is the one thing here that
+         * cannot be wrong. A commanded heading more than
+         * STRAIGHT_MAX_AXIS_LEAN_DEG from a multiple of 90 is therefore
+         * WRONG whatever the sensors say, because no correct correction ever
+         * needs it: the lateral error that would justify such a lean is larger
+         * than the corridor.
+         *
+         * This is why the clamp goes HERE rather than on either term. Bounding
+         * the tilt alone leaves the drift free, bounding the drift alone
+         * leaves the tilt free, and either can reach the limit on its own --
+         * only their sum is the quantity that steers the robot.
+         *
+         * It is a limit, not a controller. In every healthy cell the lean is a
+         * few degrees and this does nothing at all; it exists solely to stop a
+         * loop that has lost its reference from walking the robot into a wall
+         * while faithfully doing what it was told. */
+        {
+            /* Nearest multiple of 90 -- the axis the robot is supposed to be
+             * driving along. Uses the TURN CONTROLLER'S target rather than the
+             * measured yaw: the target is where the robot is meant to be, and
+             * measuring from where it actually is would let the clamp drift
+             * along with the error it is supposed to bound. */
+            const float axis = 90.0f * roundf(axis_deg / 90.0f);
+            const float lean = sl_yaw_target_deg - axis;
+
+            if (lean > STRAIGHT_MAX_AXIS_LEAN_DEG) {
+                sl_yaw_target_deg = axis + STRAIGHT_MAX_AXIS_LEAN_DEG;
+                sl_axis_clamped   = 1U;
+            }
+            else if (lean < -STRAIGHT_MAX_AXIS_LEAN_DEG) {
+                sl_yaw_target_deg = axis - STRAIGHT_MAX_AXIS_LEAN_DEG;
+                sl_axis_clamped   = 1U;
+            }
+            else {
+                sl_axis_clamped = 0U;
+            }
+        }
+
+        float yaw = YawEstimator_GetYawDeg();
+
+        sl_yaw_error_deg = sl_yaw_target_deg - yaw;
+
+        /* Track the profile, not the endpoint. Feedforward supplies the
+         * command the move needs; feedback only trims. */
+        float base = STRAIGHT_FF_GAIN * ref_vel
+                     + PIDController_Update(&controller.distance_pid, ref_pos, measured);
+        float steer = PIDController_Update(&yaw_pid, sl_yaw_target_deg, yaw);
+
+        /* Stiction floor, NEVER during deceleration.
+         *
+         * The floor exists to raise a command too small to move the robot. It
+         * must not raise a command that is deliberately small because the
+         * profile is braking. The trace caught it doing exactly that: at
+         * t=1512 the distance PID wanted to slow down and applyMinSpeed forced
+         * the command back up to +45, driving the robot straight through the
+         * target to 21.6 cm.
+         *
+         * Gating on reference ACCELERATION rather than velocity is what makes
+         * this correct: velocity is still large during the braking ramp, which
+         * is precisely when flooring is most harmful. turn_controller already
+         * guards this with TURN_PROFILE_FLOOR_DPS; the straight path never got
+         * the same gate. */
+        float ref_acc = MotionProfile_Acceleration(&dist_profile, prof_t_s);
+
+        /* The rule is "floor the command unless the profile is braking", and
+         * braking is exactly when reference velocity and acceleration disagree
+         * in sign. Written that way rather than as `ref_acc >= 0` because the
+         * two are equivalent going forwards and only one of them stays true if
+         * this ever has to run a move in the other direction. */
+        if (arriving && !chaining) {
+
+            /* COMMITTED TO STOPPING IS NOT THE SAME AS STOPPING DRIVING, and
+             * conflating the two is what made the front-wall stop wander.
+             *
+             * This used to zero the command outright the moment the robot
+             * first came within DISTANCE_TOLERANCE_CM. That turns the last
+             * 15 mm of every move into a COAST, and how far a coast carries
+             * depends entirely on the speed the robot happened to have when it
+             * crossed the band -- which varies with how much it was lagging.
+             * Measured from this chassis: coasting from 18.7 cm/s takes 8.5 cm,
+             * so from the 6 to 9 cm/s seen at the band it is 12 to 20 mm. The
+             * robot therefore stopped anywhere in about a centimetre, cell to
+             * cell, with a front wall right there to show it.
+             *
+             * The profile already plans a deceleration that reaches zero
+             * exactly at the target. Following it to the end is both more
+             * accurate and more repeatable than releasing early and letting
+             * friction finish the job.
+             *
+             * WHAT THE LATCH IS ACTUALLY FOR is refusing to drive BACKWARDS.
+             * A robot that coasts past the target would otherwise be commanded
+             * back into the band, and reversing is the one direction this
+             * chassis has no lateral sensing for. So the command is clamped
+             * against the direction of travel rather than removed: still
+             * driving toward a target it has not reached, never away from one
+             * it has passed.
+             *
+             * No stiction floor here on purpose. The floor exists to raise a
+             * command too small to move the robot, and at this point a command
+             * too small to move the robot is the correct answer -- flooring it
+             * would put back exactly the overshoot this removes. */
+            if (base * distance_cm < 0.0f) {
+                base = 0.0f;
+            }
+        }
+        else if (ref_acc * ref_vel >= 0.0f && fabsf(ref_vel) > 1.0f) {
+            base = applyMinSpeed(base);
+        }
+
+        /* BREAKAWAY. Armed only once the profile has finished: while it is
+         * still running a slow patch is the controller's problem to solve, and
+         * a full-scale pulse mid-move would wreck the tracking. After it ends,
+         * a robot that is outside tolerance and not moving is stuck, and no
+         * amount of waiting fixes that.
+         *
+         * The command is applied at full scale in the direction of the
+         * remaining error, briefly. It is a nudge to get the wheel over static
+         * friction, after which the ordinary feedback has only kinetic
+         * friction to work against. */
+        const float still_threshold =
+            STRAIGHT_BREAKAWAY_RATE_CMS * CONTROL_SAMPLE_TIME_S;
+
+        const uint8_t profile_done = (prof_t_s >= MotionProfile_Duration(&dist_profile));
+        const uint8_t short_of_it  = (fabsf(measured - target_cm) >= DISTANCE_TOLERANCE_CM);
+
+        if (profile_done && short_of_it && travelled < still_threshold) {
+            stall_cycles++;
+        }
+        else {
+            stall_cycles = 0;
+        }
+
+        if (stall_cycles >= STRAIGHT_BREAKAWAY_CYCLES
+            && sl_breakaway_count < STRAIGHT_BREAKAWAY_MAX) {
+
+            pulse_until_ms = now + STRAIGHT_BREAKAWAY_MS;
+            stall_cycles   = 0;
+            sl_breakaway_count++;
+        }
+
+        if (now < pulse_until_ms) {
+            base = (target_cm > measured) ? CONTROL_MAX_SPEED : -CONTROL_MAX_SPEED;
+        }
+
+        /* GIVE UP ON A MOVE THAT IS NOT HAPPENING.
+         *
+         * Distinct from the breakaway above, which only arms once the profile
+         * has FINISHED. This is the case that was never covered: a robot
+         * wedged in the MIDDLE of a move, command above the stiction floor and
+         * therefore genuinely trying, and going nowhere. One was measured
+         * grinding like that for over two seconds at 3.8 cm/s against a
+         * profile asking for 10.
+         *
+         * Grinding costs more than the time. The lateral integral keeps
+         * learning from an error it cannot fix, the reference sails away so
+         * the front-wall alignment never gets its chance, and the run ends
+         * looking like a steering fault rather than a mechanical one. Failing
+         * the move says what actually happened. */
+        /* WEDGED IS NOT ALWAYS STOPPED, AND THAT COST A RUN.
+         *
+         * The test above was `speed_cms < STRAIGHT_STALL_RATE_CMS`, i.e. "is
+         * the robot stationary". A robot jammed against a wall it cannot see
+         * -- a corner, a post, contact at an angle -- does not stop dead. It
+         * CREEPS. Measured: 140 mm in 9.04 s, which is 1.55 cm/s against a
+         * 1.50 threshold. It missed by five hundredths and burned the full
+         * CONTROL_MOVE_TIMEOUT_MS grinding, with none of the ToF sensors
+         * showing anything close (front 311, left 220, right 94 mm).
+         *
+         * So the question is not "is it moving" but "is it going to finish".
+         * A move that cannot cover the distance it has left in the time it has
+         * left is over, whatever the speedometer says. The required rate is
+         * computed from what actually remains rather than from a fixed number,
+         * so it tightens naturally as the timeout approaches instead of
+         * needing a second constant that would drift away from the first.
+         *
+         * STRAIGHT_STALL_RATE_CMS is kept as the floor of that test: a move is
+         * never failed for being slower than a rate it was never asked to
+         * beat, which protects the deliberate crawl at the end of a profile.
+         * Both conditions must hold, and the breakaway must still have had its
+         * turn. */
+        const uint32_t elapsed_ms = now - start_ms;
+        const uint32_t left_ms    = (elapsed_ms >= CONTROL_MOVE_TIMEOUT_MS)
+                                      ? 0U
+                                      : (CONTROL_MOVE_TIMEOUT_MS - elapsed_ms);
+
+        /* Distance still to cover, cm, as a positive quantity. */
+        const float to_go_cm = fabsf(target_cm - measured);
+
+        /* The rate that would just finish in the time remaining, with a
+         * margin so a move is not failed for being marginally behind. Guarded
+         * against the final milliseconds, where left_ms tends to zero and the
+         * required rate would otherwise go to infinity and fail every move. */
+        float need_cms = 0.0f;
+
+        if (left_ms > STRAIGHT_PROGRESS_MIN_MS) {
+            need_cms = to_go_cm / ((float)left_ms * 0.001f)
+                       * STRAIGHT_PROGRESS_MARGIN;
+        }
+
+        const uint8_t too_slow_to_finish =
+            (need_cms > 0.0f) && (speed_cms < need_cms)
+            && (speed_cms < STRAIGHT_PROGRESS_MAX_CMS);
+
+        if (fabsf(base) >= CONTROL_MIN_MOVE_SPEED
+            && (speed_cms < STRAIGHT_STALL_RATE_CMS || too_slow_to_finish)
+            && sl_breakaway_count >= STRAIGHT_BREAKAWAY_MAX) {
+
+            /* ONLY ONCE THE BREAKAWAY HAS HAD ITS TURN. The pulse is the
+             * recovery this drivetrain was given for exactly this situation,
+             * and abandoning a move on a private clock could cut it off before
+             * it had spent its budget. Waiting costs a bounded amount of time
+             * and removes the case where the robot gives up somewhere it
+             * could plainly have driven on. */
+            if (stall_since_ms == 0U) {
+                stall_since_ms = now;
+            }
+            else if (now - stall_since_ms >= STRAIGHT_STALL_ABORT_MS) {
+                Motor_Brake();
+                flightReset();
+                sl_stall_abort = 1U;
+                controller.state = STRAIGHTLINE_IDLE;
+                return 0;
+            }
+        }
+        else {
+            stall_since_ms = 0U;
+        }
+
+        float left, right;
+        allocate(base, steer, &left, &right);
+
+        Motor_runSignedSpeed(left, right);
+
+        if (tm_sl_trace_count < SL_TRACE_CAPACITY) {
+            volatile StraightTrace_t *tr = &tm_sl_trace[tm_sl_trace_count];
+            tr->t_s     = elapsed_s;
+            tr->ref_cm  = ref_pos;
+            tr->act_cm  = measured;
+            tr->base    = sl_basespeed;
+            tr->steer   = sl_steering;
+            tr->yaw_err = sl_yaw_error_deg;
+            tr->yaw_deg = yaw;
+            tr->tilt_deg = tilt_deg;
+            tr->drift_deg = WallFollow_GetDriftDeg();
+            tr->err_mm = wf_error_mm;
+            tm_sl_trace_count++;
+        }
+    }
+}
+
+
+uint8_t runForwardFused(float distance_cm)
+{
+    /* Aims to finish WALL_FRONT_ALIGN_MM from a wall ahead, when there is one.
+     * With no wall in range the alignment never fires and the move is exactly
+     * what it was before: odometry against a trapezoidal profile.
+     *
+     * Every option at its default -- rest to rest, no in-flight reading -- so
+     * this is the move the robot has always made, expressed in the new form
+     * rather than reimplemented alongside it. */
+    StraightMove_t mv = {
+        .distance_cm      = distance_cm,
+        .front_target_mm  = WALL_FRONT_ALIGN_MM,
+        .entry_speed_cms  = 0.0f,
+        .exit_speed_cms   = 0.0f,
+        .keep_wall_follow = 0U,
+        .keep_odometry    = 0U,
+        .cells            = 0,
+        .wall_window_cm   = -1.0f,
+        .wall_centre_cm   = 0.0f,
+    };
+
+    return runForwardMove(&mv);
 }

@@ -5,6 +5,11 @@
 #include "straightline_controller.h"
 #include "turn_controller.h"
 #include "ICM42688.h"
+#include "tof_sensors.h"
+#include "navigator.h"
+#include "cell_motion.h"
+#include "floodfill_run.h"
+#include "mms_api.h"
 
 /* Result of the most recent move */
 volatile float  tm_final_left_cm    = 0.0f;
@@ -41,6 +46,42 @@ volatile float    tm_gyro_bias_dps  = 0.0f;
 volatile float    tm_yaw_sigma_deg  = 0.0f;
 volatile float    tm_bias_drift_deg = 0.0f;
 volatile uint32_t tm_ekf_rejects    = 0;
+
+/* ---- ToF telemetry ---- */
+volatile uint8_t  tm_tof_ready         = 0;
+volatile uint16_t tm_tof_front_mm      = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_left_mm       = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_right_mm      = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_front_raw_mm  = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_left_raw_mm   = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_right_raw_mm  = TOF_DISTANCE_INVALID;
+volatile uint32_t tm_tof_front_jumps   = 0;
+volatile uint32_t tm_tof_left_jumps    = 0;
+volatile uint32_t tm_tof_right_jumps   = 0;
+volatile uint8_t  tm_tof_front_status  = 255;
+volatile uint8_t  tm_tof_left_status   = 255;
+volatile uint8_t  tm_tof_right_status  = 255;
+volatile uint32_t tm_tof_sample_count  = 0;
+volatile uint32_t tm_tof_error_count   = 0;
+
+/* Angled pair. Only TEST_TOF_ANGLED writes these; during any other test they
+ * stay invalid, which is correct rather than a fault. */
+volatile uint16_t tm_tof_l45_mm        = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_r45_mm        = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_l45_raw_mm    = TOF_DISTANCE_INVALID;
+volatile uint16_t tm_tof_r45_raw_mm    = TOF_DISTANCE_INVALID;
+volatile uint8_t  tm_tof_l45_status    = 255;
+volatile uint8_t  tm_tof_r45_status    = 255;
+
+/* Flight recorder for ToF sweeps. See test_harness.h for why the scalars
+ * above are not enough to characterise a sensor. */
+volatile ToFRecord_t tm_tof_history[TOF_HISTORY_CAPACITY];
+volatile uint32_t    tm_tof_history_count = 0;
+
+/* TEST_TOF_MODE_CYCLE counters */
+volatile uint32_t tm_tof_mode_cycles     = 0;
+volatile uint32_t tm_tof_stop_fail_count = 0;
+volatile uint32_t tm_tof_post_stop_fail  = 0;
 
 /* Only the test selected by ACTIVE_TEST is called, so the others would each
  * raise -Wunused-function. Mark them so real warnings stay visible. */
@@ -125,17 +166,23 @@ static void Telemetry_CaptureYaw(float target_deg, uint8_t ok)
 
   if (!ok) tm_timeout_count++;
 
+  /* Yaw is CONTINUOUS now -- it accumulates across the whole run rather than
+   * resetting per move -- so the per-move commanded angle is no longer a
+   * meaningful thing to subtract from it. Grade against the absolute heading
+   * target instead, which is what the controller is actually aiming at.
+   * `target_deg` is kept only as the record's label. */
   tm_yaw_deg        = TurnController_GetYawDeg();
-  tm_yaw_error_deg  = target_deg - tm_yaw_deg;
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
+  tm_yaw_error_deg  = TurnController_GetHeadingTargetDeg() - tm_yaw_deg;
+  target_deg        = TurnController_GetHeadingTargetDeg();
+  tm_enc_yaw_deg    = yaw_encoder_deg;
+  tm_fusion_gap_deg = tm_yaw_deg - yaw_encoder_deg;
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_ekf_rejects    = turn_reject_count;
+  tm_ekf_rejects    = yaw_reject_count;
 
   /* Both survive a timeout untouched: the controller brakes and returns
    * without writing either, so they hold the last commanded state. */
   History_Record(target_deg, tm_yaw_deg, tm_yaw_error_deg,
-                 turn_gyro_rate_dps, turn_basespeed,
+                 yaw_gyro_rate_dps, turn_basespeed,
                  tm_drift_cnt, tm_final_left_cnt, tm_final_right_cnt, ok);
 }
 
@@ -371,10 +418,10 @@ TEST_FN void Test_YawEstimate(void)
   TurnController_ObserveYaw(TEST_YAW_OBSERVE_MS);
 
   tm_yaw_deg        = TurnController_GetYawDeg();
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_fusion_gap_deg = tm_yaw_deg - turn_encoder_yaw_deg;
+  tm_enc_yaw_deg    = yaw_encoder_deg;
+  tm_fusion_gap_deg = tm_yaw_deg - yaw_encoder_deg;
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_ekf_rejects    = turn_reject_count;
+  tm_ekf_rejects    = yaw_reject_count;
 }
 
 /* ---------------------------------------------------------------------------
@@ -402,8 +449,460 @@ TEST_FN void Test_GyroBias(void)
 
   tm_bias_drift_deg = TurnController_GetYawDeg();
   tm_gyro_bias_dps  = TurnController_GetGyroBiasDps();
-  tm_enc_yaw_deg    = turn_encoder_yaw_deg;
-  tm_ekf_rejects    = turn_reject_count;
+  tm_enc_yaw_deg    = yaw_encoder_deg;
+  tm_ekf_rejects    = yaw_reject_count;
+}
+
+/* Publish one full sweep to the live-watch globals.
+ * Shared by both ToF tests so single and continuous mode report identically
+ * and their numbers can be compared directly. */
+static void Telemetry_CaptureToF(const ToF_Measurement_t m[TOF_SENSOR_COUNT],
+                                 int sweep_status, uint8_t phase)
+{
+  tm_tof_front_mm     = m[TOF_FRONT].distance_mm;
+  tm_tof_left_mm      = m[TOF_LEFT].distance_mm;
+  tm_tof_right_mm     = m[TOF_RIGHT].distance_mm;
+
+  tm_tof_front_raw_mm = m[TOF_FRONT].raw_mm;
+  tm_tof_left_raw_mm  = m[TOF_LEFT].raw_mm;
+  tm_tof_right_raw_mm = m[TOF_RIGHT].raw_mm;
+
+  tm_tof_front_jumps  = ToF_GetFilterJumpCount(TOF_FRONT);
+  tm_tof_left_jumps   = ToF_GetFilterJumpCount(TOF_LEFT);
+  tm_tof_right_jumps  = ToF_GetFilterJumpCount(TOF_RIGHT);
+
+  tm_tof_front_status = m[TOF_FRONT].range_status;
+  tm_tof_left_status  = m[TOF_LEFT].range_status;
+  tm_tof_right_status = m[TOF_RIGHT].range_status;
+
+  if (sweep_status == TOF_OK)
+  {
+    tm_tof_sample_count++;
+  }
+  else
+  {
+    tm_tof_error_count++;
+  }
+
+  /* Append to the flight recorder. Stops at capacity rather than wrapping:
+   * a wrapped buffer read afterwards would silently mix the start and end of
+   * the run, and for a stationary noise measurement the first samples are the
+   * interesting ones (they include the filter priming). */
+  if (tm_tof_history_count < TOF_HISTORY_CAPACITY)
+  {
+    volatile ToFRecord_t *r = &tm_tof_history[tm_tof_history_count];
+
+    r->timestamp_ms  = HAL_GetTick();
+    r->front_mm      = m[TOF_FRONT].distance_mm;
+    r->left_mm       = m[TOF_LEFT].distance_mm;
+    r->right_mm      = m[TOF_RIGHT].distance_mm;
+    r->front_raw_mm  = m[TOF_FRONT].raw_mm;
+    r->left_raw_mm   = m[TOF_LEFT].raw_mm;
+    r->right_raw_mm  = m[TOF_RIGHT].raw_mm;
+    r->front_status  = m[TOF_FRONT].range_status;
+    r->left_status   = m[TOF_LEFT].range_status;
+    r->right_status  = m[TOF_RIGHT].range_status;
+    r->ok            = (sweep_status == TOF_OK) ? 1U : 0U;
+    r->phase         = phase;
+
+    tm_tof_history_count++;
+  }
+}
+
+/* Park the robot once the recorder is full so the samples survive until they
+ * are read. Mirrors what TEST_CYCLE_LIMIT does for the motion tests: the ToF
+ * tests loop forever by design, and without this the run would keep sampling
+ * into a full buffer while the LED kept blinking as if it were still working.
+ * Heartbeat blink (100 ms on, 900 ms off) means "done, go read it". */
+static void ToF_HaltIfBufferFull(void)
+{
+  if (tm_tof_history_count < TOF_HISTORY_CAPACITY)
+  {
+    return;
+  }
+
+  Motor_Brake();
+
+  while (1)
+  {
+    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_SET);
+    HAL_Delay(100);
+    HAL_GPIO_WritePin(MCU_LED_GPIO_Port, MCU_LED_Pin, GPIO_PIN_RESET);
+    HAL_Delay(900);
+  }
+}
+
+/* Which sensors survived init, as a bitmask. Read this FIRST: an all-zero
+ * mask means the mux itself never answered, which is a wiring/address
+ * problem, not a sensor problem.
+ *
+ * Not static: main() calls it once after ToF_Init() so the mask is visible in
+ * live-watch even when a non-ToF test is selected. */
+void TestHarness_CaptureToFReady(void)
+{
+  tm_tof_ready =
+      (uint8_t)((ToF_IsSensorReady(TOF_FRONT)    ? 0x01U : 0x00U) |
+                (ToF_IsSensorReady(TOF_LEFT)     ? 0x02U : 0x00U) |
+                (ToF_IsSensorReady(TOF_RIGHT)    ? 0x04U : 0x00U) |
+                (ToF_IsSensorReady(TOF_LEFT_45)  ? 0x08U : 0x00U) |
+                (ToF_IsSensorReady(TOF_RIGHT_45) ? 0x10U : 0x00U));
+}
+
+/* Single-shot ranging. Run this first after wiring the sensors: it is the
+ * simplest path that exercises mux -> sensor -> distance, and each reading is
+ * triggered by us so nothing is stale.
+ *
+ * Hold a hand or a wall at a known distance in front of each sensor and check
+ * the matching tm_tof_*_mm against a ruler. A sensor reading a plausible
+ * distance for the WRONG direction means the TOF_CHANNEL_* mapping in
+ * control_config.h does not match the PCB. */
+/* ALL FIVE sensors, single-shot, including the 45-degree pair.
+ *
+ * This is the bring-up test for the angled sensors, because the ordinary ToF
+ * tests cannot see them: those go through ToF_ReadAll(), which by design
+ * covers only the three navigation sensors. The angled pair is read here one
+ * at a time through ToF_ReadSingle(), which is the supported way to reach a
+ * sensor outside TOF_SENSOR_COUNT.
+ *
+ * WHAT TO CHECK, in this order:
+ *
+ *  1. tm_tof_ready == 0x1F. Every bit set: front, left, right, L45, R45.
+ *     0x07 means the angled pair did not initialise -- check
+ *     TOF_CHANNEL_LEFT_45 / _RIGHT_45 against the board before anything else.
+ *     0x00 means the mux never answered at all.
+ *
+ *  2. Each sensor responds to ITS OWN direction. Put a target in front of one
+ *     sensor at a time and confirm only that reading changes. A left-45 that
+ *     responds when you block the right-45 means the two channels are
+ *     swapped, which produces entirely plausible numbers pointing the wrong
+ *     way -- much harder to spot later than a dead sensor.
+ *
+ *  3. The angled readings behave sensibly in a corridor. Facing along a
+ *     corridor with both side walls present, the two 45-degree readings should
+ *     be roughly equal and LONGER than the side readings, since the diagonal
+ *     path to a wall is longer than the perpendicular one. Do NOT expect
+ *     side_mm / cos(45): the sensors are 15 mm inboard, so that identity does
+ *     not hold here. See TOF_ANGLED_INBOARD_MM.
+ *
+ *  4. Bias, if you want to measure it. Target at a known distance ALONG THE
+ *     SENSOR'S OWN 45-degree axis, let the filtered value settle, and record
+ *     (true - measured) into TOF_OFFSET_LEFT_45_MM / _RIGHT_45_MM. The
+ *     +27 mm figure measured for the other three does not transfer -- a
+ *     45-degree target returns less signal, and the VL53L0X's near-field
+ *     over-read varies with signal strength. */
+TEST_FN void Test_ToFAngled(void)
+{
+  Motor_Brake();
+
+  /* The three navigation sensors, exactly as TEST_TOF_SINGLE reads them, so
+   * the two tests are directly comparable. */
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+  int status = ToF_ReadAll(m);
+
+  Telemetry_CaptureToF(m, status, TOF_PHASE_SINGLE);
+
+  /* The angled pair, one at a time. ToF_ReadSingle() selects the mux channel
+   * itself, so no ordering constraint against the sweep above. */
+  ToF_Measurement_t l45;
+  ToF_Measurement_t r45;
+
+  (void)ToF_ReadSingle(TOF_LEFT_45, &l45);
+  (void)ToF_ReadSingle(TOF_RIGHT_45, &r45);
+
+  /* Both measurements are invalidated by the driver on any failure, so these
+   * are safe to publish unconditionally -- a failed read shows as
+   * TOF_DISTANCE_INVALID rather than a stale number. */
+  tm_tof_l45_mm     = l45.distance_mm;
+  tm_tof_l45_raw_mm = l45.raw_mm;
+  tm_tof_l45_status = l45.range_status;
+
+  tm_tof_r45_mm     = r45.distance_mm;
+  tm_tof_r45_raw_mm = r45.raw_mm;
+  tm_tof_r45_status = r45.range_status;
+
+  /* Refresh the ready mask every cycle rather than trusting the boot latch: a
+   * sensor that drops off the bus after init is exactly what this test is for
+   * catching. */
+  TestHarness_CaptureToFReady();
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(100);
+}
+
+/* ALL FIVE SENSORS, CONTINUOUS, AND IT NEVER STOPS.
+ *
+ * The other ToF tests all call ToF_HaltIfBufferFull(), which parks in a
+ * while(1) blinking 100 ms on / 900 ms off once tm_tof_history fills -- about
+ * 200 samples, so four to eight seconds in. That halt is deliberate and worth
+ * keeping: the history buffer does not wrap, so stopping is what preserves a
+ * run for offline analysis over SWD. But it makes those tests useless for
+ * simply WATCHING the sensors, which is what this one is for.
+ *
+ * So: no flight recorder, no halt. Only the live-watch scalars are updated,
+ * and the loop runs until the robot is powered down.
+ *
+ * CONTINUOUS, and specifically through ToF_PollOneLatest(), which is the exact
+ * path the wall follower uses while driving. That matters -- reading with
+ * ToF_ReadSingle() in a loop would exercise a different code path and prove
+ * nothing about the one the robot actually runs on. It polls one sensor per
+ * call in rotation and serves the rest from the held-reading cache, so:
+ *
+ *   tof_fresh_count   climbing steadily  = sensors producing
+ *   tof_cached_count  climbing faster    = normal, the loop outruns the sensor
+ *   tof_stale_drops   ANY increase       = a sensor stopped producing. This is
+ *                                          the number worth watching; it
+ *                                          should stay at zero forever.
+ *
+ * WHAT TO LOOK AT. tm_tof_ready should read 0x1F (all five). The three
+ * navigation distances are tm_tof_front_mm / _left_mm / _right_mm and the
+ * angled pair is tm_tof_l45_mm / _r45_mm. Centred in a corridor the angled
+ * readings should sit near TOF_ANGLED_NOMINAL_MM (~70.7 mm) and the side pair
+ * near 35 mm -- and the angled pair should stay readable when you push the
+ * robot off centre, which is the whole reason they exist.
+ *
+ * The LED toggles once per cycle, so a steady fast blink means the loop is
+ * alive. If it ever goes to a slow 1 Hz blink something called the halt, which
+ * this test does not -- that would be a real fault. */
+TEST_FN void Test_ToFLive(void)
+{
+  static uint8_t started = 0;
+
+  Motor_Brake();
+
+  if (!started)
+  {
+    /* Starts only the sensors that came up; a failed one is skipped rather
+     * than retried, so this cannot stall on a dead channel. */
+    (void)ToF_StartContinuousAll();
+    started = 1;
+  }
+
+  /* Fills all five. TOF_SENSOR_TOTAL, not COUNT -- a 3-element array here
+   * would be written two elements past its end. */
+  ToF_Measurement_t m[TOF_SENSOR_TOTAL];
+
+  (void)ToF_PollOneLatest(m, TOF_MAX_SAMPLE_AGE_MS);
+
+  /* Publish all five. The driver invalidates a measurement it could not
+   * produce, so a dropped sensor shows as TOF_DISTANCE_INVALID (65535) rather
+   * than a stale value that looks plausible. */
+  tm_tof_front_mm     = m[TOF_FRONT].distance_mm;
+  tm_tof_left_mm      = m[TOF_LEFT].distance_mm;
+  tm_tof_right_mm     = m[TOF_RIGHT].distance_mm;
+
+  tm_tof_front_raw_mm = m[TOF_FRONT].raw_mm;
+  tm_tof_left_raw_mm  = m[TOF_LEFT].raw_mm;
+  tm_tof_right_raw_mm = m[TOF_RIGHT].raw_mm;
+
+  tm_tof_front_status = m[TOF_FRONT].range_status;
+  tm_tof_left_status  = m[TOF_LEFT].range_status;
+  tm_tof_right_status = m[TOF_RIGHT].range_status;
+
+  tm_tof_l45_mm       = m[TOF_LEFT_45].distance_mm;
+  tm_tof_r45_mm       = m[TOF_RIGHT_45].distance_mm;
+  tm_tof_l45_raw_mm   = m[TOF_LEFT_45].raw_mm;
+  tm_tof_r45_raw_mm   = m[TOF_RIGHT_45].raw_mm;
+  tm_tof_l45_status   = m[TOF_LEFT_45].range_status;
+  tm_tof_r45_status   = m[TOF_RIGHT_45].range_status;
+
+  tm_tof_front_jumps  = ToF_GetFilterJumpCount(TOF_FRONT);
+  tm_tof_left_jumps   = ToF_GetFilterJumpCount(TOF_LEFT);
+  tm_tof_right_jumps  = ToF_GetFilterJumpCount(TOF_RIGHT);
+
+  /* Counted here rather than by Telemetry_CaptureToF(), which also appends to
+   * the flight recorder -- the thing this test exists to avoid. */
+  if (m[TOF_FRONT].valid && m[TOF_LEFT].valid && m[TOF_RIGHT].valid &&
+      m[TOF_LEFT_45].valid && m[TOF_RIGHT_45].valid)
+  {
+    tm_tof_sample_count++;
+  }
+  else
+  {
+    tm_tof_error_count++;
+  }
+
+  /* Re-read every cycle: a sensor that drops off the bus AFTER init is
+   * exactly the failure this test should surface, and the boot latch cannot
+   * show it. */
+  TestHarness_CaptureToFReady();
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+
+  /* One control-loop period, matching how often the robot really polls. A
+   * full rotation of all five therefore takes TOF_SENSOR_TOTAL cycles, the
+   * same as when driving. */
+  HAL_Delay((uint32_t)(CONTROL_SAMPLE_TIME_S * 1000.0f));
+}
+
+TEST_FN void Test_ToFSingle(void)
+{
+  Motor_Brake();
+
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+  int status = ToF_ReadAll(m);
+
+  Telemetry_CaptureToF(m, status, TOF_PHASE_SINGLE);
+  ToF_HaltIfBufferFull();
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(100);
+}
+
+/* Continuous ranging. Same readings, but the sensors free-run and each poll
+ * returns the newest completed measurement without waiting.
+ *
+ * Started once on the first call rather than in ToF_Init(), so that selecting
+ * this test is all it takes to switch modes. Expect tm_tof_error_count to
+ * climb faster here than in the single-shot test: polling faster than
+ * TOF_INTER_MEASUREMENT_MS legitimately returns "no new data yet". Rising
+ * counts alongside a static tm_tof_sample_count is the real fault signal. */
+TEST_FN void Test_ToFContinuous(void)
+{
+  static uint8_t started = 0;
+
+  Motor_Brake();
+
+  if (!started)
+  {
+    (void)ToF_StartContinuousAll();
+    started = 1;
+  }
+
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+  int status = ToF_ReadAll(m);
+
+  Telemetry_CaptureToF(m, status, TOF_PHASE_CONTINUOUS);
+  ToF_HaltIfBufferFull();
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+  HAL_Delay(20);
+}
+
+/* ---------------------------------------------------------------------------
+ * TEST 13: ToF mode switching. Exercises the one path no other test touches.
+ *
+ * The other two ToF tests each stay in a single mode forever, so nothing ever
+ * calls ToF_StopContinuous(). That matters because stopping is not
+ * instantaneous: VL53L0X_StopMeasurement() only REQUESTS the stop, and the
+ * sensor finishes a measurement already in flight before it takes effect.
+ * Reconfiguring the device during that window leaves it in an undefined state.
+ * Worse, the stop-completion poll is also what rewrites StopVariable to re-arm
+ * the part, so skipping it skips a required device write rather than just a
+ * wait.
+ *
+ * Each cycle runs: single-shot -> continuous -> STOP -> single-shot, and the
+ * last step is the one that breaks if the stop was mishandled.
+ *
+ * HOW TO READ THE RESULT. Point the robot at a static scene and leave it
+ * alone. Then:
+ *   - tm_tof_stop_fail_count and tm_tof_post_stop_fail must both stay 0.
+ *   - PRE and POST records must report the SAME distances. The scene did not
+ *     move, so any disagreement between a single-shot before the start and one
+ *     after the stop is the sensor, not the world.
+ * A silent wrong number is the failure worth catching here; an outright error
+ * would have been obvious already.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_ToFModeCycle(void)
+{
+  Motor_Brake();
+
+  ToF_Measurement_t m[TOF_SENSOR_COUNT];
+
+  /* Baseline, from a known single-shot state. */
+  Telemetry_CaptureToF(m, ToF_ReadAll(m), TOF_PHASE_CYCLE_PRE);
+
+  /* Free-run for a few samples so the stop lands on a genuinely running
+   * sensor rather than an idle one. */
+  (void)ToF_StartContinuousAll();
+
+  for (uint8_t i = 0; i < TEST_TOF_CONT_POLLS; i++)
+  {
+    HAL_Delay(TOF_INTER_MEASUREMENT_MS + 10U);
+    Telemetry_CaptureToF(m, ToF_ReadAll(m), TOF_PHASE_CYCLE_CONT);
+  }
+
+  if (ToF_StopContinuousAll() != TOF_OK)
+  {
+    tm_tof_stop_fail_count++;
+  }
+
+  /* The measurement under test: a single-shot read immediately after the
+   * stop, with no settling delay hiding the problem. */
+  int post = ToF_ReadAll(m);
+
+  if (post != TOF_OK)
+  {
+    tm_tof_post_stop_fail++;
+  }
+
+  Telemetry_CaptureToF(m, post, TOF_PHASE_CYCLE_POST);
+
+  tm_tof_mode_cycles++;
+
+  HAL_GPIO_TogglePin(MCU_LED_GPIO_Port, MCU_LED_Pin);
+
+  /* Checked once per cycle, not per record, so a cycle is never cut in half. */
+  ToF_HaltIfBufferFull();
+}
+
+/* ---------------------------------------------------------------------------
+ * TEST 14: reactive arena navigation.
+ *
+ * The behaviour itself lives in Core/Src/Maze/navigator.c. Everything else in
+ * this file is bring-up scaffolding that exercises one subsystem and is then
+ * never touched again; exploration is the robot's actual job, and it is what
+ * the flood fill will eventually replace. Keeping it here would have meant
+ * growing the real application inside the test harness.
+ *
+ * Runs ONCE and then heartbeats. tm_maze_abort_reason says how it ended.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_MazeRun(void)
+{
+  if (!tm_maze_complete)
+  {
+    LED_Blink(1, 300, 300);
+    Navigator_Run();
+  }
+
+  Motor_Brake();
+  LED_Blink(1, 100, 900);   /* done: go read the trace */
+}
+
+/* ---- TEST 15: the ported flood fill ---------------------------------------
+ *
+ * The three-phase solver from MicroMouseAlgorithm, driving the real robot
+ * through mms_api.c. Same cell-level motion, same trace, same telemetry as
+ * TEST_MAZE_RUN -- only the decision rule is different.
+ *
+ * THE RUN SETUP LIVES HERE RATHER THAN INSIDE FloodFill_Run(), because that
+ * function is the algorithm's own main() and every line inside it is the
+ * original. Starting the sensors and clearing the trace are the robot's
+ * business, so they happen around it.
+ *
+ * Runs ONCE and then heartbeats. tm_maze_abort_reason says how it ended, and
+ * the per-cell trace reads exactly as it does for the reactive run.
+ * ------------------------------------------------------------------------ */
+TEST_FN void Test_FloodFillRun(void)
+{
+  if (!tm_maze_complete)
+  {
+    LED_Blink(1, 300, 300);
+
+    tm_maze_trace_count  = 0U;
+    tm_maze_moves        = 0U;
+    tm_maze_abort_reason = NAV_END_RUNNING;
+
+    CellMotion_BeginRun();
+    MMS_ApiReset();
+
+    FloodFill_Run();
+
+    CellMotion_EndRun();
+    tm_maze_complete = 1U;
+  }
+
+  Motor_Brake();
+  LED_Blink(1, 100, 900);   /* done: go read the trace */
 }
 
 void TestHarness_RunCycle(void)
@@ -442,6 +941,34 @@ void TestHarness_RunCycle(void)
 
 #elif (ACTIVE_TEST == TEST_GYRO_BIAS)
   Test_GyroBias();
+
+#elif (ACTIVE_TEST == TEST_TOF_SINGLE)
+  Test_ToFSingle();
+  return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_TOF_CONTINUOUS)
+  Test_ToFContinuous();
+  return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_TOF_MODE_CYCLE)
+  Test_ToFModeCycle();
+  return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_MAZE_RUN)
+  Test_MazeRun();
+  return;   /* runs once, then heartbeats */
+
+#elif (ACTIVE_TEST == TEST_FLOODFILL_RUN)
+  Test_FloodFillRun();
+  return;   /* runs once, then heartbeats */
+
+#elif (ACTIVE_TEST == TEST_TOF_ANGLED)
+  Test_ToFAngled();
+  return;   /* poll continuously, no cycle pause */
+
+#elif (ACTIVE_TEST == TEST_TOF_LIVE)
+  Test_ToFLive();
+  return;   /* runs forever, never halts */
 
 #else
   #error "ACTIVE_TEST is not set to a valid test id"

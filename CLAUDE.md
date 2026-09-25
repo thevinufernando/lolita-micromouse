@@ -11,8 +11,10 @@ mechanical CAD — not just software.
 
 **Current status: low-level controls bring-up.** Straight-line motion and
 pivot turns work in firmware. Maze-solving does not exist yet and is out of
-scope until motion primitives are trusted. VL53L0X wall detection is on the
-PCB but not yet wired into firmware.
+scope until motion primitives are trusted. The VL53L0X ToF sensors now report
+distances in firmware (three of the five populated: front, left, right, behind
+the TCA9548A mux), but nothing interprets those into wall decisions yet — that
+belongs with the maze logic.
 
 ## Repo layout
 

@@ -35,7 +35,7 @@
 /* ------------------------- Common PID settings --------------------------- */
 
 /* Control loop sample time in seconds (10 ms = 100 Hz) */
-#define CONTROL_SAMPLE_TIME_S       0.010f
+#define CONTROL_SAMPLE_TIME_S 0.010f
 
 /* Derivative low-pass filter time constant in seconds.
  * Rule of thumb: keep it a few times larger than the sample time.
@@ -57,10 +57,10 @@
  * that transient rejection matters more than phase lag. Note tau does NOT
  * change steady-state damping (the term settles to -Kd * d(measurement)/dt
  * regardless), so raising it only ever costs phase, never authority. */
-#define CONTROL_DERIV_TAU_S         0.010f
+#define CONTROL_DERIV_TAU_S 0.010f
 
 /* Maximum motor speed command the controllers may produce (0..255). */
-#define CONTROL_MAX_SPEED           200.0f
+#define CONTROL_MAX_SPEED 200.0f
 
 /* Minimum speed magnitude that still overcomes gearbox stiction.
  * Commands below this (but non-zero) are boosted up to it, so the robot
@@ -76,32 +76,29 @@
  * breaks through, but isn't a guaranteed fix, hence raising the floor itself.
  * Retest both turn and straight-line moves after changing this -- it is
  * shared by both controllers. */
-#define CONTROL_MIN_MOVE_SPEED      45.0f
-
+#define CONTROL_MIN_MOVE_SPEED 45.0f
 
 /* ====================== STRAIGHTLINE: DISTANCE PID ======================= */
 /* Drives average travelled distance (cm) to the target distance.            */
 
-#define STRAIGHT_DIST_KP            20.0f
-#define STRAIGHT_DIST_KI            0.0f
-#define STRAIGHT_DIST_KD            0.0f
+#define STRAIGHT_DIST_KP 20.0f
+#define STRAIGHT_DIST_KI 0.0f
+#define STRAIGHT_DIST_KD 0.0f
 
 /* Integrator clamp, in motor speed units */
-#define STRAIGHT_DIST_INT_LIMIT     50.0f
-
+#define STRAIGHT_DIST_INT_LIMIT 50.0f
 
 /* ====================== STRAIGHTLINE: HEADING PID ======================== */
 /* Holds (left_count - right_count) at zero so the robot tracks straight.    */
 /* Measurement is in RAW ENCODER TICKS, so these gains are small.            */
 
-#define STRAIGHT_HEADING_KP         0.5f
-#define STRAIGHT_HEADING_KI         0.025f
-#define STRAIGHT_HEADING_KD         0.00f
+#define STRAIGHT_HEADING_KP 0.5f
+#define STRAIGHT_HEADING_KI 0.025f
+#define STRAIGHT_HEADING_KD 0.00f
 
 /* Steering authority clamp, in motor speed units */
-#define STRAIGHT_HEADING_LIMIT      80.0f
-#define STRAIGHT_HEADING_INT_LIMIT  20.0f
-
+#define STRAIGHT_HEADING_LIMIT 80.0f
+#define STRAIGHT_HEADING_INT_LIMIT 20.0f
 
 /* ====================== ROBOT GEOMETRY / CALIBRATION ===================== */
 
@@ -110,8 +107,7 @@
  * single most important number for turn accuracy. If every turn is off by the
  * same RATIO (e.g. all turns come out 5% short), correct this value rather
  * than the PID gains. A turn that overshoots means the value is too small. */
-#define ROBOT_WHEEL_BASE_CM         11.20f
-
+#define ROBOT_WHEEL_BASE_CM 11.20f
 
 /* ============================== TURN PID ================================= */
 /*                                                                           */
@@ -133,7 +129,7 @@
 /* fused yaw is a cleaner, less noisy signal than raw encoder arc, so it      */
 /* will usually tolerate a higher Kp and a real Kd.                          */
 
-#define TURN_KP                     10.9f
+#define TURN_KP 10.9f
 
 /* TURN_KI = 5.0 (raised from 0.0). Two floor runs at Kd=0.5 both undershot
  * (0.93 deg, then 1.94 deg) instead of overshooting, and the second one
@@ -149,7 +145,7 @@
  * roughly 1-2 s, well inside CONTROL_MOVE_TIMEOUT_MS -- not yet tested on
  * target, treat as a starting point. If it overshoots on the recovery kick,
  * lower this before touching TURN_KD. */
-#define TURN_KI                     5.0f
+#define TURN_KI 5.0f
 
 /* TURN_KD = 0.25 (was 0.5). Damping was originally added to kill an
  * overshoot-and-stick failure mode at Kd=0, and 0.5 did that.
@@ -166,7 +162,7 @@
  * Raising this again means accepting that the robot decelerates to a full
  * halt before reaching tolerance, which on a high-traction surface it cannot
  * always restart from. Fix the stall authority (TURN_INT_LIMIT) first. */
-#define TURN_KD                     0.25f
+#define TURN_KD 0.25f
 
 /* Integrator clamp, in motor speed units.
  *
@@ -188,7 +184,7 @@
  * that then failed to recover inside CONTROL_MOVE_TIMEOUT_MS. The integrator
  * only unwinds once the error changes sign, so it carried surplus command
  * straight through the target. */
-#define TURN_INT_LIMIT              60.0f
+#define TURN_INT_LIMIT 60.0f
 
 /* Integrator clamp while the robot is actually moving, in motor speed units.
  *
@@ -231,7 +227,16 @@
  * breakaway pulse (full scale for ~30 ms, then hand back to the PID) is the
  * right consumer for it. Static friction is broken by amplitude, not by an
  * integrator patiently ramping through a range where the wheel cannot move. */
-#define TURN_INT_LIMIT_MOVING       60.0f
+/* REVERTED 20 -> 60 after a 0/20 run. Cutting it to 20 removed the authority
+ * that was rescuing moves which end the profile stopped and short: the ceiling
+ * at the end of a move is P + this clamp, so at 3 deg short that fell from 93
+ * units to 53, against a measured breakaway above 140. Every one of 20 moves
+ * then died 1.2-4.6 deg short with the command pointing the right way and
+ * simply too small. The profile makes this worse than the old scheme did,
+ * because it deliberately brings the robot to REST at the end of the sweep --
+ * so being short means restarting from zero, which this drivetrain cannot do.
+ */
+#define TURN_INT_LIMIT_MOVING 60.0f
 
 /* Stall detector: rotation below this rate (deg/s) while still outside
  * TURN_TOLERANCE_DEG counts as "not moving".
@@ -239,7 +244,7 @@
  * Deliberately below TURN_SETTLE_RATE_DPS so a normal deceleration into the
  * tolerance band does not register. A genuine stall reads ~0.15 dps, so
  * there is a wide margin either side. */
-#define TURN_STALL_RATE_DPS         5.0f
+#define TURN_STALL_RATE_DPS 5.0f
 
 /* How many consecutive cycles the stall condition must hold before the
  * integrator is granted TURN_INT_LIMIT. At CONTROL_SAMPLE_TIME_S this is a
@@ -247,8 +252,126 @@
  * the overshoot: a healthy 90 deg turn completes in ~800 ms and is never
  * stationary-but-short for anything like this long, so the boost simply
  * never arms. A real stall arms it in a fifth of a second. */
-#define TURN_STALL_CYCLES           20U
+#define TURN_STALL_CYCLES 20U
 
+/* ========================= TURN MOTION PROFILE ========================== */
+/*                                                                          */
+/* The turn no longer chases a step setpoint of "go to 90 degrees". It      */
+/* tracks a trapezoidal reference that the robot can actually be at right   */
+/* now, which keeps the PID in its linear region and, more importantly,     */
+/* gives the move a KNOWN DURATION. Tolerance-based turns on this robot     */
+/* ranged from 0.7 to 8 seconds; a profiled one is always the same.         */
+
+/* Peak rotation rate, deg/s. */
+/* MEASURED, not chosen. A per-cycle trace of a real turn showed the robot
+ * sustaining 143 deg/s with the command saturated at CONTROL_MAX_SPEED, while
+ * the profile was asking for 200. It simply cannot go that fast, so the
+ * reference ran away and the tracking lag peaked at 28 degrees mid-move.
+ *
+ * !! 120 WAS STILL TOO FAST. Lowered to 90 after it failed a run. !!
+ *
+ * 36 units of headroom is not headroom. A per-cycle trace of the failing turn:
+ * feedforward pinned at -168 through the whole cruise, feedback asking for a
+ * further -20 to -60, so the total command sat at -188 to -228 against a
+ * +/-200 clamp. Saturated, for the entire middle of the move.
+ *
+ * Two things followed, and the second one ended the run:
+ *
+ *   THE ROBOT COULD NOT HOLD 120. At a command clipped to 200 it managed
+ *   113.5 dps, so the reference ran away and the robot tracked 5-7 deg behind
+ *   for the whole cruise. (The 143 dps recorded earlier was a different
+ *   surface; treat that number as the ceiling on a good day, not a spec.)
+ *
+ *   IT THEREFORE OVERSHOT, WHICH LOOKS BACKWARDS AND IS NOT. Lagging in
+ *   POSITION does not mean lagging in SPEED. When the profile finished its
+ *   deceleration ramp the robot was still 5 deg short and still doing ~114
+ *   dps, and shedding that at TURN_PROFILE_ACCEL_DPS2 needs 10.8 deg -- so it
+ *   sailed 5.26 deg PAST the target. From there it had to reverse from rest,
+ *   which this drivetrain cannot do, and the move timed out.
+ *
+ * 90 dps puts feedforward at 126 units and leaves 74 for the feedback, and it
+ * is comfortably under the 113 the robot actually delivers. A profile the
+ * robot cannot follow is worse than no profile, because the feedback spends
+ * the whole move saturated and the end of the ramp is a guess. */
+/* LOWERED AGAIN, 90 -> 80, and for the same reason as 120 -> 90: the number
+ * that matters is not the speed, it is what is left over for the feedback
+ * after the feedforward has taken its share. With TURN_FF_GAIN at its
+ * corrected 2.00:
+ *
+ *     90 deg/s -> feedforward 180 of 200, leaving 20 for feedback
+ *     80 deg/s -> feedforward 160 of 200, leaving 40
+ *
+ * 20 units is not enough to absorb a feedforward that is wrong by tens of
+ * units, and it will be wrong, because the gain above moves with surface and
+ * battery. 40 units is. Braking from 80 also costs 5.3 degrees against 6.8
+ * from 90, so the end of the move is more forgiving as well.
+ *
+ * The cost is 0.1 s per turn. */
+#define TURN_PROFILE_MAX_DPS 80.0f
+
+/* Angular acceleration, deg/s^2. With the peak above, a 90 deg turn ramps
+ * for 0.167 s over 16.7 deg at each end and cruises the middle 56.7 deg,
+ * giving a total of 0.617 s. Raise both together to go faster; raising accel
+ * alone just spends longer at peak rate. */
+/* Also measured: 0 to ~145 deg/s took about 200 ms, so roughly 725 deg/s^2 is
+ * all this drivetrain has. 600 keeps a margin. */
+#define TURN_PROFILE_ACCEL_DPS2 600.0f
+
+/* Feedforward gain: motor speed units per deg/s of commanded rotation.
+ *
+ * THIS IS THE NUMBER THAT MAKES A PROFILE WORTH HAVING. It supplies the
+ * command the move needs so the feedback term only has to correct the
+ * difference. Get it right and the PID output hovers near zero mid-turn.
+ *
+ * RAISED 1.40 -> 2.00, and the old value is worth keeping in view because it
+ * was also measured. 200 units once produced 143 deg/s, giving 1.40. A later
+ * trace on the arena floor showed 176 units producing 87.9 deg/s, giving 2.00.
+ * Same robot, same firmware, 43% apart.
+ *
+ * SO THIS NUMBER IS NOT A CONSTANT OF THE ROBOT. It moves with surface and
+ * with battery state, and a fixed feedforward will always be somewhat wrong.
+ * What matters is that the FEEDBACK has enough headroom to absorb the error
+ * rather than clipping, which is why TURN_PROFILE_MAX_DPS was lowered
+ * alongside this rather than left where it was.
+ *
+ * Under-driving is not harmless, and it does not merely make the turn slow.
+ * At 1.40 the feedforward supplied 126 units while the move needed 176, so
+ * the feedback carried a steady -49 and the robot tracked 5 to 7 degrees
+ * BEHIND the reference for the entire cruise. It then arrived at the target
+ * still doing nearly full rate, because the controller was pushing it to catch
+ * up, instead of decelerating into the target with the profile. Shedding that
+ * takes 6.75 degrees, so the move finished 4.25 degrees past and outside
+ * TURN_TOLERANCE_DEG, and from there recovery needs breaking static friction
+ * from rest, which this drivetrain cannot do.
+ *
+ * HOW TO RE-MEASURE: read tm_turn_trace and look at the fb column during
+ * cruise. It should hover near zero. If it sits hard one way, scale this gain
+ * by (ff + fb) / ff -- the offline reader prints that factor directly. */
+#define TURN_FF_GAIN 2.00f
+
+/* Acceleration feedforward: motor speed units per deg/s^2.
+ *
+ * Velocity feedforward alone cannot accelerate the robot, only hold a rate.
+ * Without this term the integrator covers both ramps and is still wound
+ * POSITIVE when the move ends, which pushes the robot past the target and
+ * then keeps pushing the wrong way -- observed as 2 failures in a 20-turn
+ * run, both with the command pointing away from the target.
+ *
+ * 0.03 x the 1200 deg/s^2 ramp is ~36 speed units, which is about what the
+ * integrator was winding to. Trim it from turn_fb_cmd during the ramps. */
+#define TURN_FF_ACCEL_GAIN 0.10f
+
+/* Grace period after the profile ends, in ms, to close whatever small error
+ * is left. BOUNDED ON PURPOSE: this is the whole difference between a move
+ * that always finishes and the old settle-forever loop that could hang for 8
+ * seconds. Worst-case move time is the profile duration plus this. */
+#define TURN_PROFILE_SETTLE_MS 250U
+
+/* The stiction floor is applied only while the profile commands at least this
+ * much rotation. Below it the profile is deliberately winding down, and
+ * forcing CONTROL_MIN_MOVE_SPEED there would drive the robot straight through
+ * the target -- which is exactly how the old scheme produced its overshoots. */
+#define TURN_PROFILE_FLOOR_DPS 20.0f
 
 /* ============================ IMU / EKF ================================== */
 
@@ -259,17 +382,17 @@
  * CALIBRATE THIS FIRST with TEST_IMU_RAW: rotate the robot anticlockwise by
  * hand and confirm tm_gyro_z_dps reads POSITIVE. If it reads negative, flip
  * this to -1.0f. Everything downstream depends on getting this right. */
-#define IMU_GYRO_Z_SIGN             (+1.0f)
+#define IMU_GYRO_Z_SIGN (+1.0f)
 
 /* How often the EKF prediction step runs, in microseconds.
  * The gyro ODR is configured to 1 kHz, so 1000 us consumes every sample
  * exactly once. Polling faster would integrate the same sample twice and
  * inflate the rotation estimate. */
-#define IMU_PREDICT_PERIOD_US       1000U
+#define IMU_PREDICT_PERIOD_US 1000U
 
 /* Stationary gyro bias calibration, performed at startup.
  * The robot MUST be completely still while this runs. */
-#define IMU_GYRO_BIAS_SAMPLES       1000U
+#define IMU_GYRO_BIAS_SAMPLES 1000U
 
 /* Settle time before sampling starts, in ms.
  * Raised 300 -> 1000: pressing the reset button physically jolts the robot,
@@ -277,19 +400,18 @@
  * The acceptance test is the worst single sample out of IMU_GYRO_BIAS_SAMPLES,
  * so one leftover wobble anywhere in the sweep rejected the whole thing --
  * observed rejected in 2 of 3 consecutive test runs. */
-#define IMU_GYRO_BIAS_SETTLE_MS     1000U
+#define IMU_GYRO_BIAS_SETTLE_MS 1000U
 
 /* How many times to retry a calibration that was rejected for motion before
  * giving up. Each attempt costs SETTLE_MS + SAMPLES ms, so the worst case
  * startup cost is ATTEMPTS * (SETTLE_MS + SAMPLES) ms.
  * A rejected calibration is not harmless -- the EKF then runs with an
  * unestimated gyro bias -- so it is worth a few seconds at boot to get it. */
-#define IMU_GYRO_BIAS_MAX_ATTEMPTS  3U
+#define IMU_GYRO_BIAS_MAX_ATTEMPTS 3U
 
 /* Reject the calibration if the robot was clearly moving during it (deg/s).
  * Guards against calibrating while the robot is being carried. */
-#define IMU_GYRO_BIAS_MAX_DPS       5.0f
-
+#define IMU_GYRO_BIAS_MAX_DPS 5.0f
 
 /* --- EKF noise parameters ---
  *
@@ -304,18 +426,18 @@
 /* Yaw process noise density, rad^2/s. Covers gyro white noise plus scale
  * factor error. ICM-42688-P noise density is ~0.0028 dps/sqrt(Hz), which at
  * 1 kHz is well under this; the margin absorbs modelling error. */
-#define EKF_Q_YAW                   1.0e-5f
+#define EKF_Q_YAW 1.0e-5f
 
 /* Gyro bias random-walk density, (rad/s)^2/s. Small: the bias drifts slowly,
  * mostly with temperature. */
-#define EKF_Q_BIAS                  1.0e-7f
+#define EKF_Q_BIAS 1.0e-7f
 
 /* Encoder yaw measurement variance, rad^2.
  * 1.0e-2 corresponds to about 5.7 deg of 1-sigma noise, which is deliberately
  * loose. Over the ~1 s of a pivot turn the gyro is far more trustworthy than
  * the wheels; the encoders are here as a slow anchor that keeps the gyro bias
  * observable, not as the primary angle source. */
-#define EKF_R_ENCODER_YAW           1.0e-2f
+#define EKF_R_ENCODER_YAW 1.0e-2f
 
 /* Rate-dependent slip term, rad^2 per (rad/s)^2:
  *     R_effective = EKF_R_ENCODER_YAW + EKF_R_SLIP_COEFF * yaw_rate^2
@@ -331,37 +453,1670 @@
  * RAISE if turns still get dragged off by slip.
  * LOWER if turns are accurate but yaw drifts during long stationary pauses.
  * Set to 0.0f for a classical fixed-R filter. */
-#define EKF_R_SLIP_COEFF            2.0e-1f
+#define EKF_R_SLIP_COEFF 2.0e-1f
 
 /* Initial state uncertainty */
-#define EKF_P0_YAW                  1.0e-4f
-#define EKF_P0_BIAS                 1.0e-4f
+#define EKF_P0_YAW 1.0e-4f
+#define EKF_P0_BIAS 1.0e-4f
 
 /* Reject encoder updates further than this many sigma from the prediction.
  * This is the wheel-slip rejector. Lower = more aggressive rejection.
  * Set to 0.0f to accept every update. */
-#define EKF_INNOVATION_GATE         3.0f
+#define EKF_INNOVATION_GATE 3.0f
 
+/* ==================== VL53L0X ToF ranging sensors ======================== */
+
+/* Which TCA9548A channel each sensor hangs off. The mux has 8 channels and
+ * all five ToF footprints are now populated. Verify against the Main PCB
+ * schematic before trusting a reading -- a swapped pair here produces
+ * perfectly valid distances attributed to the wrong direction, which is far
+ * harder to spot than a dead sensor. */
+#define TOF_CHANNEL_FRONT 0U
+#define TOF_CHANNEL_LEFT 3U
+#define TOF_CHANNEL_RIGHT 4U
+
+/* The 45-degree pair, added 2026-09-18. Initialised and readable; consumed by
+ * nothing above the driver yet -- see the ToF_Sensor_t comment in
+ * tof_sensors.h for why they sit outside TOF_SENSOR_COUNT. */
+#define TOF_CHANNEL_LEFT_45 1U
+#define TOF_CHANNEL_RIGHT_45 2U
+
+/* Factory default 7-bit address, shifted to the 8-bit form both the ST API
+ * and the HAL expect. Every sensor keeps this address; the mux is what makes
+ * them individually addressable. */
+#define TOF_I2C_ADDR_DEFAULT 0x52
+
+/* Measurement timing budget, microseconds. This is the master speed/accuracy
+ * knob: longer budget = less noise and more range, at a lower sample rate.
+ *
+ *   20000  (20 ms) - ST's fastest preset, noticeably noisier
+ *   33000  (33 ms) - ST's default, ~30 Hz
+ *   200000 (200 ms) - high accuracy preset
+ *
+ * 33 ms is the starting point here. For a moving micromouse the sample rate
+ * matters more than the last millimetre, so if wall following turns out to
+ * lag, drop this before touching anything else. */
+#define TOF_TIMING_BUDGET_US 33000U
+
+/* Inter-measurement period for CONTINUOUS mode, milliseconds. Must be >= the
+ * timing budget in ms, otherwise the sensor cannot keep up and simply runs
+ * back-to-back. The margin over the budget covers the sensor's own overhead. */
+#define TOF_INTER_MEASUREMENT_MS 40U
+
+/* VCSEL pulse periods, in PCLKs. These set the range/ambient-immunity
+ * trade-off and only accept specific values: pre-range 12/14/16/18,
+ * final-range 8/10/12/14. ST's default profile is 14/10.
+ *
+ * Longer periods extend range (the long-range profile uses 18/14) at the cost
+ * of ambient light immunity. Maze walls are close -- under 20 cm -- so the
+ * default is kept; there is no reason to reach for range the robot will never
+ * use and pay for it in noise. */
+#define TOF_VCSEL_PERIOD_PRE_RANGE 14U
+#define TOF_VCSEL_PERIOD_FINAL_RANGE 10U
+
+/* Signal rate limit, MCPS, as a float converted to the API's 16.16 fixed
+ * point at the call site. Readings weaker than this are rejected as noise.
+ * ST's default is 0.25; the long-range profile lowers it to 0.1.
+ * RAISE to reject more marginal readings, LOWER to see darker/further walls. */
+#define TOF_SIGNAL_RATE_LIMIT_MCPS 0.25f
+
+/* Sigma (standard deviation) limit, millimetres. Rejects readings the sensor
+ * itself considers imprecise. ST's default is 18 mm. */
+#define TOF_SIGMA_LIMIT_MM 18.0f
+
+/* How long to wait for a measurement to complete before giving up, ms.
+ * Must comfortably exceed the timing budget -- this is a stuck-sensor
+ * detector, not a pacing mechanism. */
+#define TOF_DATA_READY_TIMEOUT_MS 100U
+
+/* How long ToF_StopContinuous() waits for the sensor to finish stopping, ms.
+ * Only a runaway escape: the stop completes in a millisecond or two. */
+#define TOF_STOP_TIMEOUT_MS 100U
+
+/* Oldest a held reading may be before ToF_ReadAllLatest() gives up on it, ms.
+ *
+ * This is the line between "the sensor has not finished this measurement yet"
+ * and "the sensor has stopped". Free-running, a result lands every
+ * TOF_INTER_MEASUREMENT_MS, so anything under that is the normal case and must
+ * not raise an alarm. Two intervals plus a timing budget is comfortably past
+ * one missed measurement and comfortably short of the robot having moved
+ * anywhere meaningful -- 120 ms is 1.2 cm at cruise.
+ *
+ * Without a limit at all a dead sensor would go unnoticed: its last reading
+ * would be served forever and the robot would steer to a wall that is no
+ * longer there. tof_stale_drops counts how often this fires, and should be
+ * zero on a healthy run. */
+#define TOF_MAX_SAMPLE_AGE_MS 120U
+
+/* Run the maze with the ToF sensors free-running rather than single-shot.
+ *
+ * !! THIS IS THE ROLLBACK SWITCH. Set it to 0 to get the old behaviour. !!
+ *
+ * Single-shot blocks the control loop for about 46 ms per sensor, so a sweep
+ * of three costs 138 ms. Measured on a real move, the loop ran 60 cycles at
+ * 10 ms and 19 at 138: of 3222 ms, 2622 were spent inside a sensor read with
+ * the motors holding a stale command. The loop was open 81% of the time.
+ *
+ * That is not a tuning problem, it is the reason several tuning problems were
+ * unfixable. It produced a 13.8x derivative kick on every sweep cycle -- the
+ * PID was told a 138 ms step took 10 -- which saturated the steering, and it
+ * left the wall follower correcting at a sixth of the rate its constants
+ * claimed.
+ *
+ * Free-running trades that for samples up to one measurement period old, about
+ * 4 mm of travel at cruise. If the arena behaves worse rather than better,
+ * this define is the single thing to change. */
+#define MAZE_TOF_CONTINUOUS 1
+
+/* ========================== WALL DETECTION ============================== */
+/* Distances to booleans. See Core/Inc/Maze/wall_sense.h for the reasoning.  */
+
+/* A front reading at or below this means the current cell has a wall ahead.
+ * Robot centred, a front wall sits ~77 mm away as read; with no wall the
+ * nearest surface is the far side of the NEXT cell at ~250 mm. The gap is
+ * enormous, which is why the sensors' +27 mm close-range over-read is
+ * irrelevant here and the offset constants are not needed for detection. */
+#define WALL_FRONT_THRESHOLD_MM 150U
+
+/* Same for the sides: a wall reads ~62 mm, an opening 300 mm and up. */
+#define WALL_SIDE_THRESHOLD_MM 120U
+
+/* Samples majority-voted by WallSense_ReadCell() at a cell centre.
+ * Keep this ODD so there is never a tie. Worth the ~1 s it costs: the
+ * algorithm never clears a wall once set, so a single bad reflection writing
+ * a phantom wall closes a corridor permanently. */
+#define WALL_SENSE_SAMPLES 5U
+
+/* Extra distance a latched wall must recede before it counts as gone, used
+ * only by the moving/hysteretic path. Without a separate exit level the
+ * decision chatters at every cell boundary, which is exactly where the wall
+ * really does end and where a wrong answer is most expensive. */
+#define WALL_SENSE_HYSTERESIS_MM 40U
+
+/* Consecutive cycles a changed answer must hold before it is latched. */
+#define WALL_SENSE_CONFIRM 3U
+
+/* ===================== WALL FOLLOWING (LATERAL) ========================= */
+/*                                                                          */
+/* Holds the robot centred in a corridor using ONE side wall, whichever is  */
+/* currently in range. Two walls would let the common-mode sensor bias      */
+/* cancel in the difference; with one it does not, which is why the         */
+/* setpoints below are MEASURED READINGS rather than true distances.        */
+
+/* What each sensor reads with the robot centred in a cell. NOT the true gap.
+ *
+ * These absorb the sensors' ~27 mm close-range over-read without needing
+ * TOF_OFFSET_*_MM: if the setpoint is whatever the sensor says when the robot
+ * is where you want it, a constant bias cancels exactly. Measure them by
+ * centring the robot by hand and reading tm_tof_left_mm / _right_mm.
+ *
+ * MEASURED 2026-09-12, and these are now real numbers rather than estimates:
+ * robot parked by hand at the centre of a dead-end cell (walls front, left and
+ * right), TEST_TOF_CONTINUOUS, 198 clean sweeps over 11 s.
+ *
+ *     front 51.3 mm (sd 0.7)   left 52.1 (sd 0.8)   right 52.2 (sd 1.2)
+ *     L - R = -0.0 mm, so the lateral placement was centred to within noise
+ *     and the span below is trustworthy.
+ *
+ * The previous 63/64 were 11 mm too large, and that was not a small error: on
+ * the SINGLE-WALL path the error is (reading - setpoint), so a perfectly
+ * centred robot was told it was 11 mm too far from whichever wall it happened
+ * to be following, and asked to move that much further away. The active side
+ * changes every time a wall starts or ends -- 28 switches in one run, 68 in
+ * another -- and each switch flipped the sign of that bias, stepping the
+ * commanded position by 22 mm.
+ *
+ *
+ *
+ * NOTE these now matter far less than they used to. When BOTH walls are in
+ * range the follower centres on the DIFFERENCE, (L - R)/2, and only the ~1 mm
+ * mismatch between the pair survives -- the common-mode over-read cancels
+ * exactly, and so does any error in the corridor width. These full values are
+ * used only on the single-wall path, where nothing cancels. Measured over one
+ * run, L + R came to 121-129 mm with a mean of 124 across every genuine pair,
+ * which is what makes the difference trustworthy.
+ *
+ * ===========================================================================
+ * REVERTED TO 52 ON 2026-09-19. 35 WAS WRONG AND COST HALF A RUN.
+ * ===========================================================================
+ * They were briefly set to 35 -- the TRUE geometric gap, (180-110)/2 -- on the
+ * argument that holding a biased reading holds a biased position. That
+ * argument is wrong HERE, and the run that followed proved it: 26 cells became
+ * 13, and the robot ended pressed against a wall.
+ *
+ * WHY IT IS WRONG. The comparison is
+ *
+ *     wf_error_mm = left_mm - WALL_FOLLOW_SETPOINT_LEFT_MM
+ *
+ * and left_mm is a RAW READING -- TOF_OFFSET_*_MM are still 0, so it carries
+ * the full ~17 mm near-field over-read. Both sides of that subtraction have to
+ * live in the same space. A setpoint of 52 is what the sensor ACTUALLY SAYS
+ * when the robot is centred, so the bias cancels in the subtraction and a
+ * centred robot is correctly told its error is zero. A setpoint of 35 mixes a
+ * biased reading with a true distance: the centred robot reads 52, is told it
+ * is 17 mm too FAR from the wall, and drives 17 mm INTO it.
+ *
+ * The original comment above was right and the reasoning that replaced it was
+ * not. A setpoint expressed as a measured reading is not "a biased target" --
+ * it is the correct target in the only space the controller can measure.
+ *
+ * 35 becomes correct ONLY if TOF_OFFSET_LEFT_MM/_RIGHT_MM are set to about
+ * -17 at the same time, so that left_mm is a true distance too. Those two
+ * changes are a matched pair; doing either alone breaks the loop.
+ */
+#define WALL_FOLLOW_SETPOINT_LEFT_MM 52.0f
+#define WALL_FOLLOW_SETPOINT_RIGHT_MM 52.0f
+
+/* What the two side readings SUM to when both are walls of the robot's own
+ * cell, in mm. Measured, like the setpoints, and for the same reason.
+ *
+ * This is the cell's inner width as the sensors see it, and it does not depend
+ * on where the robot sits between the walls -- move 10 mm left and one reading
+ * falls by 10 while the other rises by 10. That makes it the one quantity that
+ * can tell a same-cell wall from something further away, which an absolute
+ * distance threshold cannot: a reading of 90 mm is a perfectly ordinary wall
+ * if the other side reads 34, and is not a wall at all if the other side reads
+ * 239.
+ *
+ * MEASURED 2026-09-12 directly, from the same stationary capture as the
+ * setpoints: L + R = 104.3 mm. The old 124 came from in-flight pairs during a
+ * run, which is a much noisier way to get it, and it was 20 mm high -- exactly
+ * WALL_FOLLOW_SPAN_TOL_MM. The acceptance window was therefore 104 to 144 with
+ * the true value sitting ON its lower edge, so roughly half of all genuine
+ * two-wall cells were rejected as inconsistent and fell through to the
+ * single-wall path. Only 9 of 27 forward moves in one run used both walls. */
+#define WALL_FOLLOW_SPAN_MM 104.0f
+
+/* How far the sum may stray before the pair is called inconsistent.
+ *
+ * Covers the spread above with room to spare, and still rejects the failures:
+ * a (41, 108) pair from an earlier run sums to 149, which is 25 mm out and is
+ * the beam catching a surface a cell away through an opening. */
+#define WALL_FOLLOW_SPAN_TOL_MM 20.0f
+
+/* Largest side reading the FOLLOWER will centre on, in mm.
+ *
+ * DELIBERATELY TIGHTER THAN WALL_SIDE_THRESHOLD_MM, and the difference is the
+ * point. Detection asks "is there a wall?", and it can afford to be generous
+ * because the two cases are hundreds of mm apart. Following asks "how far am I
+ * from THIS wall?", and a marginal reading there does not produce a marginal
+ * response -- it produces a full-scale steering command in whatever direction
+ * the number implies.
+ *
+ * Every genuine side reading in a 17-cell run fell between 51 and 87 mm, with
+ * a median of 62. The two that did not were 34 (robot hard over) and 113. At
+ * 120 the 113 was accepted, read as 50 mm of error against the setpoint,
+ * saturated the tilt, and steered the robot hard at something that was not the
+ * wall it thought it was -- which is what a junction looks like from the
+ * sensor's point of view: the beam passing an opening and catching a surface a
+ * cell away.
+ *
+ * 95 leaves room for a robot 30 mm off centre against a real wall and refuses
+ * everything beyond. A refused reading is not a failure; the follower simply
+ * holds heading open-loop, which is the right answer when it cannot see a wall
+ * it trusts. */
+/* How far AHEAD OF THE AXLE the side sensors sit, cm. Measured, not chosen.
+ *
+ * This is the number that decides when the side sensors stop looking at the
+ * cell the robot is leaving and start looking at the one it is entering. They
+ * lead the axle, so they cross the boundary at
+ *
+ *     NAV_CELL_CM / 2 - TOF_SIDE_AHEAD_CM
+ *
+ * which at the current pitch is 5.6 cm of a 19.2 cm move. The side sensors
+ * therefore spend more than two thirds of every move reporting on the NEXT
+ * cell, and until this was written down nothing in the firmware knew it.
+ *
+ * The consequence was a run where the wall follower tracked a wall that had
+ * already ended, read its recession as the robot drifting, and steered into
+ * the opposite wall. See WallFollowCells_t.
+ *
+ * Re-measure this if the sensor mounts move. Getting it wrong shifts when the
+ * map's veto applies, which is conservative in both directions but blunts it.
+ */
+#define TOF_SIDE_AHEAD_CM 4.0f
+
+/* Furthest side reading still treated as a wall of THIS corridor, mm.
+ *
+ * It is two things at once: the hard gate in usable(), and the far end of the
+ * confidence ramp in far_confidence(). So it sets both when a reading is
+ * thrown away and how hard the loop is allowed to pull on one it keeps.
+ *
+ * 95 -> 110, from the readings themselves. Across a 17-cell run the side
+ * sensors returned 33, 41, 47, 51, 54, 56, 60, 64, 67, 68, 70, 83, 84, 88, 93,
+ * 96 and 97 for walls, and 192, 229, 498, 534 and 575 for openings. There is a
+ * clean gap between 97 and 192, and the gate sat at 95 -- inside the wall
+ * cluster, discarding the 96 and the 97, which are simply what a wall looks
+ * like from a robot 30 mm off centre.
+ *
+ * THAT IS THE WORST POSSIBLE PLACE TO GO BLIND. A reading near the gate means
+ * a large lateral error, which is exactly when the correction is needed most;
+ * and because the ramp ends here too, a reading that survived the gate at 93
+ * was worth only 0.30 of full gain, capping the lean at 3 degrees against an
+ * error asking for 15. The robot then fixes about 10 mm per cell, and it was
+ * entering cells 25 to 38 mm out.
+ *
+ * At 110 the same 93 mm reading is worth 0.52 and may lean 5.2 degrees, which
+ * is roughly double the correction rate. 110 is still far below the 192 mm
+ * floor of the opening cluster, so nothing that is not a wall gets in, and the
+ * map veto and the span check are both unchanged behind it. */
+/* Smallest side reading the follower will TRUST, in mm.
+ *
+ * The VL53L0X degrades below about 30 mm, and its failure there is not a
+ * short reading -- it is an ERRATIC one. It can report anything, varying
+ * sample to sample, for a target that is effectively touching. A run ended
+ * with the right sensor reporting 5 mm while the robot was pressed against
+ * that wall.
+ *
+ * Set ABOVE the datasheet floor rather than at it, because a reading a few mm
+ * above the floor is already degrading. This costs nothing now that a single
+ * angled beam outranks a single side wall: when the near side sensor drops
+ * out, the angled beam on that side takes over, and it holds its reference
+ * ~88 mm out where the sensor is entirely happy.
+ *
+ * RAISE if the robot still acts on nonsense when close to a wall. LOWER only
+ * if genuine close approaches are being rejected and tm_wf telemetry shows the
+ * follower going to NONE rather than to an angled reference. */
+#define WALL_FOLLOW_USABLE_MIN_MM 32U
+
+#define WALL_FOLLOW_USABLE_MAX_MM 110U
+
+/* ONE-SIDED SINGLE-WALL CORRECTION.
+ *
+ * With both walls the difference says where the robot is and nothing is
+ * ambiguous. With one wall it does not, and the two directions of error are
+ * not equally trustworthy:
+ *
+ *   READING BELOW THE SETPOINT is unambiguous. Something IS there and it IS
+ *   close. Whether the robot is off-centre or the corridor is narrow does not
+ *   matter -- moving away is right either way, and this is also the dangerous
+ *   case, because being hard against a wall is what jams the next pivot.
+ *
+ *   READING ABOVE THE SETPOINT is ambiguous, and at a junction it is usually
+ *   wrong. The robot might be off-centre away from the wall, or the wall might
+ *   have ended and the beam is catching an edge or a surface beyond it. Acting
+ *   on it steers the robot hard TOWARDS something that may not be there.
+ *
+ * SO IT IS ASYMMETRIC, NOT ONE-SIDED. A hard one-sided rule was tried first
+ * and it over-corrected the problem: across five consecutive junction cells it
+ * zeroed four of the five available corrections, and the robot drifted about
+ * 4 mm per cell with nothing pushing back. It entered that stretch 5.5 mm off
+ * centre and left it 18.5 mm off, then reached 28 mm two cells later.
+ *
+ * The fix is to keep the asymmetry but make the weak direction weak rather
+ * than absent. Pushing AWAY from a close wall keeps full authority. Pulling
+ * TOWARDS a distant one runs a smaller gain and a much tighter tilt cap, so it
+ * bleeds off drift without ever lunging at something that might not be there.
+ *
+ * At the cap, one cell of travel still buys 192*sin(2.5) = 8.4 mm of
+ * correction, comfortably more than the 4 mm per cell the robot was losing. */
+/* Integral term on the LATERAL error, in degrees of tilt per mm-second.
+ *
+ * THE LOOP WAS PROPORTIONAL-ONLY, AND IT SHOWS. Seven consecutive cells with
+ * both walls visible and full correction running still walked from -1.5 mm to
+ * +8.0 mm, about 1.4 mm per cell. That is not the loop failing, it is what a
+ * P-only loop does against a standing disturbance: at +8 mm it holds 4 degrees
+ * of tilt, and that tilt BALANCES the disturbance rather than removing it.
+ * Steady-state error is the definition of the thing.
+ *
+ * The disturbance is some persistent asymmetry -- a wheel slightly larger, a
+ * motor slightly stronger, a gyro bias the EKF has not caught. Which one does
+ * not matter to this term: an integrator nulls a standing error whatever
+ * causes it, which is exactly why it is the right tool here and why guessing
+ * the cause first is not necessary.
+ *
+ * SIZED to supply the 4 degrees the P term is currently holding, over roughly
+ * five seconds of driving: 8 mm * 0.1 * 5 s = 4 deg. Slow on purpose. It must
+ * be far slower than the proportional part or the two fight and the robot
+ * weaves, which is the same rule the drift bleed follows.
+ *
+ * IT PERSISTS ACROSS MOVES. The asymmetry belongs to the robot, not to one
+ * cell, so resetting it every move would mean re-learning it every move and
+ * never converging -- which is precisely what has been happening to
+ * wf_drift_deg, wiped at the start of all 26 moves of every run and reading
+ * exactly 0.000 in every log because of it. Only WallFollow_ResetBias() clears
+ * it, once at the start of a run.
+ *
+ * 0.10 -> 0.04, BECAUSE IT WAS SIZED FOR THE WRONG ERROR. The 5 second figure
+ * above assumed the 8 mm standing offset that a two-wall corridor produces.
+ * Single-wall cells routinely show 20-25 mm, and at 0.10 a 23 mm error moved
+ * this term 3.3 degrees in ONE cell -- measured, not estimated. Five such
+ * cells in a row drove it to WALL_FOLLOW_KI_LIMIT_DEG and pinned it there, and
+ * since it is added to the heading target it then held the robot 7 degrees off
+ * the maze. The growing heading error in the second half of that run was this
+ * constant's own output.
+ *
+ * A term that can move degrees within a single cell is not learning a property
+ * of the robot, it is a second and slower position loop competing with the
+ * first. At 0.04 an 8 mm standing offset still buys the 4 degrees the P term
+ * was holding, over about 12 seconds or five cells, which is the timescale a
+ * mechanical asymmetry deserves.
+ *
+ * The gain is only half the fix. See the anti-windup in wall_follow.c: while
+ * the proportional term is clamped there is no evidence of a standing bias to
+ * be had, because the loop is already doing everything it can. */
+#define WALL_FOLLOW_KI_DEG_PER_MM_S 0.04f
+
+/* Clamp on the integral, in degrees.
+ *
+ * NOT bounded by WALL_FOLLOW_MAX_TILT_DEG, because the integral is no longer
+ * part of the tilt. It is added to the HEADING TARGET instead, outside the
+ * tilt clamp, and that distinction is the whole fix.
+ *
+ * Inside the clamp it could not do its job. The failure is easy to state: if
+ * the yaw estimate is off from the maze by more than WALL_FOLLOW_MAX_TILT_DEG,
+ * the robot cannot recover. Suppose the estimate reads 8 degrees low. To drive
+ * straight the loop must command +8, but the clamp stops it at +6, so the
+ * robot keeps turning -- slower, but in the same wrong direction, for as long
+ * as the wall lasts. The proportional term saturates first and the integral,
+ * sharing the same 6 degree budget, then has nothing left to give. A run was
+ * observed doing exactly this: yawed left with the left wall in view and no
+ * correction arriving.
+ *
+ * Outside the clamp there is no such ceiling. The proportional term keeps its
+ * full tilt budget for position, and the integral separately shifts the
+ * reference the inner loop holds -- which is the correct place for it, since
+ * what it is learning IS a heading reference error.
+ *
+ * 8 degrees bounds it well past any accumulated gyro-to-maze misalignment a
+ * run should ever produce, and still far short of a wrong turn. */
+#define WALL_FOLLOW_KI_LIMIT_DEG 8.0f
+
+/* HOW MUCH A SINGLE-WALL READING IS WORTH WHEN IT READS LONG.
+ *
+ * Confidence is 1.0 at the setpoint and falls linearly to this floor at
+ * WALL_FOLLOW_USABLE_MAX_MM, where the reading stops being used at all. Both
+ * the gain and the tilt clamp are multiplied by it, so the loop acts on a
+ * reading in proportion to how likely it is to mean what it says.
+ *
+ * REPLACES A BINARY RULE THAT COST A RUN. The old version keyed on the SIGN of
+ * the error: any long reading got a fifth of the gain and a 2.5 degree cap.
+ * The robot then carried a 14 mm error for a full second against a right wall
+ * reading 76 mm -- twelve millimetres long, where an opening reads 240 and the
+ * usable gate already rejects anything past 95 -- and the rule throttled a
+ * correction that was entirely correct. When the left wall came into range it
+ * agreed: too close on the left by 14 where the right had said too far by 12.
+ * The cell ended 28 mm off centre and the next turn jammed.
+ *
+ * The ramp's two ends are the two things already known: a reading at the
+ * setpoint is certain, a reading at the gate is about to be discarded. Only
+ * the middle is interpolated, which is the honest shape for a quantity that
+ * degrades gradually.
+ *
+ * 0.25 keeps a quarter of the authority at the very edge of usable range --
+ * enough to bleed off drift, far too little to lunge at an opening. */
+#define WALL_FOLLOW_FAR_CONF_FLOOR 0.25f
+
+/* Confidence below which the INTEGRAL stops learning.
+ *
+ * The proportional term may act on a doubtful reference in proportion to the
+ * doubt, because it forgets the moment the reference changes. An integrator
+ * does not forget: a wrong guess accumulated into it is held until something
+ * else unwinds it, which is exactly how a term meant to learn a mechanical
+ * bias ends up holding the robot off the maze. So it gets a threshold rather
+ * than a taper.
+ *
+ * 0.80 corresponds to a reading about a quarter of the way from setpoint to
+ * the usable gate -- roughly 8 mm long on this geometry. Inside that, a long
+ * reading is an off-centre robot. Past it, it might be a wall ending, and
+ * guessing is not something an integrator should do. */
+#define WALL_FOLLOW_TRUST_CONF 0.80f
+
+/* Below this speed the lateral integral stops learning, cm/s.
+ *
+ * ANTI-WINDUP OF THE SECOND KIND. The existing gate freezes the integral when
+ * the proportional term is clamped -- when the loop is asking for everything
+ * it can. This one covers when the loop asks correctly and the ROBOT does not
+ * respond, which is a different failure and was not covered at all.
+ *
+ * A wedged run showed why it matters: the integral reached -7.66 of a +/-8
+ * limit and the reader still reported it as not converged, because it spent
+ * over two seconds integrating a 14 mm error while the robot was grinding
+ * against a wall at 3.8 cm/s. None of that was evidence about the robot's
+ * mechanical asymmetry. It was evidence the robot was stuck.
+ *
+ * Lateral authority comes from leaning while moving FORWARD, so with no
+ * forward motion there is no correction to be had and nothing to learn from
+ * the fact that it did not arrive. 1.5 cm/s is well under the 10 cm/s cruise
+ * and above the noise on a differenced encoder reading. */
+#define WALL_FOLLOW_MIN_TRAVEL_CMS 1.5f
+
+/* Lateral error (mm) -> commanded heading offset (deg).
+ *
+ * This is a CASCADE, not a second steering term added alongside the heading
+ * loop. Lateral position is two integrations from steering, so summing two
+ * independent corrections is undamped; feeding lateral error into the heading
+ * SETPOINT makes the inner loop supply the derivative term for free.
+ *
+ * RAISED 0.25 -> 0.50 after a jammed turn.
+ *
+ * THE ROBOT IS LARGE FOR THE CELL, so this gain is not a comfort setting --
+ * it is what decides whether a pivot fits. Measured across one 22-cell run:
+ *
+ *   every cell that turned successfully   within  8.5 mm of centre
+ *   both in-place 180s that worked        within  2.0 mm
+ *   the 180 that jammed on a wall        24.0 mm off, wall at 34 mm
+ *
+ * The chassis does fit. It just needs about a centimetre of centring accuracy
+ * to do it, and single-wall cells were not delivering that.
+ *
+ * The loop is proportional, so the error decays exponentially along a cell
+ * rather than closing linearly, and the fraction removed over one 19.2 cm cell
+ * is 1 - exp(-CELL * KP * pi/180):
+ *
+ *     KP 0.25   57% removed   a 27 mm error leaves 11.7 mm
+ *     KP 0.50   81% removed   a 27 mm error leaves  5.1 mm
+ *     KP 0.75   92% removed   a 27 mm error leaves  2.2 mm
+ *
+ * 0.50 brings a worst-case single-wall error back inside the budget in one
+ * cell. 0.75 is tempting and is the next thing to try, but this is a cascade
+ * whose inner heading loop has its own lag, so raise it one step at a time and
+ * watch for weaving. At 0.50 a 20 mm error already asks for the full
+ * WALL_FOLLOW_MAX_TILT_DEG, so beyond here the clamp is doing the limiting,
+ * not the gain. */
+#define WALL_FOLLOW_KP_DEG_PER_MM 0.50f
+
+/* Hard cap on that tilt.
+ *
+ * !! IT MUST NOT EXCEED THE INNER LOOP'S LINEAR RANGE. Lowered 12 -> 6. !!
+ *
+ * This is the outer half of a cascade, and its output is the inner loop's
+ * SETPOINT. The inner loop here is STRAIGHT_YAW_*, which has gain 8 and clamps
+ * its output at STRAIGHT_YAW_LIMIT, so it saturates at LIMIT/KP degrees of
+ * heading error -- 80/8 = 10 as both stand now. Asking for more than that is
+ * asking for something the inner loop can only answer with a pinned output:
+ * the cascade stops being a cascade and becomes bang-bang. The host test
+ * asserts the relation symbolically so the two cannot drift apart.
+ *
+ * That is exactly how a reverse out of a dead end failed. The robot entered it
+ * 10 deg off heading and 30 mm off centre, the lateral loop asked for a further
+ * 12, steering pinned at +60 on the very first cycle and stayed there for 1.2
+ * seconds, and the robot rotated about 40 degrees -- far more than the 22 it
+ * was asked for -- then slammed to -60 coming back and jammed against the wall
+ * at 15.4 cm of a 19.9 cm move.
+ *
+ * 6 -> 10, WITH THE INNER LOOP WIDENED FIRST, in the order the note above
+ * insisted on: STRAIGHT_YAW_LIMIT went 60 -> 80, so the linear range is now
+ * 80/8 = 10 degrees and the rule at the top of this note still holds exactly.
+ * Raising this alone would have re-created the bang-bang failure described
+ * above, which is why the two constants move together or not at all.
+ *
+ * 6 was not enough, and the log says so rather than the theory. Five
+ * consecutive cells asked for more than the clamp could give:
+ *
+ *     L=51        err -12.0 mm   wanted  -6.0 deg
+ *     R=83        err -19.0 mm   wanted  +9.5 deg
+ *     L=36        err -27.0 mm   wanted -13.5 deg
+ *     R=79        err -15.0 mm   wanted  +7.5 deg
+ *     L=34 R=86   err -25.5 mm   wanted -12.8 deg
+ *
+ * Two of those are past twice the clamp. The robot spent the stretch pinned
+ * at the limit, drifted into the wall anyway, and wedged: the straight move
+ * that followed held ~180 of 200 command units for a second and a half while
+ * making 2.9 cm/s against a profile asking for 10.
+ *
+ * 10 covers a 20 mm error at full WALL_FOLLOW_KP_DEG_PER_MM and buys
+ * 192*sin(10) = 33 mm of lateral correction per cell, against the 27 mm worst
+ * case actually recorded. The cost is corner swing: half a chassis length
+ * times sin(10) rather than sin(6), roughly 3.5 mm more on a 100 mm body. On
+ * a robot this large in a 124 mm corridor that is worth watching, and it is
+ * the thing to look at first if the robot starts clipping walls mid-corridor
+ * rather than at junctions. Note the clamp is only REACHED at 20 mm of error;
+ * a well-centred robot never sees it. */
+#define WALL_FOLLOW_MAX_TILT_DEG 10.0f
+
+/* Fastest the tilt demand may CHANGE, in degrees per second.
+ *
+ * A clamp bounds where the heading target can go; this bounds how fast it gets
+ * there. They are different failures. The wall follower can legitimately jump
+ * its output in one cycle -- a wall ending, the active side changing, a robot
+ * arriving off-centre -- and a step in a heading setpoint asks the robot to
+ * rotate as hard as it can, which is never what centring wants.
+ *
+ * 30 -> 15, BECAUSE A RAMP COSTS TRACKING ERROR TOO. The inner loop buys
+ * STRAIGHT_YAW_KP / TURN_FF_GAIN = 4 deg/s of turn rate per degree of heading
+ * error, so following a setpoint that slews at R deg/s costs R/4 degrees of
+ * standing error. At 30 that was 7.5 degrees -- the entire linear range, spent
+ * on the ramp alone, leaving nothing for the tilt itself. The slew limit was
+ * quietly saturating the loop it exists to protect.
+ *
+ * 15 costs 3.75 degrees and crosses the wider 10 degree clamp in 0.67 s, still
+ * comfortably inside a 2.4 s cell. */
+/* 15 -> 30, because 15 was costing the correction entirely on the moves that
+ * needed it most.
+ *
+ * A pivot resets the tilt to zero, so every move that starts from rest -- which
+ * after a turn is most of them -- has to rebuild its lean from nothing. At
+ * 15 deg/s and a 33 ms sweep that is 0.5 degrees per update, so 0.4 s to reach
+ * 6 degrees, on a 1.26 s move whose first 0.5 s is spent accelerating. The
+ * lean was only ever established for the last fraction of the move.
+ *
+ * THE LOG SAYS EXACTLY THAT. Measuring the lateral error a move ended with
+ * against the one it started with: on the segments that CONTINUE at speed, and
+ * therefore keep their lean, the error moves 24 to 38 mm. On the segments that
+ * start from rest it moves 1 mm. Ten cells in a row entered at -22 and left at
+ * -22, entered at 23 and left at 23. That is not a loop correcting slowly, it
+ * is a loop that never got to act.
+ *
+ * 30 was the first attempt and the host test refused it, correctly. The ramp
+ * cost is R / (STRAIGHT_YAW_KP / TURN_FF_GAIN) degrees of standing heading
+ * error, and as a FRACTION of the inner loop's linear range that works out as
+ * R * TURN_FF_GAIN / STRAIGHT_YAW_LIMIT -- the proportional gain cancels, so
+ * no amount of retuning STRAIGHT_YAW_KP buys any of it back. At 30 against a
+ * limit of 80 it is 75% of the range, spent before the tilt asks for anything.
+ *
+ * 20 with STRAIGHT_YAW_LIMIT raised to 88 lands at 5.0 degrees of a 11.0
+ * degree range, which keeps the half-range margin the test pins. The lean then
+ * reaches 7 degrees in 0.35 s, inside the 0.5 s the robot spends accelerating
+ * anyway, so it is established by the time the robot is actually translating
+ * -- which is the whole point. That is about 13 mm of correction per
+ * from-rest cell, against the 1 mm measured. */
+#define WALL_FOLLOW_TILT_SLEW_DPS 20.0f
+
+/* ---- Urgent-error slew ----
+ *
+ * Lateral error at which the tilt may build at WALL_FOLLOW_URGENT_SLEW_DPS
+ * instead of WALL_FOLLOW_TILT_SLEW_DPS.
+ *
+ * 20 -> 8 ON 2026-09-19, AND THE REASON IS WHEN IT ARMS, NOT HOW HARD.
+ *
+ * At 20 the fast slew only engaged once the robot was already 20 mm off
+ * centre -- 57% of the 35 mm nominal clearance spent before the recovery
+ * started. A backtracking run drifted left 52 -> 37 -> 30 mm over two cells
+ * and jammed, and the error passed from ~0 to ~15 mm entirely INSIDE the slow
+ * window, so the fast slew never armed at all. By the time it would have, the
+ * robot had 15 mm of clearance left and was about to touch.
+ *
+ * The window matters because WallFollow_Reset() zeroes the tilt at every
+ * pivot. Rebuilding at 20 deg/s takes 0.5 s -- 70 mm of a 192 mm cell -- so
+ * the first third of every post-pivot cell is corrected at half authority or
+ * less, which is precisely where the drift accumulates. Arming the fast slew
+ * earlier shortens that window rather than making the correction larger; the
+ * tilt clamp is untouched.
+ *
+ * WHY 8 AND NOT LOWER. Filtered side-reading noise is about 0.94 mm sigma, so
+ * 8 mm is 8.5 sigma -- noise cannot reach it, and the fast slew stays off in
+ * a corridor the robot is holding well. It arms with 27 mm of clearance still
+ * in hand instead of 15.
+ *
+ * RAISE if the robot feels twitchy in corridors it is already tracking
+ * cleanly. LOWER only if it still fails to recover within a cell after a
+ * pivot -- but below about 4 mm this starts responding to noise. */
+#define WALL_FOLLOW_URGENT_ERR_MM 8.0f
+
+/* Slew rate used while past that threshold, deg/s.
+ *
+ * 40 reaches the 10 degree clamp in 0.25 s instead of 0.50 -- 35 mm of travel
+ * instead of 70, so the lean is up within a fifth of a cell rather than over a
+ * third of it.
+ *
+ * 40 IS THE CEILING, AND THE HOST TEST ENFORCES IT. The cascade rule applies:
+ * the inner heading loop delivers STRAIGHT_YAW_KP / TURN_FF_GAIN = 4 deg/s of
+ * turn rate per degree of heading error, so a target ramping at R deg/s costs
+ * a standing error of R/4 degrees. The loop's linear range is
+ * STRAIGHT_YAW_LIMIT / STRAIGHT_YAW_KP = 11.0 degrees, so R must stay under
+ * 44. 60 was tried first and the test refused it, correctly: at 60 the cost is
+ * 15 degrees against an 11 degree range, so the heading loop SATURATES and
+ * delivers less correction, not more. Faster is not better past this point. */
+#define WALL_FOLLOW_URGENT_SLEW_DPS 40.0f
+
+/* ---- WHY THERE IS NO REVERSE MOVE. Not a tuning choice. ----
+ *
+ * The side sensors are mounted at the VERY FRONT of the chassis. That makes
+ * them a long way from the wheel axis, and it decides which direction of
+ * travel they can be used for:
+ *
+ *   FORWARDS  to move right you tilt the nose right, and the sensors -- being
+ *             at the leading end -- swing right with it. The reading improves
+ *             immediately and keeps improving. The measurement LEADS the body,
+ *             which is free phase lead and it is what makes the cascade work.
+ *
+ *   BACKWARDS to move right you tilt the nose LEFT, and the sensors swing LEFT,
+ *             hard, because of that same long arm. The reading says the error
+ *             got worse, so the loop tilts further, and the body only catches
+ *             up later. It is non-minimum-phase, and with the sensors this far
+ *             forward the wrong-way excursion is large enough that one cell of
+ *             travel is not long enough to recover inside.
+ *
+ * Reducing the gain does not fix this, it only makes the loop too slow to do
+ * anything useful before the move ends. Measured: backing out of a dead end
+ * 15 mm off centre, the robot came out 26 mm off. The correction moved it the
+ * wrong way and the move finished inside that window.
+ *
+ * SO THE ROBOT DOES NOT REVERSE AT ALL, and there is no reverse move in the
+ * firmware. Backing out of a dead end was built and then removed. The whole
+ * point of it was to buy a cell of lateral correction before pivoting, and
+ * without a usable lateral loop it bought nothing: the pivot would have
+ * happened at exactly the offset it would have had anyway, one cell further
+ * back. Turning in place first is strictly better, because the forward move
+ * that follows DOES correct laterally.
+ *
+ * If side sensors are ever added further back on the chassis, or a rear-facing
+ * pair appears, this is the note to revisit -- the objection is entirely about
+ * where the sensors are, not about reversing. */
+
+/* WALL_FOLLOW_DRIFT_BLEED IS GONE, folded into the integral above.
+ *
+ * The drift corrector and the lateral integral were two integrators doing one
+ * job, in series, on the same error. The bleed integrated the TILT, and the
+ * tilt contained the integral, so the pair wound each other with no clamp on
+ * the outer one -- badly conditioned at best, and guaranteed to fight, since
+ * two integrators in series on one error have no way to agree on which of
+ * them owns the correction.
+ *
+ * One integrator now does both jobs, and it is the drift corrector: it
+ * integrates the lateral ERROR and is added to the heading target. The
+ * reasoning that motivated the bleed still holds exactly as written -- a tilt
+ * the robot must hold forever is the gyro being wrong, because a centred robot
+ * needs no tilt to stay centred -- it just arrives one integration earlier.
+ *
+ * See WALL_FOLLOW_KI_DEG_PER_MM_S and WALL_FOLLOW_KI_LIMIT_DEG. */
+
+/* ============ STRAIGHTLINE: FUSED HEADING PID (degrees) ================= */
+/* Used by runForwardFused(). Distinct from STRAIGHT_HEADING_*, which holds  */
+/* (left - right) encoder TICKS and is blind to wheel slip -- if a wheel     */
+/* slips, that loop steers to correct a rotation that never happened. This   */
+/* one closes on fused yaw, which is the only signal that can tell the two   */
+/* apart. Output is a differential speed correction.                          */
+
+#define STRAIGHT_YAW_KP 8.0f
+#define STRAIGHT_YAW_KI 0.0f
+#define STRAIGHT_YAW_KD 0.20f
+
+/* Steering authority clamp, motor speed units. Steering takes PRIORITY over
+ * forward speed when the two together would clip: the base speed is reduced
+ * to make room. Clipping each wheel independently instead turns a pure
+ * steering command into a net speed change, which is how the existing
+ * straight-line path loses steering authority exactly when it is fastest. */
+/* 60 -> 80 to widen the inner loop's linear range to 80/8 = 10 degrees, so
+ * WALL_FOLLOW_MAX_TILT_DEG could go to 10 without the cascade saturating.
+ * This is the "widen the inner loop first" step that note asks for.
+ *
+ * The cost is real but bounded: steering is taken out of forward speed, so at
+ * full steering the base is capped at CONTROL_MAX_SPEED - 80 = 120. Ordinary
+ * travel needs STRAIGHT_FF_GAIN * STRAIGHT_PROFILE_MAX_CMS, which at 14 cm/s
+ * is 112 and still fits alongside full steering, with 8 units to spare. Only
+ * a robot already fighting something wants more than that at the same time as
+ * maximum steering, and in that case steering is the half worth keeping.
+ *
+ * THAT SPARE IS NOW THIN, and it is the reason the cruise speed cannot simply
+ * be raised again: 15 cm/s would need 120 and leave nothing, and at that point
+ * a saturated steering command silently costs forward speed instead of the
+ * other way round. Raising CONTROL_MAX_SPEED does not buy it back -- the motor
+ * stops answering at about 130 units either way. */
+/* 80 -> 88, to pay for the faster tilt slew above.
+ *
+ * 88 is the most that coexists with ordinary travel: feedforward at cruise is
+ * STRAIGHT_FF_GAIN * STRAIGHT_PROFILE_MAX_CMS = 112 units, and 112 + 88 is
+ * exactly CONTROL_MAX_SPEED. Past this, steering and cruise cannot both be
+ * satisfied and allocate() starts taking the difference out of forward speed.
+ *
+ * It also widens the inner loop's linear range to 88/8 = 11 degrees, which
+ * keeps WALL_FOLLOW_MAX_TILT_DEG comfortably inside it. */
+/* Furthest the COMMANDED heading may sit from the maze axis, degrees.
+ *
+ * The tilt and the learned drift are clamped separately -- to
+ * WALL_FOLLOW_MAX_TILT_DEG (10) and WALL_FOLLOW_KI_LIMIT_DEG (8) -- and they
+ * ADD. Nothing bounded the sum, so the commanded heading could legally reach
+ * 18 degrees off axis, and in a logged run it did: tilt pinned at -10.00,
+ * drift at -5.69, measured yaw -108.15 against a -90.00 target. The robot
+ * drove a whole corridor crabbed, pivoted from that heading, and wedged.
+ *
+ * 12 is chosen to sit ABOVE the tilt clamp and BELOW the sum. Above, because a
+ * legitimate full-authority correction must still be expressible -- clamping
+ * at or below 10 would silently cap the tilt itself and cripple ordinary
+ * cornering. Below the sum, because 18 degrees of lean is never a correct
+ * answer in a 180 mm corridor: the lateral error justifying it exceeds the
+ * corridor width.
+ *
+ * This bounds the COMMAND, not the robot. The maze is axis-aligned, which is a
+ * fact about the world rather than an assumption about the sensors, so a
+ * command further off-axis than this is wrong whatever the readings say.
+ *
+ * RAISE only if genuine corrections are being clipped -- sl_axis_clamped says
+ * how often, and in healthy cells it should read 0. LOWER if the robot still
+ * crabs far enough to clip a wall. */
+#define STRAIGHT_MAX_AXIS_LEAN_DEG 12.0f
+
+#define STRAIGHT_YAW_LIMIT 88.0f
+#define STRAIGHT_YAW_INT_LIMIT 20.0f
+
+/* Control cycles per complete rotation of the round-robin ToF poll.
+ *
+ * MUST EQUAL TOF_SENSOR_COUNT, which straightline_controller.c asserts. One
+ * sensor is polled per control cycle, so this many cycles is exactly the
+ * period in which every sensor is refreshed once -- which is when the wall
+ * follower has genuinely new data on all three and not before.
+ *
+ * 4 -> 3 when the poll went round-robin. It used to mean "cycles between
+ * sweeps of all three", and a sweep of three cost 35 ms of I2C with the
+ * control loop stopped throughout: 10, 10, 10, 35 repeating, 53% of a move
+ * spent not running. Spread one per cycle it is the same work, the same
+ * per-sensor rate, and no cycle blocked for more than about twelve. */
+#define STRAIGHT_TOF_DIVIDER 5U
+
+/* NOMINAL seconds between WallFollow_Update() calls -- one complete rotation
+ * of the ToF poll. The real interval is MEASURED and passed in, because the
+ * slew limit and the integral are both rates and a nominal figure that the
+ * loop does not actually keep makes them lie by whatever the difference is.
+ * This survives as the floor that measurement is clamped to, and as the number
+ * the host test and these notes reason about. */
+#define WALL_FOLLOW_UPDATE_S                                                   \
+  (CONTROL_SAMPLE_TIME_S * (float)STRAIGHT_TOF_DIVIDER)
+
+/* =================== STRAIGHTLINE MOTION PROFILE ======================== */
+/* Same reasoning as the turn profile, and the same generator.             */
+/*                                                                         */
+/* The first arena run overshot an 18 cm cell by 2.07 cm and then TIMED    */
+/* OUT trying to come back -- the distance loop was still chasing a step   */
+/* setpoint, so it ran at the stiction floor until it was already past.    */
+/* A profile decelerates on a plan instead of on saturation decay.         */
+
+/* MEASURED from a per-cycle trace, not guessed. The robot sustains 20.1 cm/s
+ * with the command saturated at 200, and reaches it in about 600 ms.
+ *
+ * The first values here were 25 cm/s and 50 cm/s^2, and they failed exactly
+ * the way the turn profile failed at 200 deg/s: the command sat at 200 for a
+ * full second, the reference ran 7.75 cm ahead, and the profile declared the
+ * move over while the robot was still at 14.5 cm doing full speed. It then
+ * coasted to 20.2 and could not reverse back.
+ *
+ * 10 cm/s leaves headroom: feedforward alone is ~80 units at cruise, so ~120
+ * remain for the feedback to correct with before the command clips.
+ *
+ * RAISED 10 -> 14 once the robot stopped braking at every cell. The ceiling
+ * here has never been the top speed -- it is the 130-unit knee where this
+ * motor stops responding to a larger command, because above it the feedback
+ * has no authority left to correct with. Feedforward at 14 cm/s is 112 units,
+ * which is still below that knee, and 88 units of the 200-unit budget remain
+ * for the loop. 16 cm/s would put the feedforward AT the knee and is the
+ * point past which this drivetrain needs gearing rather than tuning.
+ *
+ * The acceleration went with it, so the ramp stays the same 0.5 s it always
+ * was and the braking distance only grows from 2.5 cm to 3.5 cm -- which
+ * matters, because that distance is what MAZE_CONTINUOUS_CELLS has to give
+ * back before every turn. */
+#define STRAIGHT_PROFILE_MAX_CMS 14.0f
+#define STRAIGHT_PROFILE_ACCEL_CMS2 28.0f
+
+/* WHY SO SLOW: this robot's braking distance, not its top speed, sets the
+ * cell time. Measured coasting from 18.7 cm/s to rest took 8.5 cm -- half a
+ * maze cell -- and it cannot reverse out of an overshoot because that needs
+ * breaking static friction from a standstill.
+ *
+ * So the plan must be one the robot can actually stop from. At 10 cm/s and
+ * 20 cm/s^2 the braking ramp is 2.5 cm, which is both what the profile
+ * budgets and what the robot physically does. 18 cm then takes 2.3 s.
+ *
+ * Faster is available only after the stopping problem is solved properly,
+ * either with real braking authority or by not requiring the robot to stop
+ * at every cell. THE SECOND OF THOSE IS NOW DONE -- see
+ * MAZE_CONTINUOUS_CELLS below -- which is what paid for 10 -> 14. The
+ * braking distance is still the binding constraint; it is simply no longer
+ * paid twice per cell. */
+
+/* Motor speed units per cm/s.
+ *
+ * Lowered 9.9 -> 8.0. The 9.9 came from dividing a SATURATED command by the
+ * speed it produced, which measures the top of the curve rather than its
+ * slope -- this motor is already speed-limited by about 130 units, so 139 and
+ * 200 both give ~19 cm/s. Using that as a gain made the feedforward command
+ * 139 units for a requested 14 cm/s and the robot ran 34% fast.
+ *
+ * The feedforward sets the speed almost on its own here: at cruise it was 139
+ * of a 133 total command, with the feedback trimming by only -5. So this gain
+ * IS the cruise speed, and getting it wrong is not something the loop
+ * quietly absorbs. */
+#define STRAIGHT_FF_GAIN 8.0f
+
+/* ================= CONTINUOUS (CHAINED) CELL MOTION ===================== */
+/*                                                                          */
+/* Whether the robot is allowed to cross a cell boundary without stopping.  */
+/*                                                                          */
+/* 0 restores the old behaviour exactly: every forward move accelerates from */
+/* rest, decelerates to rest at the cell centre, settles, and reads its      */
+/* walls standing still. Keep this switch -- it is the rollback, and the two */
+/* paths are meant to stay comparable run for run.                          */
+
+/* WHERE THE TIME ACTUALLY WENT, measured from a 51-cell run:
+ *
+ *     driving one cell        2.4 s     (0.5 s accelerating, 0.5 s braking)
+ *     NAV_SETTLE_MS           0.8 s     standing still on purpose
+ *     five-vote wall read     0.3 s     standing still to read
+ *                            -------
+ *     one cell                3.5 s
+ *
+ * So a third of every cell was spent stopped, and another 40% of the driving
+ * was ramping to and from a speed it held for barely a second. None of that
+ * is the robot going anywhere.
+ *
+ * Chained, a cell is one cell pitch at cruise: 19.2 / 14 = 1.37 s. The walls
+ * are read WHILE MOVING, from the same free-running sensors the wall follower
+ * already uses, so the settle and the vote disappear rather than being made
+ * faster.
+ *
+ * ---------------------------------------------------------------------------
+ * HOW A BLOCKING CONTROLLER RUNS CONTINUOUSLY
+ * ---------------------------------------------------------------------------
+ * The solver is an ordinary blocking loop: it asks for the walls, decides, and
+ * calls for a move. It cannot be asked to decide in advance, because what it
+ * decides depends on walls the robot has not reached yet.
+ *
+ * So the move ENDS EARLY instead. A chained forward stops driving
+ * CELL_DECISION_OFFSET_CM short of the cell centre and returns with the robot
+ * still rolling at cruise. That point is chosen as the last place from which
+ * the robot can still stop AT the centre -- so whatever the solver decides
+ * next is still available:
+ *
+ *   another forward   the next segment simply continues; nothing braked
+ *   a turn            the remaining offset is driven and the robot stops
+ *                     at the centre, exactly as it always did
+ *
+ * Between the two the motors hold their last command open-loop for as long as
+ * the solver takes to think. That is about a millisecond in the exploration
+ * phases, and CELL_DECISION_MARGIN_CM below is what pays for it. */
+#define MAZE_CONTINUOUS_CELLS 1
+
+/* The speed carried across a decision point. The same as the profile's cruise:
+ * a chained segment has no ramps at all, so this is the speed it both starts
+ * and ends at, and any other value would mean accelerating in the middle of a
+ * corridor for no reason. */
+#define CELL_CHAIN_SPEED_CMS STRAIGHT_PROFILE_MAX_CMS
+
+/* Slack beyond the pure braking distance, cm.
+ *
+ * IT BUYS TWO THINGS AND BOTH ARE REAL. The solver's think-time, during which
+ * the motors are holding their last command with nothing watching -- 1.5 cm is
+ * 107 ms at cruise, against roughly 1 ms of flood fill. And the ordinary lag
+ * between the reference and the robot, which is a centimetre or two on a move
+ * that is going well and more on one that is not.
+ *
+ * Too small and a turn arrives with the robot already past the point it can
+ * stop at, which it cannot fix: this chassis has no reverse. Too large and the
+ * in-flight wall window shrinks from the far end, because the segment stops
+ * before the side sensors have had long enough in the next cell. */
+/* 1.5 -> 3.0. The margin is no longer only slack: the stop segment now
+ * re-aligns against the front wall over it, and it cannot do that without room
+ * to decelerate into. Braking from cruise takes 3.5 cm, so a 5.0 cm stop
+ * segment left no slack at all and the retarget refused itself every time --
+ * which is why front-wall stops spread 16 to 83 mm against a 75 mm target.
+ *
+ * The cost is the in-flight wall window, which shrinks from 8.6 cm of travel
+ * to 7.1 -- still around 13 round-robin rotations, comfortably above
+ * WALL_FLIGHT_MIN_SAMPLES. */
+#define CELL_DECISION_MARGIN_CM 3.0f
+
+/* Slack on the chained front-wall guard, mm.
+ *
+ * The guard projects the front reading to where this segment will END and
+ * forces a rest exit if the wall would be inside the chained target. A wall
+ * exactly TWO cells ahead projects to exactly that target -- the boundary --
+ * and such a segment can safely keep its cruise exit, because the next segment
+ * re-evaluates one cell closer with a better reading and still inherits the
+ * full braking offset.
+ *
+ * Without this margin the boundary case decides on floating-point equality,
+ * and a wall anywhere in sight two cells out costs a full stop. That is most
+ * of a maze, and chaining would be off in all but name.
+ *
+ * RAISE if the robot stops more often than there are walls ahead of it
+ * (tm_chain_wall_stops climbing far past the number of wall-ended cells).
+ * LOWER if it still fails to stop for a wall one cell ahead. */
+#define CELL_CHAIN_WALL_MARGIN_MM 15.0f
+
+/* How far short of the cell centre a chained forward ends, cm.
+ *
+ * DERIVED, NOT CONFIGURED. It is the distance needed to brake from cruise at
+ * the profile's own acceleration, plus the margin above. Writing it as a
+ * number would let it disagree with the profile the moment either speed
+ * changed, and the failure would be a robot that cannot stop in time for a
+ * turn -- which looks like a steering fault, not an arithmetic one. */
+#define CELL_DECISION_OFFSET_CM                                                \
+  ((CELL_CHAIN_SPEED_CMS * CELL_CHAIN_SPEED_CMS) /                             \
+       (2.0f * STRAIGHT_PROFILE_ACCEL_CMS2) +                                  \
+   CELL_DECISION_MARGIN_CM)
+
+/* ---- READING WALLS WHILE MOVING ----
+ *
+ * The stationary read votes five independent sweeps at a cell centre. Moving,
+ * the same sensors are sampled once per complete round-robin rotation over the
+ * stretch of the move where they are looking at the cell being entered, and
+ * the votes are counted the same way: strict majority, with an invalid reading
+ * voting "no wall" exactly as it does standing still.
+ *
+ * THE WINDOW IS SET BY GEOMETRY. The side sensors lead the axle by
+ * TOF_SIDE_AHEAD_CM, so they cross into the next cell well before the body
+ * does, and they are still inside it when the segment ends. That gives
+ *
+ *     NAV_CELL_CM/2 + TOF_SIDE_AHEAD_CM - CELL_DECISION_OFFSET_CM
+ *
+ * of travel to sample over -- about 8.6 cm, or 15 rotations at cruise. The
+ * front sensor is compensated for the distance still to run, so a wall is
+ * declared on what it WILL read at the cell centre rather than on what it
+ * reads from further back. */
+
+/* Rotations that must land inside the window before the in-flight reading is
+ * trusted. Below this the move falls back to stopping and voting, which is
+ * slow and correct -- the one thing that must never happen is a confident
+ * answer from two samples. */
+#define WALL_FLIGHT_MIN_SAMPLES 5U
+
+/* ------------------- FRONT-WALL ALIGNMENT (longitudinal) ---------------- */
+/*                                                                          */
+/* The side walls close the loop on the robot's SIDEWAYS position. Nothing  */
+/* closed it on the FORWARD position until now -- that was odometry only,  */
+/* and odometry has no opinion about where the cell boundaries are.         */
+/*                                                                          */
+/* WHY THAT MATTERS MORE THAN IT SOUNDS. A pivot swaps the two axes: after  */
+/* a 90 degree turn, the error you had along the direction of travel        */
+/* becomes the error across it, which is what decides whether the chassis   */
+/* clears the walls. So an uncontrolled forward axis shows up one move      */
+/* later as a clearance problem, and that is why back-to-back turns were    */
+/* so much worse than corridors. Measured over one 24-cell run:             */
+/*                                                                          */
+/*    off-centre in the corridor stretch        worst  6.5 mm               */
+/*    off-centre in the turn-dense stretch      worst 23.0 mm               */
+/*    front-wall gap wherever a wall was ahead  50 to 110 mm, spread 60     */
+/*                                                                          */
+/* That 60 mm of scatter in where the robot stops is the same number as the */
+/* lateral error that follows a turn. It is one quantity seen from two      */
+/* directions, and this section is what removes it.                         */
+
+/* What the FRONT sensor reads with the robot at a cell centre and a wall on
+ * the far side of that cell.
+ *
+ * A MEASURED READING, not a true distance -- same convention as the
+ * WALL_FOLLOW_SETPOINT pair, and for the same reason: if the target is
+ * whatever the sensor says when the robot is where you want it, the sensor's
+ * close-range over-read cancels exactly and TOF_OFFSET_FRONT_MM stays at 0.
+ *
+ * MEASURED 2026-09-12: 51.3 mm (sd 0.7 over 198 sweeps), robot parked at the
+ * centre of a dead-end cell. Corroborated by the geometry rather than resting
+ * on the by-hand placement alone: the cell is square, so the front wall is the
+ * same distance from the centre as the side walls, and front came out 0.8 mm
+ * from span/2 = 52.2.
+ *
+ * IT WAS 75, AND THAT WAS 24 mm TOO LARGE. Aiming at a reading larger than the
+ * centre value stops the robot SHORT of the centre, and the alignment was
+ * therefore pulling every walled stop about 2.4 cm back from where odometry
+ * had correctly planned it. That shows up directly in the telemetry as the
+ * alignment's own correction: delta = (centre - target)/10 = -2.4 cm, against
+ * a measured median demand of -3.36 cm over 32 firings. The alignment was
+ * making the forward position worse, not better.
+ *
+ * ---------------------------------------------------------------------------
+ * 68 -> 80 ON 2026-09-18, for PIVOT CLEARANCE, and it is a TRADE.
+ * ---------------------------------------------------------------------------
+ * The robot was reaching too close to a front wall and contacting it on the
+ * turn. The chassis is 110 x 110 mm, so its half-diagonal -- the radius it
+ * sweeps when pivoting in place -- is 77.8 mm, and the cell centre is only
+ * 90.0 mm from the wall face (pitch/2 - wall/2 = 96 - 6).
+ *
+ *     clearance at a PERFECTLY placed pivot = 90.0 - 77.8 = 12.2 mm
+ *
+ * That 12.2 mm is the WHOLE budget and it is shared: a pivot converts forward
+ * error into lateral error almost one for one, so the same millimetres have to
+ * absorb both. Measured lateral errors on this robot have run 23-53 mm, which
+ * is several times the budget. This chassis genuinely cannot pivot at a cell
+ * centre with any meaningful position error -- the geometry, not the tuning,
+ * is what is tight.
+ *
+ * The robot drives forward until the front sensor READS this value, so a
+ * LARGER number stops it FURTHER from the wall:
+ *
+ *     target   pivot centre      clearance at the pivot
+ *      51.3    at cell centre        12.2 mm
+ *      68      17 mm short           28.9 mm     (previous)
+ *      80      29 mm short           40.9 mm     (now)
+ *
+ * WHAT IT COSTS. Stopping 29 mm short of the cell centre is a forward
+ * positioning error that the next move inherits -- exactly the error this
+ * whole section was written to remove. It buys clearance with odometry
+ * accuracy, which is why it is a trade and not a fix.
+ *
+ * THE REAL FIX IS NOT HERE. At 68 the pivot already cleared by 28.9 mm, so
+ * arriving close enough to touch means either (a) the alignment never fired
+ * and the stop was pure odometry -- check sl_align_applied and
+ * sl_align_reason -- or (b) lateral error consumed the shared budget, which
+ * points at the wall follower losing its reference in the last stretch, where
+ * a cell with a front wall often has no side walls. Those want opposite
+ * fixes. Read the telemetry before tuning this further; backing off is a
+ * holding measure, and past about 85 the robot stops so far short that the
+ * following move's odometry error becomes the larger problem.
+ */
+#define WALL_FRONT_ALIGN_MM 71.0f
+
+/* Only align when the front reading is at or below this.
+ *
+ * Sits deliberately between the two cases. Starting a move into a cell that
+ * HAS a far wall, the sensor reads about 87 + 192 = 279 mm. Into a cell that
+ * does not, the nearest wall is another cell further and reads about 471. At
+ * 350 the first engages and the second does not, with wide margin either
+ * side, so no extra logic is needed to decide whether the wall is in the cell
+ * the robot is entering. */
+/* A corroboration gate on the front reading (two consecutive samples within
+ * 12 mm before the alignment may commit) was added and REVERTED on
+ * 2026-09-19. It killed the alignment outright -- sl_align_applied was 0 for a
+ * whole run and the robot drove into front walls. The reasoning and the
+ * arithmetic that defeats it are recorded at the call site in
+ * straightline_controller.c and pinned by wall_follow_host_test.c. */
+
+
+#define WALL_FRONT_ALIGN_RANGE_MM 350U
+
+/* Wall distance the alignment would PREFER to fire at, mm.
+ *
+ * THE OLD WINDOW FIRED AT THE WORST POSSIBLE MOMENT. It looked only during the
+ * first quarter of the move, which is exactly when the front wall is furthest
+ * away and its reading least accurate. Five percent of 350 mm is 17 mm, and
+ * that error goes straight into the endpoint.
+ *
+ * Worse, the two conditions fought: the window is at the start of the move and
+ * the wall comes into range at the end of it. One measured move began with the
+ * wall at 407 mm and the window shut at 5.1 cm of travel with the wall still
+ * 356 mm off -- it missed by six millimetres of sensor reach. About half the
+ * forward moves in that run could never align at all.
+ *
+ * So the alignment now waits for a reading worth using, and falls back on a
+ * distant one only when it is running out of room.
+ *
+ * EXPRESSED AS A MARGIN ABOVE THE TARGET, not as an absolute distance, and
+ * that matters as soon as the target moves. It was 200 mm against a 75 mm
+ * target, so 125 mm of margin, and a chained segment ends a braking offset
+ * short of the cell centre -- which puts its target at 125 mm and would leave
+ * a margin of 75.
+ *
+ * The cost of getting that wrong is the whole feature. The window in which the
+ * alignment may fire is bounded BELOW by the room it needs to stop and ABOVE
+ * by this; pinning the upper end to the sensor while the lower end followed
+ * the speed narrowed it from 85 mm of travel to 25, and the alignment fired
+ * once in a 19-cell run.
+ *
+ * 125 mm of margin is comfortably inside the sensor's accurate band and is
+ * reached about halfway through a cell. */
+#define WALL_FRONT_ALIGN_BEST_MARGIN_MM 125.0f
+
+/* Margin on top of the braking distance before the alignment gives up, cm.
+ *
+ * The real limit on firing late is physical, not a fraction of the move: the
+ * robot must still be able to decelerate to the new endpoint from the speed it
+ * is currently doing. That distance is v^2 / (2 * accel), which the code
+ * computes from the live reference velocity rather than assuming cruise. This
+ * is the cushion on top of it, so the retarget never lands on a profile with
+ * nothing left but a maximum-effort stop. */
+#define WALL_FRONT_ALIGN_ROOM_CM 1.5f
+
+/* Largest retarget the alignment may apply, in cm.
+ *
+ * A second guard behind the range test. A genuine correction is the size of
+ * the odometry scatter, a few cm at most; anything larger means the reading
+ * was not the wall this move is aiming at, or the sensor is lying. Refusing
+ * to act on it leaves the move on plain odometry, which is where it started,
+ * rather than steering it somewhere confidently wrong. */
+#define WALL_FRONT_ALIGN_MAX_CM 4.0f
+
+/* ------------------------- BREAKAWAY PULSE ------------------------------ */
+/*                                                                          */
+/* The oldest unsolved problem on this robot, finally addressed.            */
+/*                                                                          */
+/* Static friction here needs more than 140 command units to break. Once    */
+/* moving, far less sustains it. A proportional controller cannot deliver   */
+/* that near the target, because its output shrinks with exactly the error  */
+/* it is trying to close -- so a move that comes to rest slightly short can */
+/* never restart, and simply waits out CONTROL_MOVE_TIMEOUT_MS.             */
+/*                                                                          */
+/* Caught red-handed: a move froze at 17.40 of 19.20 cm with the command    */
+/* sitting at 36.0 units, which is exactly STRAIGHT_DIST_KP * 1.80 cm. It   */
+/* held that for five and a half seconds and went nowhere. The stiction     */
+/* floor did not apply, because it is gated on reference velocity and the   */
+/* profile had already finished -- and at 45 units it would not have helped */
+/* anyway.                                                                  */
+/*                                                                          */
+/* AMPLITUDE BREAKS STATIC FRICTION, NOT PATIENCE. An integrator ramping    */
+/* through a range where the wheel cannot move just arrives late. A short   */
+/* full-scale pulse gets the wheel over the hump, and the ordinary feedback */
+/* then has only kinetic friction to fight.                                 */
+
+/* Travel below this rate (cm/s) counts as "not moving" for the detector. */
+#define STRAIGHT_BREAKAWAY_RATE_CMS 0.4f
+
+/* Consecutive cycles the stall must hold before a pulse is fired. At
+ * CONTROL_SAMPLE_TIME_S this is a dwell, and it is what stops the detector
+ * arming during the ordinary deceleration into the target. */
+#define STRAIGHT_BREAKAWAY_CYCLES 12U
+
+/* How long a pulse lasts, in ms. Long enough to break the wheel free, short
+ * enough that it adds little momentum -- this is a nudge, not a move. Too
+ * long and the robot lurches past the target and has to come back, which on
+ * this drivetrain is the same problem mirrored. */
+#define STRAIGHT_BREAKAWAY_MS 40U
+
+/* Most pulses one move may fire. A move that needs several is not suffering
+ * from stiction, it is jammed against something, and hammering it at full
+ * scale will not help. Let the timeout report the failure instead. */
+#define STRAIGHT_BREAKAWAY_MAX 3U
+
+/* ---- GIVING UP ON A MOVE THAT IS NOT HAPPENING ----
+ *
+ * The breakaway above only arms once the profile has FINISHED, because while
+ * it is still running a slow patch is the controller's problem to solve. That
+ * leaves the case it was never written for: a robot wedged against a wall in
+ * the MIDDLE of a move. One was measured doing 3.8 cm/s against a profile
+ * asking for 10, with the command pinned between 155 and 176 of 200, steering
+ * clipped on 124 cycles out of 200, and the reference running 9.3 cm ahead. It
+ * ground like that for over two seconds and then the run ended looking like a
+ * steering failure, which it was not.
+ *
+ * Grinding costs more than the time. The lateral integral keeps learning from
+ * an error it cannot fix, the reference sails away so the front-wall alignment
+ * never gets its chance, and the log fills with symptoms of a problem whose
+ * cause was mechanical.
+ *
+ * So: below this rate, while the command is above the stiction floor and
+ * therefore genuinely trying, the robot is not moving. */
+/* Below this speed a move may be declared finished, cm/s.
+ *
+ * FINISHED MEANS CLOSE ENOUGH *AND* STOPPED. The completion test used to check
+ * position only, so a robot crossing into the tolerance band at full speed
+ * called the move done and then carried on for however far it took to stop.
+ * Measured: a median 11.2 cm/s against a profile asking for 10, exiting a
+ * 1.5 cm band, with front-wall stops landing 22 to 25 mm past target.
+ *
+ * That would be a rounding error if the robot only drove straight. It is not.
+ * A 90 degree turn converts longitudinal error into LATERAL error almost one
+ * for one: a cell that finished 22 mm off was followed by a move beginning
+ * 17 mm off centre, where every other entry error in that run was inside 7 mm.
+ *
+ * 2 cm/s is a fifth of cruise and well above the noise on a differenced
+ * encoder reading. The command is already zero inside the tolerance band, so
+ * reaching it only takes the time to coast. */
+#define STRAIGHT_SETTLE_SPEED_CMS 2.0f
+
+#define STRAIGHT_STALL_RATE_CMS 1.5f
+
+/* How long that may persist before the move is abandoned, ms.
+ *
+ * Generous on purpose. A move legitimately sits below the rate threshold while
+ * accelerating away from rest, and again during each breakaway pulse, so this
+ * has to be long enough that neither trips it. 1200 ms is several times either
+ * and still less than half the two seconds the wedged run spent grinding. */
+#define STRAIGHT_STALL_ABORT_MS 1200U
+
+/* ---- "Too slow to finish", as distinct from "not moving" ----
+ *
+ * STRAIGHT_STALL_RATE_CMS catches a robot that has stopped. It does not catch
+ * one that is WEDGED AND CREEPING, which is what a robot jammed on a corner or
+ * a post actually does -- it does not stop dead, it inches. Measured on a run
+ * that reached the goal and failed on the way back: 140 mm in 9.04 s, or
+ * 1.55 cm/s against a 1.50 threshold. It missed by five hundredths and burned
+ * the whole CONTROL_MOVE_TIMEOUT_MS, with no ToF sensor showing anything close
+ * (front 311, left 220, right 94 mm) because the obstruction was not in any
+ * beam.
+ *
+ * The additional test asks whether the move can still COMPLETE: is the
+ * measured speed below what is needed to cover the remaining distance in the
+ * time left before the timeout. That requirement tightens by itself as the
+ * deadline approaches, so it needs no second threshold to keep in step with
+ * the first. */
+
+/* Safety factor on the required rate. Below 1.0 the move is failed only once
+ * it is comfortably behind, not merely marginally so. */
+#define STRAIGHT_PROGRESS_MARGIN 0.5f
+
+/* Ignore the progress test in the last stretch before the timeout, ms. As
+ * left_ms tends to zero the required rate tends to infinity, which would fail
+ * every move in its final moments regardless of how well it was going. */
+#define STRAIGHT_PROGRESS_MIN_MS 1500U
+
+/* And never apply it above this speed, cm/s. A robot doing better than this is
+ * making real progress whatever the arithmetic says about the deadline -- the
+ * test exists for creeping, not for a move that is merely behind schedule.
+ * Sits between the creep that was missed (1.55) and the deliberate slow
+ * approach at the end of a profile. */
+#define STRAIGHT_PROGRESS_MAX_CMS 4.0f
+
+/* ---------------------- Noise filtering (tof_filter.c) ------------------- */
+
+/* EMA smoothing factor, 0..1. This is the speed/smoothness trade-off:
+ *
+ *   1.0  = filter disabled, output follows the median stage exactly
+ *   0.3  = light smoothing, fast response
+ *   0.2  = the default here
+ *   0.05 = very smooth but sluggish
+ *
+ * Roughly, the output reaches ~63% of a step after 1/alpha samples, so 0.2 is
+ * about 5 samples -- at TOF_INTER_MEASUREMENT_MS = 40 ms that is ~200 ms to
+ * settle. Note the jump detector below bypasses this entirely for large steps,
+ * so this constant governs how hard SMALL jitter is smoothed, not how fast the
+ * robot notices a wall appearing or disappearing.
+ *
+ * LOWER if readings are still too noisy to steer on.
+ * RAISE if wall-following feels laggy or starts to oscillate. */
+#define TOF_FILTER_EMA_ALPHA 0.2f
+
+/* A median-stage change at least this large (mm) is treated as a real step
+ * and the filter snaps to it instead of easing across it.
+ *
+ * Must sit ABOVE the noise spread and BELOW the smallest genuine transition.
+ * Measured spread on this robot is ~7 mm; a side wall ending changes the
+ * reading by 100 mm or more, so 30 mm sits comfortably between the two.
+ *
+ * LOWER and ordinary jitter starts tripping it, defeating the smoothing
+ * (watch tm_tof_jumps climbing while the robot sits still -- it should not
+ * move at all when nothing is moving).
+ * RAISE and real wall transitions get smoothed into a slow ramp. */
+#define TOF_FILTER_JUMP_THRESHOLD_MM 30U
+
+/* ------------------------- Per-sensor offsets ---------------------------- */
+
+/* Signed millimetres ADDED to each sensor's raw reading before filtering.
+ *
+ * This corrects BIAS -- a constant over- or under-read -- which no amount of
+ * filtering can fix: averaging biased samples just produces a stable wrong
+ * number. Bias comes from cover glass, mounting depth and the module's own
+ * calibration, so it is per-sensor and must be measured per-sensor.
+ *
+ * HOW TO MEASURE: run TEST_TOF_SINGLE, put a flat target at a known distance
+ * (80-100 mm is representative for maze walls), read the FILTERED value once
+ * it settles, and set the offset to (true - measured). If the sensor reads
+ * 86 mm at a true 80 mm, the offset is -6.
+ *
+ * Measure at a distance you actually care about. VL53L0X error is not
+ * perfectly constant with range, so a single offset is a linear fix to a
+ * mildly nonlinear problem -- calibrating at 80 mm and driving at 80 mm is
+ * accurate, calibrating at 500 mm and driving at 80 mm is not. */
+/* MEASURED 2026-09-11 against a ruler, robot stationary, 200 samples each.
+ *
+ *   sensor   true    reads   error
+ *   front    60 mm   86.4    +26.4
+ *   left     36 mm   62.7    +26.7
+ *   right    35 mm   64.2    +29.2
+ *
+ * Three independent sensors agreeing to within 3 mm at the distances the
+ * robot actually operates at.
+ *
+ * !! LEFT AT 0 ON PURPOSE -- the measurement is recorded here, not applied. !!
+ * The values that would cancel the error are front -26, left -27, right -29.
+ * They are held back until the rest of the robot needs them, so that ToF
+ * readings stay raw while other subsystems are being brought up and there is
+ * one less transform between sensor and number when something looks wrong.
+ *
+ * TWO HYPOTHESES WERE TESTED AND KILLED before landing here, both cheaper to
+ * re-read than to re-derive:
+ *
+ *   ANGLED MOUNTING was proposed because the side sensors read 1.8x the ruler
+ *   distance at 35 mm, implying a ~55 deg tilt. Dead: a 55 deg tilt predicts
+ *   523 mm where the left sensor actually read 319 mm at a true 300 mm. The
+ *   sensors are perpendicular.
+ *
+ *   A PERFECTLY CONSTANT OFFSET is close but not exact. At longer range the
+ *   over-read shrinks (left +19.0 at 300 mm, right +8.4 at 150 mm), which is
+ *   the VL53L0X's known near-field behaviour rather than a fault.
+ *
+ * WHEN THEY ARE APPLIED, they will be tuned for SHORT RANGE and will make
+ * mid-range WORSE -- the right sensor's 150 mm reading goes from +8 to about
+ * -21. That is the correct trade for a micromouse: side walls sit ~35 mm away
+ * and a front wall matters at 60-90 mm when deciding to stop. Nothing needs
+ * accuracy at 150 mm. Detecting a wall two cells ahead is a binary call with
+ * hundreds of mm of margin, so a 20 mm error there changes nothing.
+ *
+ * NOTE the left/right pair also carries the differential trim. Centring
+ * between walls steers on (left - right), so the common-mode over-read
+ * cancels and only the 2.5 mm mismatch between the two sensors matters. The
+ * -27/-29 split removes it: at the measured maze position they correct to
+ * 35.7 and 35.2 against a true 36 and 35.
+ *
+ * If absolute short-range accuracy is ever genuinely needed, the real fix is
+ * ST's VL53L0X_PerformOffsetCalibration() and XTalk calibration, which
+ * ToF_InitSensor() does not currently call. */
+#define TOF_OFFSET_FRONT_MM 0 /* measured: -26 */
+#define TOF_OFFSET_LEFT_MM 0  /* measured: -27 */
+#define TOF_OFFSET_RIGHT_MM 0 /* measured: -29 */
+
+/* The 45-degree pair, NOT YET MEASURED. Held at 0, which is the same value the
+ * three characterised sensors run at, so the pipeline is uniform.
+ *
+ * Do not assume they share the other three sensors' roughly +27 mm bias. That
+ * figure was measured against a flat surface square to the sensor; these look
+ * at a wall at 45 degrees, so the returned signal is weaker and spread over a
+ * longer path, and the near-field over-read the VL53L0X shows is a function of
+ * signal strength. Measure them the same way the others were measured -- a
+ * known distance along the sensor's own axis, 200 samples, robot stationary --
+ * rather than inferring them. TEST_TOF_ANGLED is there to do it. */
+#define TOF_OFFSET_LEFT_45_MM 0  /* not yet measured */
+#define TOF_OFFSET_RIGHT_45_MM 0 /* not yet measured */
+
+/* ---------------------- Angled sensor geometry -------------------------- */
+
+/* Mounting of the 45-degree pair, recorded so a future consumer does not have
+ * to re-derive it from the CAD. Nothing reads these yet.
+ *
+ * Each angled sensor is TOF_ANGLED_INBOARD_MM inboard of the side sensor on
+ * its own side: the left-angled one that far to the RIGHT of TOF_LEFT, the
+ * right-angled one that far to the LEFT of TOF_RIGHT. There was no room to put
+ * them on the same lateral line, so the five sensors are NOT concentric.
+ *
+ * !! THIS IS THE PART THAT WILL CATCH SOMEBODY OUT !!
+ * The tempting identity -- "angled_reading * cos(45) should equal the side
+ * reading" -- is FALSE here. It assumes both sensors share an origin, and
+ * these are 15 mm apart along the very axis the side sensor measures. Using it
+ * to cross-check or fuse the two produces an error of order the offset, which
+ * at maze wall distances (~35 mm) is enormous. Any real fusion has to put both
+ * readings into a common robot frame first, using the offset AND the rotation.
+ *
+ * Angles are measured from the robot's forward axis, positive anticlockwise,
+ * matching the yaw convention in section 4 of CLAUDE.md. So the left-angled
+ * sensor is +45 (north-west) and the right-angled one -45 (north-east). */
+#define TOF_ANGLED_INBOARD_MM 15.0f
+#define TOF_ANGLED_LEFT_BEARING_DEG 45.0f
+#define TOF_ANGLED_RIGHT_BEARING_DEG (-45.0f)
+
+/* Lateral separation of the two SIDE sensors, mm. Measured on the chassis. */
+#define TOF_SIDE_SPAN_MM 110.0f
+
+/* ================== ANGLED-SENSOR CENTRING (the 45 pair) ================= */
+/*
+ * WHY THIS EXISTS -- the side pair goes blind exactly when it is needed most.
+ *
+ * In a standard 180 mm corridor with the side sensors 110 mm apart, a perfectly
+ * centred robot leaves (180-110)/2 = 35 mm of air on each side. The VL53L0X
+ * stops reading reliably below about 30 mm. So the geometry clears the
+ * sensor's floor by FIVE MILLIMETRES when everything is perfect, and the
+ * margin is gone after 10 mm of lateral error:
+ *
+ *     lateral error   near side sensor   angled pair
+ *          0 mm            35 mm          70.7 / 70.7   both fine
+ *         10 mm            25 mm  BLIND   84.9 / 56.6   fine
+ *         20 mm            15 mm  BLIND   99.0 / 42.4   fine
+ *         30 mm             5 mm  BLIND  113.1 / 28.3   right one marginal
+ *
+ * That is the observed failure: after a corner the robot enters a corridor
+ * off-centre, the near sensor is already inside its dead zone, the follower
+ * cannot measure the error it most needs to correct, and the offset persists
+ * into the next cell and accumulates until the robot touches a wall.
+ *
+ * The angled pair does not have this problem. Looking diagonally, the path to
+ * the wall is longer by 1/cos(45) = 1.414, so a centred robot reads 70.7 mm --
+ * more than twice the floor -- and the reading stays usable out to 30 mm of
+ * error, by which point the robot is nearly touching.
+ *
+ * GEOMETRY. Robot frame, x positive to the right, origin on the centreline.
+ * The angled sensors sit TOF_ANGLED_INBOARD_MM inboard of the side sensors, so
+ * at x = -40 and +40 for a 110 mm span. Each looks 45 degrees outward-forward.
+ * For a robot displaced e to the right in a corridor of inner width W:
+ *
+ *     L45 = (W/2 + x_l45 + e) / cos(45)      x_l45 = -(SPAN/2 - INBOARD)
+ *     R45 = (W/2 - x_r45 - e) / cos(45)      x_r45 = +(SPAN/2 - INBOARD)
+ *
+ * Subtracting kills W, both mounting offsets and any common-mode bias:
+ *
+ *     (L45 - R45) / 2 = e / cos(45) = e * 1.414
+ *
+ * So the difference is a direct, 1.41x-amplified measure of lateral error that
+ * needs NO knowledge of corridor width and NO per-sensor offset calibration --
+ * which is why this works today with TOF_OFFSET_*_45_MM still at 0. It is the
+ * same argument that makes the side pair's difference trustworthy, with a
+ * better lever arm and far more headroom above the sensor floor.
+ *
+ * !! THE 1.414 IS THE SENSITIVITY, NOT A UNIT CONVERSION !!
+ * (L45-R45)/2 is in "mm of diagonal path", and dividing by 1.414 converts it
+ * to mm of lateral offset. TOF_ANGLED_LATERAL_GAIN does that, so the error
+ * this produces is in the same millimetres as the side pair's and the existing
+ * WALL_FOLLOW_KP_DEG_PER_MM applies unchanged. Drop the division and the gain
+ * is silently 41% too high.
+ */
+
+/* cos(45). The lateral error is (L45-R45)/2 divided by this. */
+#define TOF_ANGLED_COS45 0.70710678f
+
+/* Multiply (L45-R45)/2 by this to get lateral error in mm.
+ * = cos(45), i.e. divide by 1.414. */
+#define TOF_ANGLED_LATERAL_GAIN TOF_ANGLED_COS45
+
+/* What each angled sensor reads with the robot centred and square, mm.
+ *   (CORRIDOR/2 - (SPAN/2 - INBOARD)) / cos(45)
+ *   = (90 - 40) / 0.7071 = 70.7 mm
+ * Used only for the plausibility window below; the centring itself never needs
+ * it, because the difference cancels it. */
+/* !! READING-SPACE, like WALL_FOLLOW_SETPOINT_*. Was 70.7 (true geometry),
+ * which was a bug: the angled sensors carry the same ~17 mm near-field
+ * over-read as the side pair, so a centred robot READS about 87.7, not 70.7.
+ * Every window below is derived from this, and with the true value they sat
+ * about 17 mm low -- which is why the pair was being rejected and wf_side
+ * never showed ANGLED in any run. */
+#define TOF_ANGLED_NOMINAL_MM 87.7f
+
+/* Plausibility window on a single angled reading, mm.
+ *
+ * Rejects a beam that missed the near wall and found something further away --
+ * through a gap, or down an opening. The bound is generous because the reading
+ * legitimately moves a long way: 70.7 centred, 113 at 30 mm of error. Beyond
+ * about 130 the beam is almost certainly not on the robot's own corridor wall.
+ *
+ * TIGHTEN if phantom corrections appear at junctions. LOOSEN if the follower
+ * keeps dropping to the side pair in ordinary corridors -- tm_wf_src says
+ * which reference it actually used. */
+/* Reading-space window on ONE angled beam. Centred reads ~88; at 30 mm of
+ * lateral error the near beam reads ~45 and the far one ~130. The bounds sit
+ * outside that range with margin, so an honest beam is never rejected -- only
+ * one that has left the corridor entirely. */
+#define TOF_ANGLED_MIN_MM 35U
+#define TOF_ANGLED_MAX_MM 150U
+
+/* Consistency check on the PAIR, mm.
+ *
+ * Both beams hitting the two walls of one corridor sum to a value set by the
+ * corridor width alone -- 2*70.7 = 141 mm nominal -- whatever the robot's
+ * lateral position, because moving left lengthens one path exactly as much as
+ * it shortens the other. A sum far from that means at least one beam is not on
+ * the wall it is taken to be.
+ *
+ * Same idea as WALL_FOLLOW_SPAN_MM for the side pair, and the same trap: set
+ * the tolerance too tight and genuine pairs get rejected into the fallback
+ * path. Hiruna's note on that constant records half of all two-wall cells
+ * being thrown away exactly that way, so this starts deliberately loose. */
+/* Reading-space, = 2 * TOF_ANGLED_NOMINAL_MM. Was 141.4 (true geometry)
+ * against a real sum of ~175, so the pair sat 1 mm inside the window's edge
+ * and any noise pushed it out. That single constant is why the angled
+ * centring almost never engaged. */
+#define TOF_ANGLED_SPAN_MM 175.4f
+#define TOF_ANGLED_SPAN_TOL_MM 40.0f
+
+/* ===================== MAZE MILESTONE LED PATTERNS ======================= */
+/* The robot has no screen. These are how it says where it is in the run.    */
+/*                                                                          */
+/* Driven from API_setColor() in mms_api.c, which the flood fill already     */
+/* calls at both milestones -- so the algorithm itself is untouched and      */
+/* tests/floodfill_diff.sh still passes.                                     */
+/*                                                                          */
+/* THEY MUST NOT LOOK LIKE THE PATTERNS ALREADY IN USE:                      */
+/*   3 slow blinks at boot       = IMU up                                    */
+/*   6 fast blinks at boot       = IMU absent, or ToF init failed (2 fast)   */
+/*   1 Hz forever (100/900 ms)   = a test halted on a full trace buffer      */
+/*   continuous fast toggle      = a ToF test running                        */
+/*                                                                          */
+/* Hence long-short-short for the goal: a rhythm, not a rate, which is the   */
+/* one thing none of the above uses and the only thing readable across a     */
+/* maze. */
+
+/* GOAL REACHED -- all four centre cells confirmed visited. */
+#define MAZE_GOAL_BLINK_REPEATS   3U
+#define MAZE_GOAL_BLINK_LONG_MS   400U
+#define MAZE_GOAL_BLINK_SHORT_MS  120U
+#define MAZE_GOAL_BLINK_GAP_MS    120U
+#define MAZE_GOAL_BLINK_PAUSE_MS  400U   /* silence between repeats */
+
+/* BACK AT THE START, about to begin the speed run. Even blinks, clearly not
+ * the goal rhythm. */
+#define MAZE_START_BLINK_COUNT    5U
+#define MAZE_START_BLINK_MS       150U
 
 /* ========================= Completion criteria =========================== */
 
 /* How close (cm) counts as "arrived" for straightline moves. */
-#define STRAIGHT_TOLERANCE_CM       0.7f
+/* HELD AT 1.5. It was briefly taken to 2.5 alongside the breakaway pulse and
+ * put back deliberately, and the reasoning is worth keeping.
+ *
+ * Widening the band would have made the last failure pass. It stopped 1.80 cm
+ * short, so at 2.5 it simply completes. But it completes because the band was
+ * moved to fit the failure, not because anything got better -- the robot is
+ * still stuck, and the pulse that exists to unstick it never fires, because
+ * being outside tolerance is precisely what arms it. A wider band does not
+ * solve the problem, it hides the evidence that the problem is still there.
+ *
+ * TURN_TOLERANCE_DEG was widened on the opposite reasoning and that difference
+ * matters. There the robot had ALREADY finished the move under control and
+ * simply stopped a few degrees out, with proven machinery downstream to absorb
+ * it. Here the robot has stopped dead and cannot restart. One is a landing
+ * slightly off the mark; the other is a failure to move at all.
+ *
+ * So this stays tight enough that a stuck robot is reported as stuck. If the
+ * pulse works, these moves complete on their own; if it does not, that shows
+ * up as a timeout with sl_breakaway_count at its limit, which is the honest
+ * answer and the one that says what to fix next.
+ *
+ * IT STAYS AT 1.5 EVEN THOUGH A TURN CONVERTS IT INTO LATERAL ERROR, and the
+ * reason is that narrowing it now would fight the speed gate rather than help.
+ *
+ * A move completes when the robot is inside the band AND has stopped, and
+ * arrival is latched at the first moment it is close enough -- see
+ * STRAIGHT_SETTLE_SPEED_CMS. Where the robot finally comes to rest is then
+ * decided by braking, not by this number. Narrowing the band would not place
+ * the robot better; it would only delay the latch until later in the
+ * deceleration, leaving less room to stop and making a timeout more likely.
+ * The band decides when to commit to stopping, and committing early is what
+ * makes the stop accurate.
+ *
+ * Previous note, from when it went 0.7 -> 1.5:
+ *
+ * There is NO SECOND CHANCE on a straight move: the profile brings the robot
+ * to rest, and from rest it cannot restart at the command a sub-centimetre
+ * error produces. So the move has to land inside the band first time, and a
+ * band narrower than the landing scatter just guarantees a timeout. */
+#define STRAIGHT_TOLERANCE_CM 1.5f
 
 /* How close (degrees of fused yaw) counts as "arrived" for turns. */
-#define TURN_TOLERANCE_DEG          1.0f
+/* WIDENED AGAIN, 2.0 -> 5.0, and this time on the architecture rather than on
+ * the controller's repeatability.
+ *
+ * THE HEADING TARGET IS ABSOLUTE AND CONTINUOUS. Every turn aims at an exact
+ * multiple of 90 in a heading that accumulates across the whole run, so a turn
+ * that finishes 4 degrees short does not push the next one 4 degrees off -- the
+ * next move inherits the gap as an ordinary setpoint error and the straight
+ * line's own yaw loop closes it. Errors do not compound here; they are handed
+ * forward and paid off. That was true when the band was 2.0 as well, but there
+ * was no evidence yet that the machinery downstream actually worked. There is
+ * now: fused heading hold, two-wall lateral centring, front-wall alignment and
+ * the drift bleed all measurably do their job.
+ *
+ * WHAT IT COSTS. An inherited heading error becomes lateral drift over the
+ * following cell, 192*sin(e), of which the lateral loop removes about 80%:
+ *
+ *     2 deg ->  6.7 mm of drift, ~1.3 mm surviving
+ *     5 deg -> 16.7 mm of drift, ~3.2 mm surviving
+ *     8 deg -> 26.7 mm of drift, ~5.1 mm surviving
+ *
+ * Against roughly 35 mm of side clearance, 5 degrees is comfortable and 8 is
+ * not somewhere to go.
+ *
+ * WHAT IT MUST STILL CATCH. Every turn miss recorded on this robot falls into
+ * two clearly separated groups: 3.67, 4.25 and 5.26 degrees for turns that
+ * completed their profile and simply stopped outside the band, against 9.53 and
+ * 31.25 for turns that physically jammed against a wall. A 5 degree band
+ * accepts the first group and still rejects the second, which is the
+ * distinction worth making -- an overshoot is absorbed downstream, a jam means
+ * the robot is not where the map says and the run must stop.
+ *
+ * Note this does NOT relax the rate check: TURN_SETTLE_RATE_DPS still has to be
+ * satisfied, so a robot swinging through the band at speed cannot claim the
+ * move. Widening the band only forgives where it stops, never how fast.
+ *
+ * Previous note, still relevant, from the 1.0 -> 2.0 change: */
+/* Widened 1.0 -> 2.0.
+ *
+ * Not a retreat: it is the tolerance that was failing moves, not the motion.
+ * Across the last three runs every single failure landed between 1.0 and 1.4
+ * degrees -- the controller's real repeatability is about +/-1.4, and a 1.0
+ * band sits inside its own noise.
+ *
+ * 2.0 is also what the architecture downstream actually needs. Heading error
+ * after a turn is absorbed by the wall-following straight that follows it, and
+ * over one 18 cm cell 2 degrees is ~6 mm of lateral drift against ~35 mm of
+ * clearance. Demanding better from the turn buys nothing the next move does
+ * not already provide. */
+#define TURN_TOLERANCE_DEG 5.0f
 
 /* A turn only completes when the robot is both within tolerance AND rotating
  * slower than this (deg/s). Without the rate check the controller can declare
  * success while spinning through the target. */
-#define TURN_SETTLE_RATE_DPS        8.0f
+#define TURN_SETTLE_RATE_DPS 8.0f
 
 /* The move is only considered complete once the robot has been inside the
  * tolerance band for this many consecutive control cycles. Prevents declaring
  * success while still coasting through the target at speed. */
-#define CONTROL_SETTLE_CYCLES       5
+#define CONTROL_SETTLE_CYCLES 5
 
 /* Safety timeout: abort a move that has not completed within this many ms. */
-#define CONTROL_MOVE_TIMEOUT_MS     8000U
+#define CONTROL_MOVE_TIMEOUT_MS 8000U
 
 #endif /* CONTROL_CONFIG_H */

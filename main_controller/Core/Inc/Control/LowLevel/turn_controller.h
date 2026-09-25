@@ -2,7 +2,7 @@
 #define TURN_CONTROLLER_H
 
 #include "PID.h"
-#include "EKF.h"
+#include "yaw_estimator.h"
 #include "encoders.h"
 #include "DRV8833.h"
 #include "ICM42688.h"
@@ -59,31 +59,13 @@ typedef enum {
 
 } TurnState_t;
 
-/* Outcome of the stationary gyro bias calibration.
- * Anything other than TURN_BIAS_OK means the EKF is running with an
- * unestimated (zero) gyro bias, which degrades turn accuracy silently. */
-typedef enum {
-
-    TURN_BIAS_NOT_RUN   = 0,  /* never attempted (e.g. no IMU detected)     */
-    TURN_BIAS_OK        = 1,  /* stationary average accepted and applied    */
-    TURN_BIAS_MOVING    = 2,  /* rejected: motion above IMU_GYRO_BIAS_MAX_DPS */
-    TURN_BIAS_IMU_ERROR = 3   /* aborted: a gyro read failed mid-sweep      */
-
-} TurnBiasCalStatus_t;
-
-/* Debugging / live-watch. Volatile because their only purpose is to be read
- * from outside the firmware (live watch / raw SWD memory reads). */
+/* Debugging / live-watch. Controller state only -- everything about the yaw
+ * ESTIMATE (fused yaw, encoder yaw, gyro rate/bias, filter counters, bias
+ * calibration status) now lives in yaw_estimator.h, because turns are no
+ * longer its only consumer. */
 extern volatile float turn_target_yaw_deg;
-extern volatile float turn_fused_yaw_deg;
-extern volatile float turn_encoder_yaw_deg;
 extern volatile float turn_yaw_error_deg;   /* control error: target - fused */
-extern volatile float turn_fusion_gap_deg;  /* fused - encoder (ObserveYaw)  */
-extern volatile float turn_gyro_rate_dps;
-extern volatile float turn_gyro_bias_dps;
 extern volatile float turn_basespeed;
-extern volatile uint32_t turn_predict_count;
-extern volatile uint32_t turn_update_count;
-extern volatile uint32_t turn_reject_count;
 
 /* Integral state. turn_int_limit says which clamp is in force right now
  * (TURN_INT_LIMIT_MOVING or the raised TURN_INT_LIMIT), and turn_stall_boosts
@@ -93,25 +75,55 @@ extern volatile float    turn_integrator;
 extern volatile float    turn_int_limit;
 extern volatile uint32_t turn_stall_boosts;
 
-/* Failed gyro reads. Non-zero means fused yaw lost integration intervals and
- * is under-reading rotation -- indistinguishable from encoder over-read due
- * to wheel slip unless you check this counter. */
-extern volatile uint32_t turn_imu_fail_count;
+/* Profile tracking. turn_profile_err_deg is the error the PID actually sees,
+ * which is NOT turn_yaw_error_deg -- that one is distance from the final
+ * target and is legitimately large mid-move. Judge tracking by the first and
+ * the result by the second.
+ *
+ * turn_ff_cmd / turn_fb_cmd split the command into feedforward and feedback.
+ * Mid-cruise the feedback half should hover near zero; a consistent bias
+ * there means TURN_FF_GAIN needs trimming. */
+extern volatile float turn_profile_ref_deg;
+extern volatile float turn_profile_err_deg;
+extern volatile float turn_ff_cmd;
+extern volatile float turn_fb_cmd;
+extern volatile float turn_profile_duration_s;
 
-extern volatile TurnBiasCalStatus_t turn_bias_cal_status;
+/* Absolute heading bookkeeping. turn_heading_target_deg is an exact multiple
+ * of 90 for the whole run; the gap between it and yaw_fused_deg is the
+ * accumulated heading error that the next move inherits and corrects. */
+/* Per-cycle trace of the LAST move, reset at the start of each one.
+ *
+ * The end-of-move snapshot cannot calibrate a feedforward: by then both
+ * reference velocity and acceleration are zero, so the split between ff and fb
+ * says nothing about how the ramps went. This records the whole move so the
+ * gains can be fitted rather than guessed -- two guesses in a row have now
+ * each made things worse in a different direction. */
+#define TURN_TRACE_CAPACITY 100U
 
-/* Sweeps the calibration needed (1 = clean first try), and the worst single
- * gyro sample on the last sweep -- i.e. what the IMU_GYRO_BIAS_MAX_DPS test
- * was actually judging. */
-extern volatile uint32_t turn_bias_cal_attempts;
-extern volatile float    turn_bias_cal_peak_dps;
+typedef struct {
+  float t_s;       /* since move start                              */
+  float ref_deg;   /* profile reference, relative to the move start */
+  float act_deg;   /* fused yaw, relative to the move start         */
+  float ff;        /* feedforward half of the command               */
+  float fb;        /* feedback half                                 */
+} TurnTrace_t;
+
+_Static_assert(sizeof(TurnTrace_t) == 20,
+               "TurnTrace_t stride changed: update the SWD telemetry reader");
+
+extern volatile TurnTrace_t tm_turn_trace[TURN_TRACE_CAPACITY];
+extern volatile uint32_t    tm_turn_trace_count;
+
+extern volatile float turn_heading_target_deg;
+extern volatile float turn_heading_error_deg;
+
+/* Current absolute heading target, for the straight-line controller to hold. */
+float TurnController_GetHeadingTargetDeg(void);
+void  TurnController_SetHeadingTargetDeg(float deg);
 
 //Function prototypes
 
-/* Initialise the controller: encoders, motor driver, IMU and EKF.
- * Also performs the stationary gyro bias calibration, so THE ROBOT MUST BE
- * STILL when this is called. Returns 1 if the IMU came up, 0 if the
- * controller fell back to encoder-only mode. */
 uint8_t TurnController_Init(void);
 
 /* Re-run the stationary gyro bias calibration. Robot must be still.
